@@ -22,6 +22,9 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/llmgate/provider/anthropic"
+	"github.com/hallelx2/llmgate/provider/gemini"
+	"github.com/hallelx2/llmgate/provider/openai"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -199,19 +202,19 @@ func buildQueue(c config.QueueConfig, dbURL string) (queue.Queue, error) {
 func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
 	switch c.Driver {
 	case "anthropic":
-		return llmgate.NewAnthropic(llmgate.AnthropicConfig{
+		return anthropic.New(anthropic.Config{
 			APIKey:         c.Anthropic.APIKey,
 			Model:          c.Anthropic.Model,
 			ReasoningModel: c.Anthropic.ReasoningModel,
 		})
 	case "openai":
-		return llmgate.NewOpenAI(llmgate.OpenAIConfig{
+		return openai.New(openai.Config{
 			APIKey:         c.OpenAI.APIKey,
 			Model:          c.OpenAI.Model,
 			ReasoningModel: c.OpenAI.ReasoningModel,
 		})
 	case "gemini":
-		return llmgate.NewGemini(llmgate.GeminiConfig{
+		return gemini.New(gemini.Config{
 			APIKey:         c.Gemini.APIKey,
 			Model:          c.Gemini.Model,
 			ReasoningModel: c.Gemini.ReasoningModel,
