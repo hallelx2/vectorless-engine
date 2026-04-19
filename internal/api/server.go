@@ -10,7 +10,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -46,6 +48,7 @@ func Router(d Deps) http.Handler {
 		r.Get("/version", d.handleVersion)
 
 		r.Route("/documents", func(r chi.Router) {
+			r.Get("/", d.handleListDocuments)
 			r.Post("/", d.handleIngestDocument)
 			r.Get("/{id}", d.handleGetDocument)
 			r.Delete("/{id}", d.handleDeleteDocument)
@@ -70,6 +73,50 @@ func (d Deps) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- ingest / documents ---
+
+// handleListDocuments returns a page of documents, most-recent first.
+// Query params: limit (1..200, default 50), status, cursor (RFC3339
+// created_at from the previous page's next_cursor).
+func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	opts := db.ListDocumentsOpts{
+		Status: db.DocumentStatus(q.Get("status")),
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.Limit = n
+		}
+	}
+	if v := q.Get("cursor"); v != "" {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			opts.Cursor = t
+		}
+	}
+
+	docs, next, err := d.DB.ListDocuments(r.Context(), opts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	items := make([]map[string]any, 0, len(docs))
+	for _, doc := range docs {
+		items = append(items, map[string]any{
+			"id":           doc.ID,
+			"title":        doc.Title,
+			"content_type": doc.ContentType,
+			"status":       string(doc.Status),
+			"byte_size":    doc.ByteSize,
+			"created_at":   doc.CreatedAt,
+			"updated_at":   doc.UpdatedAt,
+		})
+	}
+	resp := map[string]any{"items": items}
+	if !next.IsZero() {
+		resp["next_cursor"] = next.Format(time.RFC3339Nano)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
 // handleIngestDocument accepts a document via either multipart/form-data
 // (field name: "file") or a JSON body { "content": "...", "filename": "..." }.

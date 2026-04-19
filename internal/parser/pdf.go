@@ -69,6 +69,16 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		}, nil
 	}
 
+	// If the PDF ships with a real outline (bookmarks), use it as ground
+	// truth for structure — beats any font-size heuristic. We still rely
+	// on row extraction for section bodies by matching outline titles
+	// against the first occurrence of that text in the row stream.
+	if outline := reader.Outline(); len(outline.Child) > 0 {
+		if doc, ok := parsePDFWithOutline(outline, rows); ok {
+			return doc, nil
+		}
+	}
+
 	// Median font size — our reference for "normal body text".
 	sizes := make([]float64, 0, len(rows))
 	for _, r := range rows {
@@ -282,6 +292,135 @@ func buildHeadingLevelMap(rows []pdfRow, floor float64) map[int]int {
 // often jitter by a fraction of a point.
 func roundSize(s float64) int {
 	return int(s*2 + 0.5)
+}
+
+// parsePDFWithOutline builds a ParsedDoc using the PDF's /Outlines as
+// the structural ground truth. For each outline entry (depth-first,
+// pre-order) we scan forward through rows starting at the last match
+// position and treat the first matching row as that heading. Content
+// between one outline match and the next is the preceding heading's
+// body.
+//
+// Returns ok=false if we can't match enough outline entries to rows —
+// in which case the caller falls back to the font-size heuristic.
+func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, bool) {
+	// Flatten outline to (level, title) pairs via depth-first walk.
+	type entry struct {
+		level int
+		title string
+	}
+	var flat []entry
+	var walk func(nodes []pdflib.Outline, depth int)
+	walk = func(nodes []pdflib.Outline, depth int) {
+		lvl := depth + 1
+		if lvl > 6 {
+			lvl = 6
+		}
+		for _, n := range nodes {
+			t := strings.TrimSpace(n.Title)
+			if t != "" {
+				flat = append(flat, entry{level: lvl, title: t})
+			}
+			walk(n.Child, depth+1)
+		}
+	}
+	walk(outline.Child, 0)
+	if len(flat) == 0 {
+		return nil, false
+	}
+
+	// Match each outline title to the first row at or after the cursor
+	// whose normalized text begins with the normalized title. This is
+	// forgiving of trailing page numbers, section numbering prefixes the
+	// outline sometimes omits, etc.
+	type matched struct {
+		level   int
+		title   string
+		rowIdx  int // index into rows where this heading starts
+	}
+	var chosen []matched
+	cursor := 0
+	for _, e := range flat {
+		want := normalizeForMatch(e.title)
+		found := -1
+		for i := cursor; i < len(rows); i++ {
+			if strings.HasPrefix(normalizeForMatch(rows[i].text), want) {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			continue
+		}
+		chosen = append(chosen, matched{level: e.level, title: e.title, rowIdx: found})
+		cursor = found + 1
+	}
+	// Require at least half the outline to match, otherwise the outline
+	// likely doesn't describe the text we extracted (encrypted fonts,
+	// weird glyph mappings) and we should fall back.
+	if len(chosen)*2 < len(flat) {
+		return nil, false
+	}
+
+	// Assemble sections: body text is the concatenation of rows between
+	// one match and the next (exclusive).
+	rootSec := &Section{Level: 0}
+	stack := []*Section{rootSec}
+	for i, m := range chosen {
+		end := len(rows)
+		if i+1 < len(chosen) {
+			end = chosen[i+1].rowIdx
+		}
+		var body strings.Builder
+		for _, row := range rows[m.rowIdx+1 : end] {
+			text := strings.TrimSpace(row.text)
+			if text == "" {
+				continue
+			}
+			if body.Len() > 0 {
+				body.WriteByte(' ')
+			}
+			body.WriteString(text)
+		}
+		sec := Section{Level: m.level, Title: m.title, Content: body.String()}
+		for len(stack) > 1 && stack[len(stack)-1].Level >= sec.Level {
+			stack = stack[:len(stack)-1]
+		}
+		parent := stack[len(stack)-1]
+		parent.Children = append(parent.Children, sec)
+		tail := &parent.Children[len(parent.Children)-1]
+		stack = append(stack, tail)
+	}
+
+	title := ""
+	if len(rootSec.Children) > 0 {
+		title = rootSec.Children[0].Title
+	}
+
+	return &ParsedDoc{
+		Title:    title,
+		Sections: rootSec.Children,
+	}, true
+}
+
+// normalizeForMatch lowercases, strips punctuation, and collapses
+// whitespace so outline titles match row text despite cosmetic drift.
+func normalizeForMatch(s string) string {
+	var b strings.Builder
+	prevSpace := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevSpace = false
+		case r == ' ' || r == '\t' || r == '\n':
+			if !prevSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func looksLikeHeading(s string) bool {

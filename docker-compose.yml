@@ -45,7 +45,34 @@ services:
       timeout: 3s
       retries: 10
 
+  # The engine itself. Gated behind a profile so the default
+  # `docker compose up -d` brings up only the backing services — devs
+  # run `go run ./cmd/engine` locally for fast iteration. To run the
+  # whole stack containerised use `docker compose --profile engine up`.
+  engine:
+    profiles: ["engine"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      VLE_DATABASE_URL: "postgres://vectorless:vectorless@postgres:5432/vectorless?sslmode=disable"
+      VLE_SERVER_ADDR: ":8080"
+      VLE_STORAGE_DRIVER: "local"
+      VLE_QUEUE_DRIVER: "river"
+      VLE_LLM_DRIVER: "anthropic"
+      VLE_LOG_LEVEL: "info"
+      VLE_ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    ports:
+      - "8080:8080"
+    volumes:
+      - enginedata:/data
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
   miniodata:
+  enginedata:

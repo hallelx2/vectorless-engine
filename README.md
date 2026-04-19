@@ -108,6 +108,14 @@ docker compose up -d postgres
 go run ./cmd/engine --config config.yaml
 ```
 
+Or run the whole stack containerised:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+docker compose --profile engine up --build
+# engine → http://localhost:8080
+```
+
 The engine listens on `:8080` by default:
 
 ```bash
@@ -142,6 +150,7 @@ curl -X POST http://localhost:8080/v1/query \
 |--------|-------------------------------|----------------------------------------|
 | GET    | `/v1/health`                  | Liveness probe                         |
 | GET    | `/v1/version`                 | Engine version                         |
+| GET    | `/v1/documents`               | List documents (paginated; `?status`, `?limit`, `?cursor`) |
 | POST   | `/v1/documents`               | Ingest a document (async, returns 202) |
 | GET    | `/v1/documents/{id}`          | Document metadata + status             |
 | DELETE | `/v1/documents/{id}`          | Delete a document                      |
