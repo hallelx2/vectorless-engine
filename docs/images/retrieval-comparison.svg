@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" role="img" aria-label="Traditional RAG vs. vectorless comparison">
+  <rect width="1000" height="540" fill="#f8fafc"/>
+
+  <!-- Left column: traditional RAG -->
+  <g font-family="ui-sans-serif, system-ui">
+    <rect x="30" y="30" width="450" height="490" rx="14" fill="#fef2f2" stroke="#fecaca" stroke-width="2"/>
+    <text x="255" y="65" text-anchor="middle" font-size="20" font-weight="800" fill="#991b1b">Traditional RAG</text>
+    <text x="255" y="88" text-anchor="middle" font-size="13" fill="#9f1239">chunk · embed · top-K</text>
+
+    <!-- Steps -->
+    <g transform="translate(70 120)">
+      <!-- Step 1: document -->
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#fca5a5"/>
+      <text x="24" y="32" font-size="18">📄</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">1. Chunk document</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">split into 512-token fragments, losing structure</text>
+    </g>
+
+    <g transform="translate(70 190)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#fca5a5"/>
+      <text x="24" y="32" font-size="18">🔢</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">2. Embed every chunk</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">expensive at ingest AND for each query</text>
+    </g>
+
+    <g transform="translate(70 260)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#fca5a5"/>
+      <text x="24" y="32" font-size="18">🗄</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">3. Store in vector DB</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">extra infra · pgvector, Pinecone, Qdrant…</text>
+    </g>
+
+    <g transform="translate(70 330)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#fca5a5"/>
+      <text x="24" y="32" font-size="18">🎯</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">4. Query → top-K chunks</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">cosine similarity — is 5 enough? 10? 20?</text>
+    </g>
+
+    <g transform="translate(70 400)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#fca5a5"/>
+      <text x="24" y="32" font-size="18">🧩</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">5. Answer from fragments</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">chunks torn from context; model must stitch meaning</text>
+    </g>
+
+    <text x="255" y="500" text-anchor="middle" font-size="11" fill="#9f1239" font-style="italic">tuning top-K forever · embeddings drift · vendor lock</text>
+  </g>
+
+  <!-- Right column: vectorless -->
+  <g font-family="ui-sans-serif, system-ui">
+    <rect x="520" y="30" width="450" height="490" rx="14" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/>
+    <text x="745" y="65" text-anchor="middle" font-size="20" font-weight="800" fill="#065f46">Vectorless</text>
+    <text x="745" y="88" text-anchor="middle" font-size="13" fill="#047857">tree · reason · full sections</text>
+
+    <g transform="translate(560 120)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+      <text x="24" y="32" font-size="18">🌳</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">1. Build a structured tree</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">titles, summaries, metadata — like an LLM-friendly TOC</text>
+    </g>
+
+    <g transform="translate(560 190)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+      <text x="24" y="32" font-size="18">💾</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">2. Store the tree + full sections</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">Postgres + object storage · no new infra</text>
+    </g>
+
+    <g transform="translate(560 260)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+      <text x="24" y="32" font-size="18">🧠</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">3. Query → LLM reads the tree</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">one call (small doc) or parallel map-reduce (big doc)</text>
+    </g>
+
+    <g transform="translate(560 330)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+      <text x="24" y="32" font-size="18">🎯</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">4. Model picks exact section IDs</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">needs 1? gets 1. needs 8? gets 8. no guessing.</text>
+    </g>
+
+    <g transform="translate(560 400)">
+      <rect width="370" height="52" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+      <text x="24" y="32" font-size="18">📖</text>
+      <text x="60" y="25" font-size="13" font-weight="700" fill="#1e293b">5. Return full, coherent sections</text>
+      <text x="60" y="42" font-size="11" fill="#64748b">narrative intact · reasoning-ready · cite-able</text>
+    </g>
+
+    <text x="745" y="500" text-anchor="middle" font-size="11" fill="#047857" font-style="italic">no top-K · no vector DB · no embeddings drift</text>
+  </g>
+</svg>

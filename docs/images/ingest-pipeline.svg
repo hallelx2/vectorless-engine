@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 420" role="img" aria-label="Ingest pipeline: parse → split → summarize → tree">
+  <rect width="1100" height="420" fill="#f8fafc"/>
+
+  <text x="550" y="40" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="22" font-weight="800" fill="#0f172a">Ingest pipeline</text>
+  <text x="550" y="62" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" fill="#475569">raw document → structured, queryable tree (asynchronous · queue-driven)</text>
+
+  <!-- Lane: queue -->
+  <rect x="40" y="90" width="1020" height="220" rx="14" fill="#eef2ff" stroke="#6366f1" stroke-width="2"/>
+  <text x="60" y="112" font-family="ui-sans-serif, system-ui" font-size="12" font-weight="700" fill="#4338ca">background workers · QStash / River / Asynq</text>
+
+  <!-- Stages -->
+  <g font-family="ui-sans-serif, system-ui" font-size="12">
+    <!-- Upload -->
+    <g transform="translate(70 140)">
+      <rect width="160" height="140" rx="10" fill="#ffffff" stroke="#0ea5e9" stroke-width="2"/>
+      <text x="80" y="28" text-anchor="middle" font-size="22">📤</text>
+      <text x="80" y="60" text-anchor="middle" font-weight="700" fill="#0c4a6e">Upload</text>
+      <text x="80" y="82" text-anchor="middle" fill="#475569">PDF · MD · HTML</text>
+      <text x="80" y="100" text-anchor="middle" fill="#475569">DOCX · TXT</text>
+      <text x="80" y="122" text-anchor="middle" fill="#64748b" font-size="11">POST /v1/documents</text>
+    </g>
+
+    <!-- Parse -->
+    <g transform="translate(260 140)">
+      <rect width="160" height="140" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+      <text x="80" y="28" text-anchor="middle" font-size="22">📑</text>
+      <text x="80" y="60" text-anchor="middle" font-weight="700" fill="#312e81">Parse</text>
+      <text x="80" y="82" text-anchor="middle" fill="#475569">headings · TOC</text>
+      <text x="80" y="100" text-anchor="middle" fill="#475569">paragraphs · lists</text>
+      <text x="80" y="122" text-anchor="middle" fill="#64748b" font-size="11">structural extraction</text>
+    </g>
+
+    <!-- Split -->
+    <g transform="translate(450 140)">
+      <rect width="160" height="140" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+      <text x="80" y="28" text-anchor="middle" font-size="22">✂️</text>
+      <text x="80" y="60" text-anchor="middle" font-weight="700" fill="#312e81">Section</text>
+      <text x="80" y="82" text-anchor="middle" fill="#475569">semantic boundaries</text>
+      <text x="80" y="100" text-anchor="middle" fill="#475569">not blind chunks</text>
+      <text x="80" y="122" text-anchor="middle" fill="#64748b" font-size="11">hierarchy preserved</text>
+    </g>
+
+    <!-- Summarize -->
+    <g transform="translate(640 140)">
+      <rect width="160" height="140" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="80" y="28" text-anchor="middle" font-size="22">✨</text>
+      <text x="80" y="60" text-anchor="middle" font-weight="700" fill="#115e59">Summarize</text>
+      <text x="80" y="82" text-anchor="middle" fill="#475569">per-section titles</text>
+      <text x="80" y="100" text-anchor="middle" fill="#475569">terse descriptions</text>
+      <text x="80" y="122" text-anchor="middle" fill="#64748b" font-size="11">LLM · cheap model</text>
+    </g>
+
+    <!-- Tree -->
+    <g transform="translate(830 140)">
+      <rect width="160" height="140" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+      <text x="80" y="28" text-anchor="middle" font-size="22">🌳</text>
+      <text x="80" y="60" text-anchor="middle" font-weight="700" fill="#14532d">Persist tree</text>
+      <text x="80" y="82" text-anchor="middle" fill="#475569">Postgres: metadata</text>
+      <text x="80" y="100" text-anchor="middle" fill="#475569">S3: full sections</text>
+      <text x="80" y="122" text-anchor="middle" fill="#64748b" font-size="11">ready to query</text>
+    </g>
+  </g>
+
+  <!-- Arrows -->
+  <g stroke="#6366f1" stroke-width="2.5" fill="none" stroke-linecap="round">
+    <path d="M230 210 L260 210"/>
+    <path d="M250 204 L260 210 L250 216"/>
+    <path d="M420 210 L450 210"/>
+    <path d="M440 204 L450 210 L440 216"/>
+    <path d="M610 210 L640 210"/>
+    <path d="M630 204 L640 210 L630 216"/>
+    <path d="M800 210 L830 210"/>
+    <path d="M820 204 L830 210 L820 216"/>
+  </g>
+
+  <text x="550" y="360" text-anchor="middle" font-family="ui-monospace, Menlo" font-size="12" fill="#475569">status transitions: pending → parsing → summarizing → ready   (polled via GET /v1/documents/{id})</text>
+  <text x="550" y="386" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="12" font-style="italic" fill="#64748b">no embeddings generated · no vector index built · no similarity math</text>
+</svg>

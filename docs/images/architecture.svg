@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" role="img" aria-label="vectorless-engine architecture diagram">
+  <rect width="1000" height="640" fill="#f8fafc"/>
+
+  <!-- Clients (top) -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system" font-size="13">
+    <g transform="translate(60 30)">
+      <rect width="170" height="70" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+      <text x="85" y="28" text-anchor="middle" font-weight="700" fill="#1e293b">Dashboard</text>
+      <text x="85" y="48" text-anchor="middle" fill="#475569" font-size="11">Next.js web UI</text>
+      <text x="85" y="62" text-anchor="middle" fill="#64748b" font-size="11">private</text>
+    </g>
+
+    <g transform="translate(260 30)">
+      <rect width="170" height="70" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="85" y="28" text-anchor="middle" font-weight="700" fill="#1e293b">MCP Server</text>
+      <text x="85" y="48" text-anchor="middle" fill="#475569" font-size="11">SSE · agents</text>
+      <text x="85" y="62" text-anchor="middle" fill="#64748b" font-size="11">private / hosted</text>
+    </g>
+
+    <g transform="translate(460 30)">
+      <rect width="170" height="70" rx="10" fill="#ffffff" stroke="#f59e0b" stroke-width="2"/>
+      <text x="85" y="28" text-anchor="middle" font-weight="700" fill="#1e293b">SDKs</text>
+      <text x="85" y="48" text-anchor="middle" fill="#475569" font-size="11">TS · Python · Go</text>
+      <text x="85" y="62" text-anchor="middle" fill="#64748b" font-size="11">open source</text>
+    </g>
+
+    <g transform="translate(660 30)">
+      <rect width="170" height="70" rx="10" fill="#ffffff" stroke="#64748b" stroke-width="2"/>
+      <text x="85" y="28" text-anchor="middle" font-weight="700" fill="#1e293b">Your App</text>
+      <text x="85" y="48" text-anchor="middle" fill="#475569" font-size="11">HTTP API</text>
+      <text x="85" y="62" text-anchor="middle" fill="#64748b" font-size="11">any language</text>
+    </g>
+  </g>
+
+  <!-- Control plane -->
+  <g transform="translate(220 130)" font-family="ui-sans-serif, system-ui">
+    <rect width="560" height="56" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="280" y="25" text-anchor="middle" font-weight="700" fill="#92400e" font-size="14">Control Plane</text>
+    <text x="280" y="44" text-anchor="middle" fill="#78350f" font-size="12">auth · API keys · quotas · usage · billing (private)</text>
+  </g>
+
+  <!-- Engine box -->
+  <g transform="translate(60 220)">
+    <rect width="880" height="290" rx="14" fill="#eef2ff" stroke="#6366f1" stroke-width="2.5"/>
+
+    <text x="440" y="34" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="18" font-weight="800" fill="#312e81">vectorless-engine (Go binary)</text>
+    <text x="440" y="54" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="12" fill="#4338ca">open source · Apache 2.0</text>
+
+    <!-- HTTP API -->
+    <g transform="translate(40 74)">
+      <rect width="800" height="48" rx="8" fill="#ffffff" stroke="#6366f1"/>
+      <text x="400" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" font-weight="700" fill="#1e293b">HTTP API  /v1</text>
+      <text x="400" y="37" text-anchor="middle" font-family="ui-monospace, Menlo" font-size="11" fill="#475569">/documents · /query · /sections · /tree</text>
+    </g>
+
+    <!-- Core subsystems row -->
+    <g font-family="ui-sans-serif, system-ui" font-size="12">
+      <g transform="translate(40 144)">
+        <rect width="180" height="110" rx="8" fill="#ffffff" stroke="#818cf8"/>
+        <text x="90" y="22" text-anchor="middle" font-weight="700" fill="#1e293b">Ingest</text>
+        <text x="90" y="44" text-anchor="middle" fill="#475569">parse</text>
+        <text x="90" y="62" text-anchor="middle" fill="#475569">split</text>
+        <text x="90" y="80" text-anchor="middle" fill="#475569">summarize</text>
+        <text x="90" y="98" text-anchor="middle" fill="#475569">build tree</text>
+      </g>
+
+      <g transform="translate(240 144)">
+        <rect width="180" height="110" rx="8" fill="#ffffff" stroke="#818cf8"/>
+        <text x="90" y="22" text-anchor="middle" font-weight="700" fill="#1e293b">Tree Index</text>
+        <text x="90" y="44" text-anchor="middle" fill="#475569">documents</text>
+        <text x="90" y="62" text-anchor="middle" fill="#475569">sections</text>
+        <text x="90" y="80" text-anchor="middle" fill="#475569">summaries</text>
+        <text x="90" y="98" text-anchor="middle" fill="#475569">metadata</text>
+      </g>
+
+      <g transform="translate(440 144)">
+        <rect width="180" height="110" rx="8" fill="#ffffff" stroke="#14b8a6"/>
+        <text x="90" y="22" text-anchor="middle" font-weight="700" fill="#1e293b">Retrieval</text>
+        <text x="90" y="44" text-anchor="middle" fill="#475569">single-pass</text>
+        <text x="90" y="62" text-anchor="middle" fill="#475569">chunked-tree</text>
+        <text x="90" y="80" text-anchor="middle" fill="#475569">map-reduce</text>
+        <text x="90" y="98" text-anchor="middle" fill="#475569">pluggable</text>
+      </g>
+
+      <g transform="translate(640 144)">
+        <rect width="200" height="110" rx="8" fill="#ffffff" stroke="#f59e0b"/>
+        <text x="100" y="22" text-anchor="middle" font-weight="700" fill="#1e293b">LLM Client</text>
+        <text x="100" y="44" text-anchor="middle" fill="#475569">Anthropic</text>
+        <text x="100" y="62" text-anchor="middle" fill="#475569">OpenAI</text>
+        <text x="100" y="80" text-anchor="middle" fill="#475569">Gemini</text>
+        <text x="100" y="98" text-anchor="middle" fill="#475569">provider-agnostic</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Backends (bottom) -->
+  <g font-family="ui-sans-serif, system-ui" font-size="12">
+    <g transform="translate(60 530)">
+      <rect width="270" height="88" rx="10" fill="#ffffff" stroke="#0ea5e9" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-weight="700" fill="#0c4a6e">Storage</text>
+      <text x="135" y="42" text-anchor="middle" fill="#475569">Local · S3 · R2 · MinIO · B2</text>
+      <text x="135" y="60" text-anchor="middle" fill="#475569">DigitalOcean Spaces</text>
+      <text x="135" y="78" text-anchor="middle" fill="#64748b">GCS · Azure (planned)</text>
+    </g>
+
+    <g transform="translate(365 530)">
+      <rect width="270" height="88" rx="10" fill="#ffffff" stroke="#a855f7" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-weight="700" fill="#581c87">Queue</text>
+      <text x="135" y="42" text-anchor="middle" fill="#475569">QStash (serverless)</text>
+      <text x="135" y="60" text-anchor="middle" fill="#475569">River (Postgres)</text>
+      <text x="135" y="78" text-anchor="middle" fill="#475569">Asynq (Redis)</text>
+    </g>
+
+    <g transform="translate(670 530)">
+      <rect width="270" height="88" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+      <text x="135" y="22" text-anchor="middle" font-weight="700" fill="#14532d">Database</text>
+      <text x="135" y="42" text-anchor="middle" fill="#475569">Postgres</text>
+      <text x="135" y="60" text-anchor="middle" fill="#475569">documents · sections · jobs</text>
+      <text x="135" y="78" text-anchor="middle" fill="#64748b">pgx · sqlc</text>
+    </g>
+  </g>
+
+  <!-- Connectors -->
+  <g stroke="#94a3b8" stroke-width="1.5" fill="none">
+    <path d="M145 100 L145 130"/>
+    <path d="M345 100 L345 130"/>
+    <path d="M545 100 L545 130"/>
+    <path d="M745 100 L745 130"/>
+    <path d="M500 186 L500 220" stroke-dasharray="4 4"/>
+    <path d="M195 510 L195 530"/>
+    <path d="M500 510 L500 530"/>
+    <path d="M805 510 L805 530"/>
+  </g>
+</svg>

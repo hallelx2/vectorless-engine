@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 560" role="img" aria-label="Chunked-tree parallel reasoning over big documents">
+  <rect width="1100" height="560" fill="#f8fafc"/>
+
+  <text x="550" y="40" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="22" font-weight="800" fill="#0f172a">Chunked-tree reasoning</text>
+  <text x="550" y="62" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" fill="#475569">when the tree is bigger than the model's context window, split it — reason in parallel — merge</text>
+
+  <!-- Query -->
+  <g transform="translate(430 90)">
+    <rect width="240" height="54" rx="10" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
+    <text x="120" y="24" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" font-weight="700" fill="#312e81">User query</text>
+    <text x="120" y="42" text-anchor="middle" font-family="ui-monospace, Menlo" font-size="11" fill="#475569">"what are the API guarantees?"</text>
+  </g>
+
+  <!-- Full tree -->
+  <g transform="translate(380 170)">
+    <rect width="340" height="60" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="2"/>
+    <text x="170" y="26" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" font-weight="700" fill="#312e81">Structured tree (entire document)</text>
+    <text x="170" y="46" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="11" fill="#64748b">500 sections · 120k tokens of summaries — exceeds 32k context</text>
+  </g>
+
+  <!-- Splitter -->
+  <g transform="translate(470 250)">
+    <rect width="160" height="36" rx="8" fill="#f59e0b" opacity="0.95"/>
+    <text x="80" y="23" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="12" font-weight="700" fill="#ffffff">Splitter (budget-aware)</text>
+  </g>
+
+  <!-- Parallel workers -->
+  <g font-family="ui-sans-serif, system-ui" font-size="12">
+    <g transform="translate(70 320)">
+      <rect width="230" height="110" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="115" y="24" text-anchor="middle" font-weight="700" fill="#115e59">Slice 1 → LLM call</text>
+      <text x="115" y="46" text-anchor="middle" fill="#475569" font-size="11">breadcrumb: Part I</text>
+      <text x="115" y="64" text-anchor="middle" fill="#475569" font-size="11">sections 1–120</text>
+      <text x="115" y="86" text-anchor="middle" fill="#0f766e" font-family="ui-monospace, Menlo" font-size="11">picks: [s12, s44]</text>
+    </g>
+
+    <g transform="translate(320 320)">
+      <rect width="230" height="110" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="115" y="24" text-anchor="middle" font-weight="700" fill="#115e59">Slice 2 → LLM call</text>
+      <text x="115" y="46" text-anchor="middle" fill="#475569" font-size="11">breadcrumb: Part II</text>
+      <text x="115" y="64" text-anchor="middle" fill="#475569" font-size="11">sections 121–260</text>
+      <text x="115" y="86" text-anchor="middle" fill="#0f766e" font-family="ui-monospace, Menlo" font-size="11">picks: [s188]</text>
+    </g>
+
+    <g transform="translate(570 320)">
+      <rect width="230" height="110" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="115" y="24" text-anchor="middle" font-weight="700" fill="#115e59">Slice 3 → LLM call</text>
+      <text x="115" y="46" text-anchor="middle" fill="#475569" font-size="11">breadcrumb: Part III</text>
+      <text x="115" y="64" text-anchor="middle" fill="#475569" font-size="11">sections 261–380</text>
+      <text x="115" y="86" text-anchor="middle" fill="#0f766e" font-family="ui-monospace, Menlo" font-size="11">picks: []</text>
+    </g>
+
+    <g transform="translate(820 320)">
+      <rect width="210" height="110" rx="10" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/>
+      <text x="105" y="24" text-anchor="middle" font-weight="700" fill="#115e59">Slice 4 → LLM call</text>
+      <text x="105" y="46" text-anchor="middle" fill="#475569" font-size="11">breadcrumb: Appendix</text>
+      <text x="105" y="64" text-anchor="middle" fill="#475569" font-size="11">sections 381–500</text>
+      <text x="105" y="86" text-anchor="middle" fill="#0f766e" font-family="ui-monospace, Menlo" font-size="11">picks: [s472]</text>
+    </g>
+  </g>
+
+  <!-- Merge -->
+  <g transform="translate(430 460)">
+    <rect width="240" height="54" rx="10" fill="#065f46" opacity="0.95"/>
+    <text x="120" y="24" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" font-weight="700" fill="#ffffff">Merge policy (union · top-N · rank)</text>
+    <text x="120" y="42" text-anchor="middle" font-family="ui-monospace, Menlo" font-size="11" fill="#a7f3d0">→ [s12, s44, s188, s472]</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#94a3b8" stroke-width="2" fill="none" stroke-linecap="round">
+    <path d="M550 144 L550 170"/>
+    <path d="M550 230 L550 250"/>
+    <path d="M550 286 L185 320"/>
+    <path d="M550 286 L435 320"/>
+    <path d="M550 286 L685 320"/>
+    <path d="M550 286 L925 320"/>
+    <path d="M185 430 L530 460"/>
+    <path d="M435 430 L545 460"/>
+    <path d="M685 430 L565 460"/>
+    <path d="M925 430 L585 460"/>
+  </g>
+
+  <text x="550" y="538" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="12" font-style="italic" fill="#64748b">errgroup + semaphore · respects MaxParallelCalls · falls back to single-pass when tree fits</text>
+</svg>
