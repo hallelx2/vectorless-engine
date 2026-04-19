@@ -1,8 +1,8 @@
 # Build output
 /bin/
 /dist/
-engine
-engine.exe
+/engine
+/engine.exe
 
 # Go
 *.test
