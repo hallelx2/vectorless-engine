@@ -1,0 +1,89 @@
+# vectorless-engine example configuration.
+# Copy to config.yaml and edit, or supply via VLE_* environment variables.
+
+server:
+  addr: ":8080"
+  read_timeout: 30s
+  write_timeout: 120s
+
+database:
+  # Postgres connection used for documents, sections (the tree), and (if
+  # queue.driver=river) the job queue.
+  url: "postgres://vectorless:vectorless@localhost:5432/vectorless?sslmode=disable"
+  max_conns: 10
+
+storage:
+  # Where document bytes are stored.
+  # driver: local | s3
+  driver: "local"
+
+  local:
+    root: "./data/documents"
+
+  s3:
+    # Works for AWS S3, Cloudflare R2, MinIO, Backblaze B2, DigitalOcean Spaces,
+    # and any other S3-compatible provider — just point endpoint at their URL.
+    endpoint: "http://localhost:9000"
+    region: "us-east-1"
+    bucket: "vectorless-docs"
+    access_key: "minio"
+    secret_key: "miniominio"
+    use_path_style: true     # true for MinIO / R2 / most non-AWS providers
+
+queue:
+  # Where background jobs (ingest, tree-build, summarize) are scheduled.
+  # driver: qstash | river | asynq
+  driver: "river"
+
+  qstash:
+    # Upstash QStash — ideal for serverless hosts (Vercel, Cloudflare Workers).
+    token: ""
+    webhook_base_url: "https://your-engine.example.com"
+
+  river:
+    # Postgres-backed, uses database.url above. No extra infra needed.
+    num_workers: 10
+
+  asynq:
+    # Redis-backed. Higher throughput when Redis is already available.
+    addr: "localhost:6379"
+    password: ""
+    db: 0
+    concurrency: 20
+
+llm:
+  # Provider used for tree construction and retrieval reasoning.
+  # driver: anthropic | openai | gemini
+  driver: "anthropic"
+
+  anthropic:
+    api_key: ""
+    model: "claude-sonnet-4-5"
+    reasoning_model: "claude-opus-4-5"   # optional override for deep-reason strategy
+
+  openai:
+    api_key: ""
+    model: "gpt-4o-mini"
+    reasoning_model: "gpt-4o"
+
+  gemini:
+    api_key: ""
+    model: "gemini-2.0-flash"
+    reasoning_model: "gemini-2.5-pro"
+
+retrieval:
+  # strategy: single-pass | chunked-tree
+  strategy: "chunked-tree"
+
+  chunked_tree:
+    # Max tokens of tree view to feed a single LLM call (per subtree slice).
+    max_tokens_per_call: 60000
+    # Max parallel LLM calls when the tree must be split.
+    max_parallel_calls: 8
+    # If true, include summary-only breadcrumbs of sibling subtrees each call
+    # doesn't own, so the model knows what else exists in the document.
+    include_sibling_breadcrumbs: true
+
+log:
+  level: "info"            # debug | info | warn | error
+  format: "json"           # json | console

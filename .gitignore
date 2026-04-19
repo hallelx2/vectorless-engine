@@ -1,0 +1,31 @@
+# Build output
+/bin/
+/dist/
+engine
+engine.exe
+
+# Go
+*.test
+*.out
+coverage.txt
+vendor/
+
+# Config with secrets
+config.yaml
+config.local.yaml
+.env
+.env.local
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data / dev state
+/data/
+/tmp/
+/.cache/
