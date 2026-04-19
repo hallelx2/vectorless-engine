@@ -325,6 +325,9 @@ func SourceKey(id tree.DocumentID, filename string) string {
 func DefaultRegistry() *parser.Registry {
 	return parser.NewRegistry(
 		parser.NewMarkdown(),
+		parser.NewHTML(),
+		parser.NewDOCX(),
+		parser.NewPDF(),
 		parser.NewText(),
 	)
 }

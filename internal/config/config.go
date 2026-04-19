@@ -28,10 +28,31 @@ type Config struct {
 }
 
 // ServerConfig configures the HTTP server.
+//
+// TLS is opt-in. If TLS.CertFile and TLS.KeyFile are both set the engine
+// listens with TLS directly; otherwise it listens plaintext and expects
+// a reverse proxy (Caddy, nginx, an ALB, ingress) to terminate TLS.
 type ServerConfig struct {
 	Addr         string        `yaml:"addr"`
 	ReadTimeout  time.Duration `yaml:"read_timeout"`
 	WriteTimeout time.Duration `yaml:"write_timeout"`
+	TLS          TLSConfig     `yaml:"tls"`
+}
+
+// TLSConfig enables direct TLS termination inside the engine.
+type TLSConfig struct {
+	// CertFile is a PEM-encoded certificate chain.
+	CertFile string `yaml:"cert_file"`
+	// KeyFile is a PEM-encoded private key matching CertFile.
+	KeyFile string `yaml:"key_file"`
+	// MinVersion is the minimum TLS version (e.g. "1.2", "1.3"). Empty
+	// defaults to Go's default (currently TLS 1.2).
+	MinVersion string `yaml:"min_version"`
+}
+
+// Enabled reports whether direct-TLS serving is configured.
+func (t TLSConfig) Enabled() bool {
+	return t.CertFile != "" && t.KeyFile != ""
 }
 
 // DatabaseConfig configures Postgres.
@@ -224,6 +245,12 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_LLM_DRIVER"); v != "" {
 		c.LLM.Driver = v
 	}
+	if v := os.Getenv("VLE_TLS_CERT_FILE"); v != "" {
+		c.Server.TLS.CertFile = v
+	}
+	if v := os.Getenv("VLE_TLS_KEY_FILE"); v != "" {
+		c.Server.TLS.KeyFile = v
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -270,6 +297,16 @@ func (c Config) Validate() error {
 	case "single-pass", "chunked-tree":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
+	}
+
+	if c.Server.TLS.CertFile != "" && c.Server.TLS.KeyFile == "" {
+		return errors.New("server.tls.key_file is required when cert_file is set")
+	}
+	if c.Server.TLS.KeyFile != "" && c.Server.TLS.CertFile == "" {
+		return errors.New("server.tls.cert_file is required when key_file is set")
+	}
+	if v := c.Server.TLS.MinVersion; v != "" && v != "1.2" && v != "1.3" {
+		return fmt.Errorf("server.tls.min_version must be 1.2 or 1.3, got %q", v)
 	}
 
 	return nil

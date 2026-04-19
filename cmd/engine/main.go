@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -104,6 +105,7 @@ func run() error {
 		Handler:      api.Router(deps),
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
+		TLSConfig:    buildTLSConfig(cfg.Server.TLS),
 	}
 
 	// Start queue workers alongside the HTTP server.
@@ -115,7 +117,17 @@ func run() error {
 		}
 	}()
 	go func() {
-		logger.Info("http: listening", "addr", cfg.Server.Addr)
+		if cfg.Server.TLS.Enabled() {
+			logger.Info("https: listening (direct TLS)",
+				"addr", cfg.Server.Addr,
+				"cert_file", cfg.Server.TLS.CertFile)
+			if err := srv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errs <- fmt.Errorf("https: %w", err)
+			}
+			return
+		}
+		logger.Info("http: listening (plaintext — terminate TLS at your proxy)",
+			"addr", cfg.Server.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("http: %w", err)
 		}
@@ -216,6 +228,21 @@ func buildStrategy(c config.RetrievalConfig, client llm.Client) retrieval.Strate
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
+}
+
+// buildTLSConfig returns a *tls.Config when direct TLS is enabled, or nil
+// when the engine should serve plaintext (behind a proxy). Returning nil
+// leaves http.Server's TLSConfig unset, which is exactly what ListenAndServe
+// expects.
+func buildTLSConfig(c config.TLSConfig) *tls.Config {
+	if !c.Enabled() {
+		return nil
+	}
+	min := uint16(tls.VersionTLS12)
+	if c.MinVersion == "1.3" {
+		min = tls.VersionTLS13
+	}
+	return &tls.Config{MinVersion: min}
 }
 
 func newLogger(c config.LogConfig) *slog.Logger {

@@ -191,6 +191,33 @@ log:
 
 See [`config.example.yaml`](config.example.yaml) for the full reference.
 
+### TLS
+
+The engine is **plaintext HTTP by default** — the recommended production setup is to terminate TLS at a reverse proxy (Caddy, nginx, an ALB, a Kubernetes ingress, Cloudflare) so cert rotation lives outside the binary. For single-node / homelab / direct-to-internet deployments you can opt into direct TLS:
+
+```yaml
+server:
+  addr: ":8443"
+  tls:
+    cert_file: "/etc/vectorless/cert.pem"
+    key_file:  "/etc/vectorless/key.pem"
+    min_version: "1.2"       # "1.2" | "1.3"
+```
+
+Or via environment variables: `VLE_TLS_CERT_FILE`, `VLE_TLS_KEY_FILE`.
+
+### Supported document formats
+
+| Format | Parser | Notes |
+|---|---|---|
+| Markdown | `goldmark` | ATX + Setext headings become section boundaries |
+| HTML | `golang.org/x/net/html` | Prefers `<main>`/`<article>`; skips nav/footer/script |
+| DOCX | stdlib `archive/zip` + `encoding/xml` | `Heading 1…9` styles become section boundaries |
+| PDF | `ledongthuc/pdf` | Font-size heuristic recovers headings from unstructured PDFs |
+| Text | stdlib | Single-section fallback |
+
+New parsers drop in behind a one-method `Parser` interface — see [`internal/parser/`](internal/parser/).
+
 ## Features
 
 - ✅ Structured tree retrieval — no embeddings, no ANN index
@@ -200,8 +227,9 @@ See [`config.example.yaml`](config.example.yaml) for the full reference.
 - ✅ Parallel map-reduce over big trees (context-budget-aware)
 - ✅ Versioned HTTP API (`/v1`) with OpenAPI spec (coming)
 - ✅ Graceful shutdown, structured logging, request IDs
-- 🚧 PDF / DOCX / HTML / MD parsers
-- 🚧 Postgres schema + migrations (sqlc + pgx)
+- ✅ Postgres schema + embedded migrations (pgx v5)
+- ✅ Document parsers: **Markdown · HTML · DOCX · PDF · Text**
+- ✅ Optional direct TLS (opt-in; default is plaintext behind a reverse proxy)
 - 🚧 Official SDKs — TypeScript, Python, Go (separate repos)
 - 🚧 Dockerfile + Helm chart
 - 🚧 Benchmarks vs. traditional RAG
