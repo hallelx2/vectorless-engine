@@ -250,10 +250,12 @@ New parsers drop in behind a one-method `Parser` interface — see [`internal/pa
 </p>
 
 - **Phase 0 — scaffold** ✅ — interfaces, HTTP layer, local + QStash + Anthropic stubs
-- **Phase 1 — ingest** 🚧 — parsers, tree builder, summarizer, Postgres migrations
-- **Phase 2 — retrieval** ⏭ — `single-pass` and `chunked-tree` live, OpenAI + Gemini clients, benchmarks
-- **Phase 3 — ecosystem** ⏭ — River + Asynq live, S3 live, SDKs, Docker / Helm
+- **Phase 1 — ingest** ✅ — parsers (MD/HTML/DOCX/PDF/TXT), tree builder, summarizer, Postgres migrations, TLS, docker
+- **Phase 2 — retrieval** 🚧 — `single-pass` and `chunked-tree` live, real LLM clients, benchmarks
+- **Phase 3 — ecosystem** ⏭ — River + Asynq live, S3 live, SDKs, Helm, goreleaser
 - **Phase 4 — scale** ⏭ — multi-document queries, streaming, caching, tree compaction
+
+**→ See [`ROADMAP.md`](ROADMAP.md) for the full task list with subtasks and checkboxes.**
 
 Track progress in [GitHub Issues](https://github.com/hallelx2/vectorless-engine/issues) and [Projects](https://github.com/hallelx2/vectorless-engine/projects).
 
