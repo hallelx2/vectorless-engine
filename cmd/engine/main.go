@@ -18,13 +18,13 @@ import (
 	"time"
 
 	"github.com/hallelx2/vectorless-engine/internal/api"
-	"github.com/hallelx2/vectorless-engine/internal/config"
-	"github.com/hallelx2/vectorless-engine/internal/db"
-	"github.com/hallelx2/vectorless-engine/internal/ingest"
-	"github.com/hallelx2/vectorless-engine/internal/llm"
-	"github.com/hallelx2/vectorless-engine/internal/queue"
-	"github.com/hallelx2/vectorless-engine/internal/retrieval"
-	"github.com/hallelx2/vectorless-engine/internal/storage"
+	"github.com/hallelx2/vectorless-engine/pkg/config"
+	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/ingest"
+	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/vectorless-engine/pkg/queue"
+	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
+	"github.com/hallelx2/vectorless-engine/pkg/storage"
 )
 
 // version is set at build time via -ldflags "-X main.version=..."
@@ -79,7 +79,10 @@ func run() error {
 	}
 	defer q.Close()
 
-	llmClient := buildLLM(cfg.LLM)
+	llmClient, err := buildLLM(cfg.LLM)
+	if err != nil {
+		return fmt.Errorf("init llm: %w", err)
+	}
 	strategy := buildStrategy(cfg.Retrieval, llmClient)
 
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
@@ -193,33 +196,33 @@ func buildQueue(c config.QueueConfig, dbURL string) (queue.Queue, error) {
 	}
 }
 
-func buildLLM(c config.LLMConfig) llm.Client {
+func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
 	switch c.Driver {
 	case "anthropic":
-		return llm.NewAnthropic(llm.AnthropicConfig{
+		return llmgate.NewAnthropic(llmgate.AnthropicConfig{
 			APIKey:         c.Anthropic.APIKey,
 			Model:          c.Anthropic.Model,
 			ReasoningModel: c.Anthropic.ReasoningModel,
 		})
 	case "openai":
-		return llm.NewOpenAI(llm.OpenAIConfig{
+		return llmgate.NewOpenAI(llmgate.OpenAIConfig{
 			APIKey:         c.OpenAI.APIKey,
 			Model:          c.OpenAI.Model,
 			ReasoningModel: c.OpenAI.ReasoningModel,
 		})
 	case "gemini":
-		return llm.NewGemini(llm.GeminiConfig{
+		return llmgate.NewGemini(llmgate.GeminiConfig{
 			APIKey:         c.Gemini.APIKey,
 			Model:          c.Gemini.Model,
 			ReasoningModel: c.Gemini.ReasoningModel,
 		})
 	default:
 		// Config.Validate rejects unknown drivers; this is defensive.
-		return llm.NewAnthropic(llm.AnthropicConfig{})
+		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)
 	}
 }
 
-func buildStrategy(c config.RetrievalConfig, client llm.Client) retrieval.Strategy {
+func buildStrategy(c config.RetrievalConfig, client llmgate.Client) retrieval.Strategy {
 	switch c.Strategy {
 	case "single-pass":
 		return retrieval.NewSinglePass(client)

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 func itoa(n int) string { return strconv.Itoa(n) }

@@ -1,5 +1,18 @@
 # vectorless-engine example configuration.
-# Copy to config.yaml and edit, or supply via VLE_* environment variables.
+#
+# Three ways to configure the engine, in increasing priority:
+#   1. YAML file   - copy this to config.yaml and edit.
+#   2. Environment - VLE_* vars, dot-path flattened with underscores
+#                    (e.g. server.tls.cert_file -> VLE_SERVER_TLS_CERT_FILE).
+#   3. CLI flags   - mirror the YAML tree, dot-separated
+#                    (e.g. --server.addr=:8080, --log.level=debug).
+#
+# Later layers override earlier ones on a per-key basis (not per-subtree),
+# so you can ship a YAML file in the image, set secrets via env, and tweak
+# individual knobs per run with flags.
+#
+# `vectorless-engine config print` prints the effective config with secrets
+# redacted; `vectorless-engine config check` validates it and exits 0/1.
 
 server:
   addr: ":8080"

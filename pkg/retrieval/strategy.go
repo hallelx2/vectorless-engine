@@ -15,7 +15,7 @@ package retrieval
 import (
 	"context"
 
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // Strategy is the contract every retrieval strategy satisfies.

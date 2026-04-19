@@ -7,8 +7,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/hallelx2/vectorless-engine/internal/llm"
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // ChunkedTree is a Strategy that scales tree reasoning to documents whose
@@ -23,7 +23,7 @@ import (
 // The strategy therefore works with any LLM (large or small context) by
 // trading context size for parallelism + merge.
 type ChunkedTree struct {
-	LLM      llm.Client
+	LLM      llmgate.Client
 	Splitter Splitter
 
 	// Merge determines how per-slice ID lists are combined. Defaults to
@@ -32,7 +32,7 @@ type ChunkedTree struct {
 }
 
 // NewChunkedTree constructs a ChunkedTree strategy with sensible defaults.
-func NewChunkedTree(client llm.Client) *ChunkedTree {
+func NewChunkedTree(client llmgate.Client) *ChunkedTree {
 	return &ChunkedTree{
 		LLM:      client,
 		Splitter: NewDefaultSplitter(),
@@ -89,20 +89,31 @@ func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, bu
 	return c.Merge.Merge(results), nil
 }
 
-// reasonOverSlice runs one LLM call for one slice.
-//
-// Scaffold placeholder — the real prompt and response parsing come online in
-// Phase 1 together with provider implementations.
+// reasonOverSlice runs one LLM call for one slice and returns the IDs the
+// model picked, filtered against sl.Sections so a model can never fabricate
+// an ID that lives in a different slice.
 func (c *ChunkedTree) reasonOverSlice(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, error) {
-	// TODO(phase-1):
-	//   1. Build a prompt from sl.Breadcrumb + sl.Sections (+ optional
-	//      SiblingSummaries) + query.
-	//   2. Call c.LLM.Complete with a JSON schema constraining the output.
-	//   3. Return the IDs the model picked (filtered against sl.Sections
-	//      so the model can't fabricate IDs from other slices).
-	_ = sl
-	_ = query
-	return nil, nil
+	prompt := BuildSelectionPrompt(sl.Breadcrumb, sl.Sections, sl.SiblingSummaries, query)
+
+	resp, err := c.LLM.Complete(ctx, llmgate.Request{
+		Model: budget.ModelName,
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: selectionSystemPrompt},
+			{Role: llmgate.RoleUser, Content: prompt},
+		},
+		MaxTokens:   2048,
+		Temperature: 0,
+		JSONMode:    true,
+		JSONSchema:  []byte(selectionJSONSchema),
+	})
+	if err != nil {
+		return nil, err
+	}
+	ids, err := ParseSelection(resp.Content)
+	if err != nil {
+		return nil, err
+	}
+	return FilterKnownIDs(ids, sl.Sections), nil
 }
 
 // MergePolicy determines how per-slice ID lists are combined into a single

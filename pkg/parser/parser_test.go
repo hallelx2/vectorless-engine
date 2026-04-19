@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hallelx2/vectorless-engine/internal/parser"
+	"github.com/hallelx2/vectorless-engine/pkg/parser"
 )
 
 // findSection returns the first section (depth-first) whose title matches,

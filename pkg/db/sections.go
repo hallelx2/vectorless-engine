@@ -3,7 +3,7 @@ package db
 import (
 	"context"
 
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // Section is the row-shape for the sections table.

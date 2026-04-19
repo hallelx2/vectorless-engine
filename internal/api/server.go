@@ -17,12 +17,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/hallelx2/vectorless-engine/internal/db"
-	"github.com/hallelx2/vectorless-engine/internal/ingest"
-	"github.com/hallelx2/vectorless-engine/internal/queue"
-	"github.com/hallelx2/vectorless-engine/internal/retrieval"
-	"github.com/hallelx2/vectorless-engine/internal/storage"
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/ingest"
+	"github.com/hallelx2/vectorless-engine/pkg/queue"
+	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
+	"github.com/hallelx2/vectorless-engine/pkg/storage"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // Deps bundles the engine's subsystems for injection into the API layer.
@@ -319,9 +319,102 @@ func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 
 // --- query ---
 
+// handleQuery accepts { document_id, query, model?, max_tokens?,
+// reserved_for_prompt?, max_parallel_calls?, max_sections? } and runs the
+// configured retrieval.Strategy against the document's tree.
 func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
-	// TODO(phase-2): run strategy.Select against the loaded tree.
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "query: not implemented"})
+	var body struct {
+		DocumentID        tree.DocumentID `json:"document_id"`
+		Query             string          `json:"query"`
+		Model             string          `json:"model"`
+		MaxTokens         int             `json:"max_tokens"`
+		ReservedForPrompt int             `json:"reserved_for_prompt"`
+		MaxParallelCalls  int             `json:"max_parallel_calls"`
+		MaxSections       int             `json:"max_sections"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body.DocumentID == "" || body.Query == "" {
+		writeErr(w, http.StatusBadRequest, "document_id and query are required")
+		return
+	}
+	if d.Strategy == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no retrieval strategy configured")
+		return
+	}
+
+	t, err := d.DB.LoadTree(r.Context(), body.DocumentID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	budget := retrieval.ContextBudget{
+		ModelName:         body.Model,
+		MaxTokens:         body.MaxTokens,
+		ReservedForPrompt: body.ReservedForPrompt,
+		MaxParallelCalls:  body.MaxParallelCalls,
+	}
+	if budget.MaxTokens == 0 {
+		budget.MaxTokens = 100000
+	}
+	if budget.ReservedForPrompt == 0 {
+		budget.ReservedForPrompt = 4000
+	}
+	if budget.MaxParallelCalls == 0 {
+		budget.MaxParallelCalls = 8
+	}
+
+	started := time.Now()
+	ids, err := d.Strategy.Select(r.Context(), t, body.Query, budget)
+	if err != nil {
+		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
+		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+		return
+	}
+	if body.MaxSections > 0 && len(ids) > body.MaxSections {
+		ids = ids[:body.MaxSections]
+	}
+
+	sections := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		sec := t.FindByID(id)
+		if sec == nil {
+			continue
+		}
+		var content string
+		if sec.ContentRef != "" {
+			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
+			if err == nil {
+				raw, _ := io.ReadAll(rc)
+				rc.Close()
+				content = string(raw)
+			}
+		}
+		sections = append(sections, map[string]any{
+			"id":          sec.ID,
+			"parent_id":   sec.ParentID,
+			"title":       sec.Title,
+			"summary":     sec.Summary,
+			"token_count": sec.TokenCount,
+			"content":     content,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"document_id": body.DocumentID,
+		"query":       body.Query,
+		"strategy":    d.Strategy.Name(),
+		"model":       body.Model,
+		"sections":    sections,
+		"elapsed_ms":  time.Since(started).Milliseconds(),
+	})
 }
 
 // --- internal queue webhook ---

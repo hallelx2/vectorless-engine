@@ -79,35 +79,41 @@ One-line: raw bytes → queryable, persisted tree.
 
 ---
 
-## Phase 2 — retrieval *(next up)*
+## Phase 2 — retrieval *(in progress)*
 
 One-line: turn `POST /v1/query` from a 501 into the feature the engine exists for.
 
-- [ ] **Live LLM clients** (swap out the stubs)
-  - [ ] Anthropic (messages API, streaming later, prompt caching for tree view)
+- [~] **Live LLM clients** (swap out the stubs)
+  - [x] Anthropic (messages API via direct HTTP — no SDK dep, prompt caching via `cache_control` when `EnablePromptCache` is on, exp-backoff retries on 429/5xx, `/v1/messages/count_tokens` for real counts with a `len/4` fallback)
   - [ ] OpenAI (responses or chat completions, structured outputs for section-ID selection)
   - [ ] Gemini (generateContent, long-context mode for whole-tree single-pass)
-  - [ ] Real token counting per provider (replace the 4-chars-per-token heuristic)
-  - [ ] Retry with exponential backoff + jitter on 429 / 5xx
+  - [x] Real token counting for Anthropic (count_tokens endpoint)
+  - [x] Retry with exponential backoff + jitter on 429 / 5xx (Anthropic)
+  - [ ] Streaming responses (SSE) — deferred to Phase 4
 
-- [ ] **Retrieval strategies**
-  - [ ] `SinglePass` — real implementation
-    - [ ] Build prompt from `tree.View` (titles + summaries + IDs, depth-aware indentation)
-    - [ ] Request structured output (JSON list of section IDs with confidence)
-    - [ ] Validate returned IDs against the tree; drop unknown ones
-  - [ ] `ChunkedTree` — real implementation of the parallel map-reduce design
-    - [ ] `Splitter` that slices the tree view into budget-sized chunks with breadcrumb + sibling summaries
-    - [ ] `errgroup` + semaphore bounded by `MaxParallelCalls`
-    - [ ] `Merge` policies: `Union`, `TopN(ranked)`, `Vote(k-of-n)` — default `Union`
-    - [ ] Fall back to single-pass when the tree fits the budget
-  - [ ] Unit tests with a mock `llm.Client` that returns canned IDs
+- [x] **Retrieval strategies**
+  - [x] `SinglePass` — real implementation
+    - [x] Build prompt from `tree.View` (titles + summaries + IDs, depth-aware indentation)
+    - [x] Request structured output (JSON list of section IDs + reasoning) — JSON-mode via prompt nudge + schema
+    - [x] Validate returned IDs against the tree; drop unknown ones (`FilterKnownIDs`)
+    - [x] Tolerate code fences / leading prose in model output (`ParseSelection`)
+  - [x] `ChunkedTree` — real implementation of the parallel map-reduce design
+    - [x] `Splitter` that slices the tree view into budget-sized chunks with breadcrumb + sibling summaries (structure-aware bin-packing, recurses into oversized subtrees)
+    - [x] `errgroup` + semaphore bounded by `MaxParallelCalls` (already in scaffold)
+    - [x] `Merge` policies: `Union` default (dedupe + sorted)
+    - [ ] (opt) `TopN(ranked)`, `Vote(k-of-n)` merges
+    - [x] Fall back to single slice when the tree fits the budget
+    - [x] Filter IDs per-slice so the model can't fabricate IDs from other slices
+  - [x] Unit tests with a mock `llm.Client` that returns canned IDs
+    - [x] Happy-path selection, unknown-ID filtering, code-fence tolerance, multi-slice split, ID-fabrication guard, splitter fast path
 
-- [ ] **`POST /v1/query` handler**
-  - [ ] Parse body `{ document_id, query, model?, strategy?, max_sections? }`
-  - [ ] Load tree via `db.LoadTree`
-  - [ ] Run the configured `retrieval.Strategy`
-  - [ ] Fetch picked sections' content from storage
-  - [ ] Return `{ sections: [...], strategy, model, elapsed_ms, tokens_in, tokens_out }`
+- [x] **`POST /v1/query` handler**
+  - [x] Parse body `{ document_id, query, model?, max_tokens?, reserved_for_prompt?, max_parallel_calls?, max_sections? }`
+  - [x] Load tree via `db.LoadTree`
+  - [x] Run the configured `retrieval.Strategy`
+  - [x] Fetch picked sections' content from storage
+  - [x] Return `{ sections: [...], strategy, model, elapsed_ms }`
+  - [ ] (opt) Include `tokens_in` / `tokens_out` in response (Response struct already tracks them — just needs plumbing)
   - [ ] (opt) SSE streaming variant for progressively revealing sections as they're picked
 
 - [ ] **Benchmarks vs. traditional RAG**

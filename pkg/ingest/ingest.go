@@ -24,12 +24,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/hallelx2/vectorless-engine/internal/db"
-	"github.com/hallelx2/vectorless-engine/internal/llm"
-	"github.com/hallelx2/vectorless-engine/internal/parser"
-	"github.com/hallelx2/vectorless-engine/internal/queue"
-	"github.com/hallelx2/vectorless-engine/internal/storage"
-	"github.com/hallelx2/vectorless-engine/internal/tree"
+	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/vectorless-engine/pkg/parser"
+	"github.com/hallelx2/vectorless-engine/pkg/queue"
+	"github.com/hallelx2/vectorless-engine/pkg/storage"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // Payload is the JSON body attached to an ingest job.
@@ -44,7 +44,7 @@ type Payload struct {
 type Pipeline struct {
 	DB       *db.Pool
 	Storage  storage.Storage
-	LLM      llm.Client
+	LLM      llmgate.Client
 	Parsers  *parser.Registry
 	Logger   *slog.Logger
 
@@ -245,13 +245,13 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 		body = b.String()
 	}
 
-	resp, err := p.LLM.Complete(ctx, llm.Request{
+	resp, err := p.LLM.Complete(ctx, llmgate.Request{
 		Model:       p.SummaryModel,
 		Temperature: 0.0,
 		MaxTokens:   200,
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "You write short, factual section summaries. One sentence, no preamble, no quotes."},
-			{Role: llm.RoleUser, Content: fmt.Sprintf(
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: "You write short, factual section summaries. One sentence, no preamble, no quotes."},
+			{Role: llmgate.RoleUser, Content: fmt.Sprintf(
 				"Summarize this section titled %q in a single sentence (max 40 words):\n\n%s",
 				s.Title, body)},
 		},
@@ -260,7 +260,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 		// Stub LLMs return ErrNotImplemented. Degrade gracefully: use a
 		// truncated excerpt as the "summary" so downstream retrieval still
 		// has something to reason over.
-		if errors.Is(err, llm.ErrNotImplemented) {
+		if errors.Is(err, llmgate.ErrNotImplemented) {
 			return fallbackSummary(s.Title, body), nil
 		}
 		return "", err
