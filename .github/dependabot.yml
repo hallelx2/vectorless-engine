@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      aws:
+        patterns:
+          - "github.com/aws/*"
+      river:
+        patterns:
+          - "github.com/riverqueue/*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
