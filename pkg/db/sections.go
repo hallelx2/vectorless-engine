@@ -8,16 +8,16 @@ import (
 
 // Section is the row-shape for the sections table.
 type Section struct {
-	ID          tree.SectionID
-	DocumentID  tree.DocumentID
-	ParentID    tree.SectionID // empty for root
-	Ordinal     int
-	Depth       int
-	Title       string
-	Summary     string
-	ContentRef  string
-	TokenCount  int
-	Metadata    map[string]string
+	ID         tree.SectionID
+	DocumentID tree.DocumentID
+	ParentID   tree.SectionID // empty for root
+	Ordinal    int
+	Depth      int
+	Title      string
+	Summary    string
+	ContentRef string
+	TokenCount int
+	Metadata   map[string]string
 }
 
 // UpsertSection inserts or updates a section row. Callers should insert in

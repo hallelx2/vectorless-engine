@@ -19,6 +19,17 @@ linters:
     - misspell
     - bodyclose
     - unconvert
+  settings:
+    errcheck:
+      # Idiomatic deferred Close() and Rollback() don't have a sensible
+      # recovery path — logging them would be more noise than signal.
+      # Exclude the usual offenders; anything else stays checked.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (net/http.ResponseWriter).Write
+        - (*github.com/jackc/pgx/v5.Tx).Rollback
+        - (github.com/hallelx2/vectorless-engine/pkg/queue.Queue).Close
   exclusions:
     rules:
       - path: _test\.go

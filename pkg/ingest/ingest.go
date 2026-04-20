@@ -24,8 +24,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -42,11 +42,11 @@ type Payload struct {
 
 // Pipeline runs the ingest stages.
 type Pipeline struct {
-	DB       *db.Pool
-	Storage  storage.Storage
-	LLM      llmgate.Client
-	Parsers  *parser.Registry
-	Logger   *slog.Logger
+	DB      *db.Pool
+	Storage storage.Storage
+	LLM     llmgate.Client
+	Parsers *parser.Registry
+	Logger  *slog.Logger
 
 	// SummaryMaxChars caps the content window sent to the LLM per section.
 	// Sections longer than this are truncated — we're generating a short
