@@ -71,11 +71,11 @@ func TestIsNotFound(t *testing.T) {
 // real S3-compatible endpoint. Gated on env so this stays out of the default
 // `go test ./...` — set TEST_S3_* to run it.
 //
-//   TEST_S3_ENDPOINT=http://localhost:9000
-//   TEST_S3_BUCKET=vectorless-test
-//   TEST_S3_ACCESS_KEY=minioadmin
-//   TEST_S3_SECRET_KEY=minioadmin
-//   TEST_S3_PATH_STYLE=true
+//	TEST_S3_ENDPOINT=http://localhost:9000
+//	TEST_S3_BUCKET=vectorless-test
+//	TEST_S3_ACCESS_KEY=minioadmin
+//	TEST_S3_SECRET_KEY=minioadmin
+//	TEST_S3_PATH_STYLE=true
 func TestS3Integration(t *testing.T) {
 	endpoint := os.Getenv("TEST_S3_ENDPOINT")
 	bucket := os.Getenv("TEST_S3_BUCKET")

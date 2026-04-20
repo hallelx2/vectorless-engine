@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/hallelx2/llmgate"
+
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
