@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hallelx2/llmgate"
+
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )

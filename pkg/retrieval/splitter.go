@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hallelx2/llmgate"
+
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
