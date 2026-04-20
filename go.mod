@@ -10,7 +10,7 @@ require (
 	github.com/aws/smithy-go v1.25.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
-	github.com/hallelx2/llmgate v0.0.0-00010101000000-000000000000
+	github.com/hallelx2/llmgate v0.1.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/riverqueue/river v0.35.0
@@ -20,11 +20,6 @@ require (
 	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-// Local development: point llmgate at the sibling working copy until
-// the first tagged release is published. Remove this once llmgate has
-// a real version.
-replace github.com/hallelx2/llmgate => ../llmgate
 
 require (
 	cloud.google.com/go v0.116.0 // indirect

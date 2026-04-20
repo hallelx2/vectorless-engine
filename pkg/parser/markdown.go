@@ -60,7 +60,7 @@ func (m *Markdown) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	// anything else, append its rendered text to the current bucket.
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
 		if h, ok := n.(*ast.Heading); ok {
-			title := strings.TrimSpace(string(h.Text(src)))
+			title := strings.TrimSpace(headingText(h, src))
 			current = &flat{level: h.Level, title: title}
 			flats = append(flats, current)
 			continue
@@ -148,9 +148,28 @@ func appendNodeText(buf *strings.Builder, n ast.Node, src []byte) {
 
 	// Paragraph-ish block boundaries: add a blank line after block nodes
 	// so the flattened text still reads.
-	if _, ok := n.(ast.Node); ok && n.Type() == ast.TypeBlock {
+	if n.Type() == ast.TypeBlock {
 		if !bytes.HasSuffix([]byte(buf.String()), []byte("\n\n")) {
 			buf.WriteString("\n\n")
 		}
 	}
+}
+
+// headingText extracts the flattened text of a heading by walking its
+// inline children. Replaces the deprecated Heading.Text(src) API.
+func headingText(h *ast.Heading, src []byte) string {
+	var buf bytes.Buffer
+	for c := h.FirstChild(); c != nil; c = c.NextSibling() {
+		if t, ok := c.(*ast.Text); ok {
+			buf.Write(t.Segment.Value(src))
+			continue
+		}
+		// Recurse for wrapping inlines (emphasis, links, code spans, etc.)
+		for gc := c.FirstChild(); gc != nil; gc = gc.NextSibling() {
+			if t, ok := gc.(*ast.Text); ok {
+				buf.Write(t.Segment.Value(src))
+			}
+		}
+	}
+	return buf.String()
 }

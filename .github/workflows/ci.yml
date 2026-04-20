@@ -64,18 +64,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_DEFAULT_BUCKETS: vle-test
-        ports: ["9000:9000"]
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     steps:
       - uses: actions/checkout@v6
 
@@ -84,6 +72,28 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+
+      # MinIO can't run as a `services:` container because GitHub Actions
+      # doesn't expose a way to pass the required `server /data` command.
+      # Start it in a step instead, wait for health, create the bucket.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in {1..30}; do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null; then
+              echo "MinIO ready"
+              break
+            fi
+            echo "waiting for MinIO ($i)..."
+            sleep 2
+          done
+          docker run --rm --network host \
+            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            quay.io/minio/mc mb -p local/vle-test
 
       - name: Run integration tests
         env:
