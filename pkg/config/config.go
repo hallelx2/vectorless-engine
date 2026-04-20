@@ -85,10 +85,10 @@ type S3StorageBlock struct {
 
 // QueueConfig configures the background job queue.
 type QueueConfig struct {
-	Driver string       `yaml:"driver"`
-	QStash QStashBlock  `yaml:"qstash"`
-	River  RiverBlock   `yaml:"river"`
-	Asynq  AsynqBlock   `yaml:"asynq"`
+	Driver string      `yaml:"driver"`
+	QStash QStashBlock `yaml:"qstash"`
+	River  RiverBlock  `yaml:"river"`
+	Asynq  AsynqBlock  `yaml:"asynq"`
 }
 
 // QStashBlock configures QStash.
@@ -141,8 +141,8 @@ type GeminiBlock struct {
 
 // RetrievalConfig configures the retrieval strategy.
 type RetrievalConfig struct {
-	Strategy     string              `yaml:"strategy"`
-	ChunkedTree  ChunkedTreeBlock    `yaml:"chunked_tree"`
+	Strategy    string           `yaml:"strategy"`
+	ChunkedTree ChunkedTreeBlock `yaml:"chunked_tree"`
 }
 
 // ChunkedTreeBlock configures the chunked-tree strategy.

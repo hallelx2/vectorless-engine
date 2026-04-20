@@ -28,7 +28,7 @@ linters:
         - (io.Closer).Close
         - (*os.File).Close
         - (net/http.ResponseWriter).Write
-        - (*github.com/jackc/pgx/v5.Tx).Rollback
+        - (github.com/jackc/pgx/v5.Tx).Rollback
         - (github.com/hallelx2/vectorless-engine/pkg/queue.Queue).Close
   exclusions:
     rules:

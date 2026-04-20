@@ -209,9 +209,9 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 		// Group letters by (approximate) baseline Y. Values within 2pt are
 		// considered the same row — PDFs frequently jitter Y by a fraction.
 		type rowBucket struct {
-			y      float64
-			maxFS  float64
-			chars  []pdflib.Text
+			y     float64
+			maxFS float64
+			chars []pdflib.Text
 		}
 		var buckets []*rowBucket
 		find := func(y float64) *rowBucket {
@@ -334,9 +334,9 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 	// forgiving of trailing page numbers, section numbering prefixes the
 	// outline sometimes omits, etc.
 	type matched struct {
-		level   int
-		title   string
-		rowIdx  int // index into rows where this heading starts
+		level  int
+		title  string
+		rowIdx int // index into rows where this heading starts
 	}
 	var chosen []matched
 	cursor := 0
