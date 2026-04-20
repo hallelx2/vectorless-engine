@@ -96,8 +96,11 @@ func (v *Verifier) Verify(signature string, body []byte, expectedURL string) err
 
 	// Try current key, then next key (rotation support). Constant-time
 	// compares guard against timing attacks.
-	if !hmacMatches(v.currentKey, signingInput, sig) &&
-		!(len(v.nextKey) > 0 && hmacMatches(v.nextKey, signingInput, sig)) {
+	ok := hmacMatches(v.currentKey, signingInput, sig)
+	if !ok && len(v.nextKey) > 0 {
+		ok = hmacMatches(v.nextKey, signingInput, sig)
+	}
+	if !ok {
 		return errors.New("qstash verifier: signature mismatch")
 	}
 
