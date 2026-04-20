@@ -419,8 +419,90 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 // --- internal queue webhook ---
 
+// handleQueueWebhook is the endpoint QStash POSTs to. It verifies the
+// Upstash-Signature header, then dispatches the decoded payload into the
+// queue handler registered for {kind}.
+//
+// Only wired up when the configured queue is *queue.QStash; with other
+// drivers (River, Asynq) the route is present but returns 404-ish: there
+// is no webhook consumer to run.
 func (d Deps) handleQueueWebhook(w http.ResponseWriter, r *http.Request) {
-	// TODO(phase-1): verify QStash signature, decode body, dispatch.
+	qq, ok := d.Queue.(*queue.QStash)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "webhook not enabled: queue driver is not qstash")
+		return
+	}
+
+	kind := queue.JobKind(chi.URLParam(r, "kind"))
+	if kind == "" {
+		writeErr(w, http.StatusBadRequest, "missing kind")
+		return
+	}
+
+	// Read the full body up front — verification hashes it, and the
+	// handler needs the raw bytes too.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	_ = r.Body.Close()
+
+	// Signature check. If no verifier is configured we refuse to proceed:
+	// an unauthenticated webhook endpoint that executes jobs is an open
+	// door to the worker. Local-only dev can set VLE_QSTASH_CURRENT_SIGNING_KEY
+	// to any string and sign test requests with it.
+	v := qq.Verifier()
+	if v == nil {
+		writeErr(w, http.StatusUnauthorized, "qstash signing key not configured")
+		return
+	}
+
+	// Reconstruct the URL QStash signed against. We prefer the configured
+	// WebhookBaseURL over r.Host — behind TLS terminators r.TLS and
+	// r.Host are unreliable, and the operator already told us the
+	// canonical external URL at boot.
+	expectedURL := strings.TrimRight(qq.WebhookBaseURL(), "/") + r.URL.Path
+
+	sig := r.Header.Get("Upstash-Signature")
+	if err := v.Verify(sig, body, expectedURL); err != nil {
+		if d.Logger != nil {
+			d.Logger.Warn("qstash verify failed", "err", err, "kind", kind)
+		}
+		writeErr(w, http.StatusUnauthorized, "invalid qstash signature")
+		return
+	}
+
+	// Body shape: either a full queue.Job (has `kind` + `payload`) or the
+	// bare payload (`kind` is already in the URL). Accept both — the
+	// dashboard publishes bare payloads today; the engine's own Enqueue
+	// publishes full Jobs.
+	payload := body
+	var maybe struct {
+		Kind    queue.JobKind   `json:"kind"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(body, &maybe); err == nil && maybe.Kind != "" && len(maybe.Payload) > 0 {
+		if maybe.Kind != kind {
+			writeErr(w, http.StatusBadRequest, "kind in body does not match URL")
+			return
+		}
+		payload = maybe.Payload
+	}
+
+	if err := qq.Dispatch(r.Context(), kind, payload); err != nil {
+		if errors.Is(err, queue.ErrUnknownKind) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if d.Logger != nil {
+			d.Logger.Error("qstash dispatch failed", "err", err, "kind", kind)
+		}
+		// 5xx → QStash will retry per the publish-time Upstash-Retries header.
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

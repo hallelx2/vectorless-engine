@@ -180,8 +180,10 @@ func buildQueue(c config.QueueConfig, dbURL string) (queue.Queue, error) {
 	switch c.Driver {
 	case "qstash":
 		return queue.NewQStash(queue.QStashConfig{
-			Token:          c.QStash.Token,
-			WebhookBaseURL: c.QStash.WebhookBaseURL,
+			Token:             c.QStash.Token,
+			WebhookBaseURL:    c.QStash.WebhookBaseURL,
+			CurrentSigningKey: c.QStash.CurrentSigningKey,
+			NextSigningKey:    c.QStash.NextSigningKey,
 		})
 	case "river":
 		return queue.NewRiver(queue.RiverConfig{

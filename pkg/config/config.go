@@ -92,9 +92,16 @@ type QueueConfig struct {
 }
 
 // QStashBlock configures QStash.
+//
+// Token is the publish token (used to enqueue). CurrentSigningKey and
+// NextSigningKey are used to verify inbound webhooks; both are surfaced
+// on the Upstash console under "Signing Keys". NextSigningKey is only
+// populated while rotating.
 type QStashBlock struct {
-	Token          string `yaml:"token"`
-	WebhookBaseURL string `yaml:"webhook_base_url"`
+	Token             string `yaml:"token"`
+	WebhookBaseURL    string `yaml:"webhook_base_url"`
+	CurrentSigningKey string `yaml:"current_signing_key"`
+	NextSigningKey    string `yaml:"next_signing_key"`
 }
 
 // RiverBlock configures River.
@@ -209,6 +216,17 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// firstEnv returns the first non-empty environment variable value from
+// the supplied names, checked in order.
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func applyEnvOverrides(c *Config) {
 	// Minimal, deliberately shallow env handling — production-heavy values
 	// that are typically rotated live here. Extend as needed.
@@ -230,11 +248,21 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_GEMINI_API_KEY"); v != "" {
 		c.LLM.Gemini.APIKey = v
 	}
-	if v := os.Getenv("VLE_QSTASH_TOKEN"); v != "" {
+	// Accept both VLE_-prefixed and bare QSTASH_* env vars. The bare
+	// names match what the Upstash console documents and what the
+	// dashboard already uses, so ops can set them once for both
+	// services. VLE_-prefixed wins if both are set.
+	if v := firstEnv("VLE_QSTASH_TOKEN", "QSTASH_TOKEN"); v != "" {
 		c.Queue.QStash.Token = v
 	}
-	if v := os.Getenv("VLE_QSTASH_WEBHOOK_BASE_URL"); v != "" {
+	if v := firstEnv("VLE_QSTASH_WEBHOOK_BASE_URL", "QSTASH_WEBHOOK_BASE_URL"); v != "" {
 		c.Queue.QStash.WebhookBaseURL = v
+	}
+	if v := firstEnv("VLE_QSTASH_CURRENT_SIGNING_KEY", "QSTASH_CURRENT_SIGNING_KEY"); v != "" {
+		c.Queue.QStash.CurrentSigningKey = v
+	}
+	if v := firstEnv("VLE_QSTASH_NEXT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY"); v != "" {
+		c.Queue.QStash.NextSigningKey = v
 	}
 	if v := os.Getenv("VLE_STORAGE_DRIVER"); v != "" {
 		c.Storage.Driver = v
@@ -272,6 +300,12 @@ func (c Config) Validate() error {
 	case "qstash":
 		if c.Queue.QStash.Token == "" {
 			return errors.New("queue.qstash.token is required when driver=qstash")
+		}
+		if c.Queue.QStash.WebhookBaseURL == "" {
+			return errors.New("queue.qstash.webhook_base_url is required when driver=qstash")
+		}
+		if c.Queue.QStash.CurrentSigningKey == "" {
+			return errors.New("queue.qstash.current_signing_key is required when driver=qstash")
 		}
 	case "river":
 		if c.Database.URL == "" {

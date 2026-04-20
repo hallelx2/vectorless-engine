@@ -21,6 +21,14 @@ type QStashConfig struct {
 	// will POST jobs to WebhookBaseURL + "/internal/jobs/:kind".
 	WebhookBaseURL string
 
+	// CurrentSigningKey / NextSigningKey are the QStash webhook signing
+	// keys used to verify inbound deliveries. Both are surfaced on the
+	// Upstash console; the "next" key is only populated during key
+	// rotation. Required when the engine is the webhook consumer; unused
+	// by Enqueue.
+	CurrentSigningKey string
+	NextSigningKey    string
+
 	// HTTPClient is optional; if nil, http.DefaultClient is used.
 	HTTPClient *http.Client
 }
@@ -33,11 +41,17 @@ type QStashConfig struct {
 type QStash struct {
 	cfg      QStashConfig
 	client   *http.Client
+	verifier *Verifier
 	mu       sync.RWMutex
 	handlers map[JobKind]Handler
 }
 
 // NewQStash constructs a new QStash-backed Queue.
+//
+// If CurrentSigningKey is set, a Verifier is constructed and made
+// available via Verifier(); callers should apply it to the webhook
+// route. Without a signing key the engine will still accept callbacks
+// (useful for local dev) but log a loud warning elsewhere.
 func NewQStash(cfg QStashConfig) (*QStash, error) {
 	if cfg.Token == "" {
 		return nil, errors.New("qstash: token is required")
@@ -49,12 +63,32 @@ func NewQStash(cfg QStashConfig) (*QStash, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &QStash{
+	q := &QStash{
 		cfg:      cfg,
 		client:   client,
 		handlers: map[JobKind]Handler{},
-	}, nil
+	}
+	if cfg.CurrentSigningKey != "" {
+		v, err := NewVerifier(VerifierConfig{
+			CurrentSigningKey: cfg.CurrentSigningKey,
+			NextSigningKey:    cfg.NextSigningKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		q.verifier = v
+	}
+	return q, nil
 }
+
+// Verifier returns the configured signature verifier, or nil if no
+// signing key was supplied. The webhook handler uses this to reject
+// unsigned or forged deliveries.
+func (q *QStash) Verifier() *Verifier { return q.verifier }
+
+// WebhookBaseURL exposes the configured base URL so the webhook handler
+// can reconstruct the `sub` claim it expects.
+func (q *QStash) WebhookBaseURL() string { return q.cfg.WebhookBaseURL }
 
 func (q *QStash) Register(kind JobKind, h Handler) {
 	q.mu.Lock()
