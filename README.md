@@ -225,7 +225,7 @@ Or via environment variables: `VLE_TLS_CERT_FILE`, `VLE_TLS_KEY_FILE`.
 | PDF | `ledongthuc/pdf` | Font-size heuristic recovers headings from unstructured PDFs |
 | Text | stdlib | Single-section fallback |
 
-New parsers drop in behind a one-method `Parser` interface — see [`internal/parser/`](internal/parser/).
+New parsers drop in behind a one-method `Parser` interface — see [`pkg/parser/`](pkg/parser/).
 
 ## Features
 
@@ -264,16 +264,23 @@ Track progress in [GitHub Issues](https://github.com/hallelx2/vectorless-engine/
 ```
 cmd/engine/            # main binary entry point
 internal/
-  api/                 # chi HTTP router, v1 routes
+  api/                 # chi HTTP router, v1 routes (private to the binary)
+pkg/
   config/              # YAML + env config with validation
-  llm/                 # provider-agnostic LLM client (Anthropic/OpenAI/Gemini)
-  queue/               # Queue interface + QStash/River/Asynq drivers
+  db/                  # pgx pool, embedded migrations, CRUD helpers
+  ingest/              # parse → persist → summarize pipeline
+  parser/              # Parser interface + MD / HTML / DOCX / PDF / TXT drivers
+  queue/               # Queue interface + QStash / River / Asynq drivers
   retrieval/           # Strategy interface + single-pass / chunked-tree
   storage/             # Storage interface + local / S3 drivers
   tree/                # core tree / section data model
-pkg/                   # (reserved for public Go types — stable surface)
 docs/                  # API spec, architecture notes, images
 ```
+
+LLM provider access lives in a separate module, [`llmgate`](https://github.com/hallelx2/llmgate),
+which the engine imports as `github.com/hallelx2/llmgate`. That's
+where Anthropic / OpenAI / Gemini clients, retry / budget / cache
+middleware, and the cost table live.
 
 ## Contributing
 

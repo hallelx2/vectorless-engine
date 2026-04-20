@@ -79,16 +79,17 @@ One-line: raw bytes → queryable, persisted tree.
 
 ---
 
-## Phase 2 — retrieval *(in progress)*
+## Phase 2 — retrieval *(shipped, minus benchmarks)*
 
 One-line: turn `POST /v1/query` from a 501 into the feature the engine exists for.
 
-- [~] **Live LLM clients** (swap out the stubs)
-  - [x] Anthropic (messages API via direct HTTP — no SDK dep, prompt caching via `cache_control` when `EnablePromptCache` is on, exp-backoff retries on 429/5xx, `/v1/messages/count_tokens` for real counts with a `len/4` fallback)
-  - [ ] OpenAI (responses or chat completions, structured outputs for section-ID selection)
-  - [ ] Gemini (generateContent, long-context mode for whole-tree single-pass)
-  - [x] Real token counting for Anthropic (count_tokens endpoint)
-  - [x] Retry with exponential backoff + jitter on 429 / 5xx (Anthropic)
+- [x] **Live LLM clients** — extracted to [`llmgate`](https://github.com/hallelx2/llmgate)
+  - [x] Anthropic, OpenAI, Gemini all live via langchaingo under a shared `llmgate.Client`
+  - [x] Provider switching is pure config (`llm.driver: anthropic | openai | gemini`)
+  - [x] Retry with exponential backoff + jitter on 429 / 5xx (`llmgate/middleware/retry`)
+  - [x] Cost tracking per call (`Usage.CostUSD` populated from a static price table)
+  - [x] Error classification shared across providers (`llmgate.Classify`)
+  - [ ] Real `CountTokens` via provider endpoints — currently heuristic in llmgate; tracked in the llmgate roadmap, not a blocker here
   - [ ] Streaming responses (SSE) — deferred to Phase 4
 
 - [x] **Retrieval strategies**
