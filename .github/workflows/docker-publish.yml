@@ -1,0 +1,70 @@
+name: docker-publish
+
+# Build and publish the engine Docker image to GitHub Container Registry
+# on every push to main and every semver tag (vX.Y.Z).
+#
+# Resulting tags:
+#   ghcr.io/hallelx2/vectorless-engine:main          (latest main branch)
+#   ghcr.io/hallelx2/vectorless-engine:sha-<7chars>  (immutable, per-commit)
+#   ghcr.io/hallelx2/vectorless-engine:vX.Y.Z        (release tags)
+#   ghcr.io/hallelx2/vectorless-engine:latest        (only on release tags)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  packages: write   # required to push to ghcr.io
+
+jobs:
+  publish:
+    name: build + push (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64]   # add linux/arm64 once you're ready to spend the build time
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/vectorless-engine
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
