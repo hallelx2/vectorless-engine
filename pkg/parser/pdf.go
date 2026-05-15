@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	pdflib "github.com/ledongthuc/pdf"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // PDF is a pragmatic first-pass PDF parser.
@@ -55,7 +57,22 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	}
 	reader, err := pdflib.NewReader(bytes.NewReader(buf), int64(len(buf)))
 	if err != nil {
-		return nil, fmt.Errorf("pdf: open: %w", err)
+		// ledongthuc/pdf has no encryption support — even PDFs that
+		// open in any normal viewer (empty user password, owner-only
+		// permissions like print/copy restrictions) get rejected with
+		// a "256-bit encryption key" / "encrypted" error. Try to strip
+		// the encryption layer with pdfcpu using the empty password,
+		// then retry the parser on the cleaned bytes.
+		if isEncryptedPDFError(err) {
+			cleaned, decErr := decryptPDFWithEmptyPassword(buf)
+			if decErr != nil {
+				return nil, fmt.Errorf("pdf: open: encrypted and could not be unlocked with empty password: %w", decErr)
+			}
+			reader, err = pdflib.NewReader(bytes.NewReader(cleaned), int64(len(cleaned)))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pdf: open: %w", err)
+		}
 	}
 
 	rows, err := extractPDFRows(reader)
@@ -63,10 +80,15 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		return nil, err
 	}
 	if len(rows) == 0 {
-		return &ParsedDoc{
-			Title:    "",
-			Sections: []Section{{Level: 1, Title: "Document", Content: ""}},
-		}, nil
+		return nil, fmt.Errorf("pdf: parsed but no extractable text — the document may be a scanned image (OCR not yet supported) or use a font encoding the parser can't read")
+	}
+	// Sanity check on extracted content. PDFs with overlay watermarks
+	// drawn on top of every page (the GINA-style "DO NOT COPY..." kind)
+	// can produce rows that are mostly noise — extracted text consists
+	// of doubled glyphs from the two layers being interleaved by Y.
+	// Bail with a clear message instead of going "ready" on empty data.
+	if !rowsLookLikeUsableText(rows) {
+		return nil, fmt.Errorf("pdf: text extraction produced no usable content — the document may have an overlay watermark or use a non-standard font encoding")
 	}
 
 	// If the PDF ships with a real outline (bookmarks), use it as ground
@@ -442,4 +464,88 @@ func abs(f float64) float64 {
 		return -f
 	}
 	return f
+}
+
+// rowsLookLikeUsableText is a coarse sanity check. PDFs with an
+// overlay watermark drawn at the same Y coordinate as the real text
+// produce extracted rows where chars from both layers are interleaved
+// — the row text ends up with doubled glyphs ("GGlloobbaall") that
+// look like text to len() but contain no actual words. The signal
+// we look for is "are at least some rows of normal length and contain
+// vowel + consonant patterns rather than runs of repeated chars".
+func rowsLookLikeUsableText(rows []pdfRow) bool {
+	usable := 0
+	for _, r := range rows {
+		t := strings.TrimSpace(r.text)
+		if len(t) < 4 {
+			continue
+		}
+		if hasRepeatedAdjacentChars(t) {
+			continue
+		}
+		usable++
+		if usable >= 5 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRepeatedAdjacentChars returns true if more than 30% of letter
+// pairs in s are the same letter twice in a row (case-insensitive).
+// That's the signature of "GGlloobbaall" interleaving.
+func hasRepeatedAdjacentChars(s string) bool {
+	letters := 0
+	doubled := 0
+	prev := rune(0)
+	for _, r := range strings.ToLower(s) {
+		if r < 'a' || r > 'z' {
+			prev = 0
+			continue
+		}
+		letters++
+		if r == prev {
+			doubled++
+		}
+		prev = r
+	}
+	if letters < 4 {
+		return false
+	}
+	return doubled*100/letters > 30
+}
+
+// isEncryptedPDFError reports whether the given error from
+// ledongthuc/pdf indicates the document is encrypted. The library
+// has no proper error type for this, so we match on the message.
+func isEncryptedPDFError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "encryption key") ||
+		strings.Contains(msg, "encrypted") ||
+		strings.Contains(msg, "/encrypt")
+}
+
+// decryptPDFWithEmptyPassword strips the encryption dict from a PDF
+// using pdfcpu, assuming an empty user password (the common case for
+// owner-password-only / "permissions" encryption). Returns the cleaned
+// bytes that any unencrypted-PDF parser can consume.
+func decryptPDFWithEmptyPassword(in []byte) ([]byte, error) {
+	conf := model.NewDefaultConfiguration()
+	conf.UserPW = ""
+	conf.OwnerPW = ""
+	// pdfcpu is conservative by default and won't strip encryption
+	// without explicit owner permission acknowledgement when the doc
+	// has restrictive perms. We're decrypting purely to extract text
+	// for indexing — the user already uploaded the PDF intending it
+	// to be searchable, so this is consistent with their intent.
+	conf.OwnerPWNew = nil
+	conf.UserPWNew = nil
+	var out bytes.Buffer
+	if err := api.Decrypt(bytes.NewReader(in), &out, conf); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
