@@ -25,6 +25,13 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
+// standaloneOrgID is the canonical org identifier the standalone
+// engine binary (cmd/engine) uses for every document it manages.
+// Self-hosted engine deployments are single-tenant by design — the
+// nil UUID gives us a stable, never-real-user "org" so the same
+// org-scoped DB methods can be reused without duplicating logic.
+const standaloneOrgID = "00000000-0000-0000-0000-000000000000"
+
 // Deps bundles the engine's subsystems for injection into the API layer.
 type Deps struct {
 	Logger   *slog.Logger
@@ -33,6 +40,10 @@ type Deps struct {
 	Queue    queue.Queue
 	Strategy retrieval.Strategy
 	Version  string
+
+	// MultiDoc is the multi-document query dispatcher. If nil, the
+	// /v1/query/multi endpoint returns 501.
+	MultiDoc *retrieval.MultiDoc
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -57,6 +68,7 @@ func Router(d Deps) http.Handler {
 
 		r.Get("/sections/{id}", d.handleGetSection)
 		r.Post("/query", d.handleQuery)
+		r.Post("/query/multi", d.handleQueryMulti)
 	})
 
 	r.Post("/internal/jobs/{kind}", d.handleQueueWebhook)
@@ -79,7 +91,12 @@ func (d Deps) handleVersion(w http.ResponseWriter, r *http.Request) {
 // created_at from the previous page's next_cursor).
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	// Standalone single-tenant deployment uses the nil-UUID org so
+	// reads + writes consistently land in one logical tenant. The
+	// multi-tenant SaaS surface lives in vectorless-server and reads
+	// X-Vectorless-Org instead.
 	opts := db.ListDocumentsOpts{
+		OrgID:  standaloneOrgID,
 		Status: db.DocumentStatus(q.Get("status")),
 	}
 	if v := q.Get("limit"); v != "" {
@@ -197,6 +214,7 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 
 	if err := d.DB.NewDocument(ctx, db.Document{
 		ID:          docID,
+		OrgID:       standaloneOrgID,
 		Title:       title,
 		ContentType: contentType,
 		SourceRef:   key,
@@ -232,7 +250,7 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	doc, err := d.DB.GetDocument(r.Context(), id)
+	doc, err := d.DB.GetDocument(r.Context(), id, standaloneOrgID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -256,7 +274,7 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	if err := d.DB.DeleteDocument(r.Context(), id); err != nil {
+	if err := d.DB.DeleteDocument(r.Context(), id, standaloneOrgID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
 			return
@@ -269,7 +287,7 @@ func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	t, err := d.DB.LoadTree(r.Context(), id)
+	t, err := d.DB.LoadTree(r.Context(), id, standaloneOrgID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -283,7 +301,7 @@ func (d Deps) handleGetTree(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 	id := tree.SectionID(chi.URLParam(r, "id"))
-	sec, err := d.DB.GetSection(r.Context(), id)
+	sec, err := d.DB.GetSection(r.Context(), id, standaloneOrgID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "section not found")
@@ -345,7 +363,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t, err := d.DB.LoadTree(r.Context(), body.DocumentID)
+	t, err := d.DB.LoadTree(r.Context(), body.DocumentID, standaloneOrgID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -414,6 +432,124 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"model":       body.Model,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
+	})
+}
+
+// handleQueryMulti accepts { document_ids, query, model?, max_tokens?,
+// reserved_for_prompt?, max_parallel_calls?, max_sections? } and runs the
+// retrieval strategy against every document in parallel, returning
+// per-document results.
+func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DocumentIDs       []tree.DocumentID `json:"document_ids"`
+		Query             string            `json:"query"`
+		Model             string            `json:"model"`
+		MaxTokens         int               `json:"max_tokens"`
+		ReservedForPrompt int               `json:"reserved_for_prompt"`
+		MaxParallelCalls  int               `json:"max_parallel_calls"`
+		MaxSections       int               `json:"max_sections"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if len(body.DocumentIDs) == 0 || body.Query == "" {
+		writeErr(w, http.StatusBadRequest, "document_ids (non-empty) and query are required")
+		return
+	}
+	if d.MultiDoc == nil {
+		writeErr(w, http.StatusNotImplemented, "multi-document queries not configured")
+		return
+	}
+
+	budget := retrieval.ContextBudget{
+		ModelName:         body.Model,
+		MaxTokens:         body.MaxTokens,
+		ReservedForPrompt: body.ReservedForPrompt,
+		MaxParallelCalls:  body.MaxParallelCalls,
+	}
+	if budget.MaxTokens == 0 {
+		budget.MaxTokens = 100000
+	}
+	if budget.ReservedForPrompt == 0 {
+		budget.ReservedForPrompt = 4000
+	}
+	if budget.MaxParallelCalls == 0 {
+		budget.MaxParallelCalls = 8
+	}
+
+	started := time.Now()
+	result, err := d.MultiDoc.Query(r.Context(), standaloneOrgID, body.DocumentIDs, body.Query, budget)
+	if err != nil {
+		d.Logger.Error("query/multi: failed", "err", err)
+		writeErr(w, http.StatusInternalServerError, "multi-doc retrieval failed: "+err.Error())
+		return
+	}
+
+	// Build per-document response.
+	docs := make([]map[string]any, 0, len(result.Documents))
+	for docID, dr := range result.Documents {
+		sections := make([]map[string]any, 0, len(dr.SelectedIDs))
+		for _, sid := range dr.SelectedIDs {
+			sec := dr.Tree.FindByID(sid)
+			if sec == nil {
+				continue
+			}
+			var content string
+			if sec.ContentRef != "" {
+				rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
+				if err == nil {
+					raw, _ := io.ReadAll(rc)
+					rc.Close()
+					content = string(raw)
+				}
+			}
+			s := map[string]any{
+				"id":          sec.ID,
+				"parent_id":   sec.ParentID,
+				"title":       sec.Title,
+				"summary":     sec.Summary,
+				"token_count": sec.TokenCount,
+				"content":     content,
+			}
+			sections = append(sections, s)
+			if body.MaxSections > 0 && len(sections) >= body.MaxSections {
+				break
+			}
+		}
+		docs = append(docs, map[string]any{
+			"document_id": docID,
+			"sections":    sections,
+			"usage": map[string]any{
+				"input_tokens":  dr.Usage.InputTokens,
+				"output_tokens": dr.Usage.OutputTokens,
+				"total_tokens":  dr.Usage.TotalTokens,
+				"cost_usd":      dr.Usage.CostUSD,
+				"llm_calls":     dr.Usage.LLMCalls,
+			},
+		})
+	}
+
+	// Per-document errors.
+	errs := make(map[string]string, len(result.Errors))
+	for docID, e := range result.Errors {
+		errs[string(docID)] = e.Error()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":      body.Query,
+		"strategy":   d.Strategy.Name(),
+		"model":      body.Model,
+		"documents":  docs,
+		"errors":     errs,
+		"elapsed_ms": time.Since(started).Milliseconds(),
+		"total_usage": map[string]any{
+			"input_tokens":  result.TotalUsage.InputTokens,
+			"output_tokens": result.TotalUsage.OutputTokens,
+			"total_tokens":  result.TotalUsage.TotalTokens,
+			"cost_usd":      result.TotalUsage.CostUSD,
+			"llm_calls":     result.TotalUsage.LLMCalls,
+		},
 	})
 }
 

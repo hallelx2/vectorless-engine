@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -61,8 +62,33 @@ func (p *Pool) UpdateSectionSummary(ctx context.Context, id tree.SectionID, summ
 	return mapErr(err)
 }
 
-// GetSection fetches a single section.
-func (p *Pool) GetSection(ctx context.Context, id tree.SectionID) (*Section, error) {
+// GetSection fetches a single section, scoped to an org via JOIN on
+// documents.org_id. Cross-org reads return ErrNotFound rather than
+// the row, so section IDs from other tenants can't be probed.
+func (p *Pool) GetSection(ctx context.Context, id tree.SectionID, orgID string) (*Section, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("GetSection: orgID is required")
+	}
+	row := p.QueryRow(ctx, `
+        SELECT s.id, s.document_id, COALESCE(s.parent_id, ''), s.ordinal, s.depth,
+               s.title, s.summary, s.content_ref, s.token_count, s.metadata
+        FROM sections s
+        JOIN documents d ON d.id = s.document_id
+        WHERE s.id = $1 AND d.org_id = $2`, string(id), orgID)
+	var s Section
+	var rawMeta []byte
+	if err := row.Scan(&s.ID, &s.DocumentID, &s.ParentID, &s.Ordinal, &s.Depth,
+		&s.Title, &s.Summary, &s.ContentRef, &s.TokenCount, &rawMeta); err != nil {
+		return nil, mapErr(err)
+	}
+	s.Metadata = unmarshalMeta(rawMeta)
+	return &s, nil
+}
+
+// GetSectionForWorker is the un-scoped variant — ONLY for the ingest
+// pipeline / background workers that have already authenticated via
+// QStash signature. Do NOT call from user-facing paths.
+func (p *Pool) GetSectionForWorker(ctx context.Context, id tree.SectionID) (*Section, error) {
 	row := p.QueryRow(ctx, `
         SELECT id, document_id, COALESCE(parent_id, ''), ordinal, depth,
                title, summary, content_ref, token_count, metadata
@@ -78,8 +104,41 @@ func (p *Pool) GetSection(ctx context.Context, id tree.SectionID) (*Section, err
 }
 
 // ListSections returns every section for a document in tree order
-// (parent before children, ordered by ordinal within a parent).
-func (p *Pool) ListSections(ctx context.Context, docID tree.DocumentID) ([]Section, error) {
+// (parent before children, ordered by ordinal within a parent),
+// scoped to an org via JOIN on documents.org_id.
+func (p *Pool) ListSections(ctx context.Context, docID tree.DocumentID, orgID string) ([]Section, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("ListSections: orgID is required")
+	}
+	rows, err := p.Query(ctx, `
+        SELECT s.id, s.document_id, COALESCE(s.parent_id, ''), s.ordinal, s.depth,
+               s.title, s.summary, s.content_ref, s.token_count, s.metadata
+        FROM sections s
+        JOIN documents d ON d.id = s.document_id
+        WHERE s.document_id = $1 AND d.org_id = $2
+        ORDER BY s.depth ASC, s.ordinal ASC`, string(docID), orgID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	var out []Section
+	for rows.Next() {
+		var s Section
+		var rawMeta []byte
+		if err := rows.Scan(&s.ID, &s.DocumentID, &s.ParentID, &s.Ordinal, &s.Depth,
+			&s.Title, &s.Summary, &s.ContentRef, &s.TokenCount, &rawMeta); err != nil {
+			return nil, err
+		}
+		s.Metadata = unmarshalMeta(rawMeta)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ListSectionsForWorker is the un-scoped variant for background
+// workers (LoadTree etc.) that have already authenticated via QStash.
+func (p *Pool) ListSectionsForWorker(ctx context.Context, docID tree.DocumentID) ([]Section, error) {
 	rows, err := p.Query(ctx, `
         SELECT id, document_id, COALESCE(parent_id, ''), ordinal, depth,
                title, summary, content_ref, token_count, metadata
@@ -105,16 +164,40 @@ func (p *Pool) ListSections(ctx context.Context, docID tree.DocumentID) ([]Secti
 	return out, rows.Err()
 }
 
-// LoadTree reconstructs a tree.Tree from the documents + sections tables.
-func (p *Pool) LoadTree(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
-	doc, err := p.GetDocument(ctx, docID)
+// LoadTree reconstructs a tree.Tree from the documents + sections
+// tables, scoped to an org. Use LoadTreeForWorker from background
+// jobs that don't have an org context but are otherwise trusted.
+func (p *Pool) LoadTree(ctx context.Context, docID tree.DocumentID, orgID string) (*tree.Tree, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("LoadTree: orgID is required")
+	}
+	doc, err := p.GetDocument(ctx, docID, orgID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := p.ListSections(ctx, docID)
+	rows, err := p.ListSections(ctx, docID, orgID)
 	if err != nil {
 		return nil, err
 	}
+	return buildTree(doc, rows), nil
+}
+
+// LoadTreeForWorker is the un-scoped variant used by the ingest
+// pipeline (which trusts itself) and the retrieval strategy when
+// it's called from a worker context.
+func (p *Pool) LoadTreeForWorker(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
+	doc, err := p.GetDocumentForWorker(ctx, docID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := p.ListSectionsForWorker(ctx, docID)
+	if err != nil {
+		return nil, err
+	}
+	return buildTree(doc, rows), nil
+}
+
+func buildTree(doc *Document, rows []Section) *tree.Tree {
 
 	byID := make(map[tree.SectionID]*tree.Section, len(rows))
 	for i := range rows {
@@ -153,5 +236,5 @@ func (p *Pool) LoadTree(ctx context.Context, docID tree.DocumentID) (*tree.Tree,
 		Root:       root,
 		CreatedAt:  doc.CreatedAt,
 		UpdatedAt:  doc.UpdatedAt,
-	}, nil
+	}
 }

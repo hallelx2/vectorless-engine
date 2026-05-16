@@ -206,7 +206,7 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 // Non-fatal per-section errors are collected and returned joined — the
 // caller decides whether to fail the whole document.
 func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
-	sections, err := p.DB.ListSections(ctx, docID)
+	sections, err := p.DB.ListSectionsForWorker(ctx, docID)
 	if err != nil {
 		return err
 	}
