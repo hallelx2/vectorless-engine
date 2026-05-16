@@ -327,6 +327,10 @@ func (c Config) Validate() error {
 		if c.Storage.S3.Bucket == "" || c.Storage.S3.Endpoint == "" {
 			return errors.New("storage.s3 requires bucket and endpoint")
 		}
+	case "gcs":
+		if c.Storage.GCS.Bucket == "" {
+			return errors.New("storage.gcs.bucket is required when driver=gcs")
+		}
 	default:
 		return fmt.Errorf("unknown storage.driver: %q", c.Storage.Driver)
 	}
