@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
@@ -159,12 +160,17 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 			id := tree.SectionID("sec_" + uuid.New().String())
 			contentKey := path.Join("documents", string(docID), "sections", string(id)+".txt")
 
-			if strings.TrimSpace(s.Content) != "" {
+			// Strip invalid UTF-8 / disallowed control chars at storage
+			// time so we never persist bytes the LLM SDKs would reject
+			// later. PDFs with CID-mapped fonts and no ToUnicode CMap
+			// leak raw glyph IDs into extracted text.
+			cleanedContent := cleanForLLM(s.Content)
+			if strings.TrimSpace(cleanedContent) != "" {
 				if err := p.Storage.Put(ctx, contentKey,
-					bytes.NewReader([]byte(s.Content)),
+					bytes.NewReader([]byte(cleanedContent)),
 					storage.Metadata{
 						ContentType: "text/plain; charset=utf-8",
-						Size:        int64(len(s.Content)),
+						Size:        int64(len(cleanedContent)),
 					}); err != nil {
 					return fmt.Errorf("store section %s: %w", id, err)
 				}
@@ -176,9 +182,9 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 				ParentID:   parent,
 				Ordinal:    i,
 				Depth:      depth,
-				Title:      s.Title,
+				Title:      cleanForLLM(s.Title),
 				ContentRef: contentKey,
-				TokenCount: approxTokens(s.Content),
+				TokenCount: approxTokens(cleanedContent),
 				Metadata:   s.Metadata,
 			}); err != nil {
 				return err
@@ -296,7 +302,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 	if len(kids) == 0 {
 		// Leaf: fetch the stored text.
 		if s.ContentRef == "" {
-			return s.Title, nil
+			return cleanForLLM(s.Title), nil
 		}
 		rc, _, err := p.Storage.Get(ctx, s.ContentRef)
 		if err != nil {
@@ -307,7 +313,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 		if err != nil {
 			return "", err
 		}
-		body = string(raw)
+		body = cleanForLLM(string(raw))
 	} else {
 		// Internal: compose from children's titles so we have SOMETHING to
 		// summarize even without bringing all children content into memory.
@@ -327,7 +333,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 			{Role: llmgate.RoleSystem, Content: "You write short, factual section summaries. One sentence, no preamble, no quotes."},
 			{Role: llmgate.RoleUser, Content: fmt.Sprintf(
 				"Summarize this section titled %q in a single sentence (max 40 words):\n\n%s",
-				s.Title, body)},
+				cleanForLLM(s.Title), body)},
 		},
 	})
 	if err != nil {
@@ -368,6 +374,46 @@ func (p *Pipeline) fail(ctx context.Context, id tree.DocumentID, stage string, c
 	if err := p.DB.SetDocumentStatus(failCtx, id, db.StatusFailed, msg); err != nil {
 		p.Logger.Error("ingest: failed to mark document failed", "err", err, "cause", cause)
 	}
+}
+
+// cleanForLLM strips invalid-UTF-8 bytes and a couple of control
+// characters that some LLM SDKs reject at the proto layer (the
+// gemini-go SDK is strict about this — it errors with
+// "google.ai.generativelanguage.v1beta.Part.text contains invalid UTF-8"
+// the moment any byte sequence isn't a complete UTF-8 codepoint).
+//
+// PDFs with custom CID-mapped fonts and no ToUnicode CMap leak raw
+// glyph IDs into our extracted text, which look like garbage bytes.
+// We drop them rather than fail the whole summarization.
+func cleanForLLM(s string) string {
+	if utf8.ValidString(s) && !hasBadControlChars(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune('�')
+			continue
+		}
+		// Drop NUL + most C0 control chars; keep tab/newline/CR.
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func hasBadControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // isLikelyMojibakeTitle returns true when s shows the doubled-glyph

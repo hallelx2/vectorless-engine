@@ -1,6 +1,37 @@
 package ingest
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
+
+func TestCleanForLLM(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Valid text passes through unchanged.
+		{"Hello world", "Hello world"},
+		{"Section title — with em dash", "Section title — with em dash"},
+		{"Multi-line\nbody\nstays intact", "Multi-line\nbody\nstays intact"},
+		// Invalid bytes get replaced with U+FFFD.
+		{"bad \xff byte", "bad � byte"},
+		// NUL + most C0 controls get dropped; tab/newline/CR are kept.
+		{"keep\ttabs\nand\rcrs but drop\x00nul", "keep\ttabs\nand\rcrs but dropnul"},
+		{"text with bell\x07char", "text with bellchar"},
+		// Empty input survives.
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := cleanForLLM(tc.in)
+		if got != tc.want {
+			t.Errorf("cleanForLLM(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("cleanForLLM(%q) returned invalid UTF-8", tc.in)
+		}
+	}
+}
 
 func TestIsLikelyMojibakeTitle(t *testing.T) {
 	cases := []struct {

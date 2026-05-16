@@ -62,6 +62,22 @@ func (p *Pool) UpdateSectionSummary(ctx context.Context, id tree.SectionID, summ
 	return mapErr(err)
 }
 
+// CountSections returns the number of sections persisted for a
+// document. Used by the dashboard metadata panel; not org-scoped on
+// purpose — pair with a prior GetDocument(orgID) check to ensure the
+// caller is allowed to see the document at all.
+func (p *Pool) CountSections(ctx context.Context, docID tree.DocumentID) (int, error) {
+	var n int
+	err := p.QueryRow(ctx,
+		`SELECT count(*) FROM sections WHERE document_id = $1`,
+		string(docID),
+	).Scan(&n)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return n, nil
+}
+
 // GetSection fetches a single section, scoped to an org via JOIN on
 // documents.org_id. Cross-org reads return ErrNotFound rather than
 // the row, so section IDs from other tenants can't be probed.
@@ -214,13 +230,16 @@ func buildTree(doc *Document, rows []Section) *tree.Tree {
 		}
 	}
 
-	var root *tree.Section
+	// Collect every section whose parent_id is empty — these are
+	// "top-level" sections. Older code picked just the first one as
+	// the tree root and silently dropped the other siblings + their
+	// subtrees. Now we wrap them in a synthetic root so callers see
+	// the whole document.
+	var topLevel []*tree.Section
 	for i := range rows {
 		s := byID[rows[i].ID]
 		if s.ParentID == "" {
-			if root == nil {
-				root = s
-			}
+			topLevel = append(topLevel, s)
 			continue
 		}
 		parent, ok := byID[s.ParentID]
@@ -228,6 +247,25 @@ func buildTree(doc *Document, rows []Section) *tree.Tree {
 			continue // orphan; shouldn't happen given FK
 		}
 		parent.Children = append(parent.Children, s)
+	}
+
+	var root *tree.Section
+	switch len(topLevel) {
+	case 0:
+		root = nil // empty doc
+	case 1:
+		root = topLevel[0]
+	default:
+		// Multiple top-level sections — wrap in a synthetic root so
+		// BuildView walks all of them. The synthetic root carries the
+		// document's title and an empty ID so consumers can distinguish
+		// it from a real section.
+		root = &tree.Section{
+			ID:       "",
+			ParentID: "",
+			Title:    doc.Title,
+			Children: topLevel,
+		}
 	}
 
 	return &tree.Tree{
