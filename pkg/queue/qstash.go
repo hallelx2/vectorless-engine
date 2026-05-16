@@ -118,6 +118,7 @@ func (q *QStash) Enqueue(ctx context.Context, j Job) error {
 	// section-store a multi-hundred-page PDF. Set the per-message
 	// timeout to 9m55s so we stay safely under Cloud Run's max
 	// request timeout (10m) and never get cut off mid-job.
+	// (The header expects a Go-style duration string.)
 	req.Header.Set("Upstash-Timeout", "595s")
 	if !j.RunAt.IsZero() {
 		delay := time.Until(j.RunAt)
