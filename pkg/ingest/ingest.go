@@ -141,7 +141,12 @@ func (p *Pipeline) parse(ctx context.Context, pl Payload) (*parser.ParsedDoc, er
 // persistTree writes sections + full content in document order. Parents
 // are written before children so the FK on sections.parent_id holds.
 func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *parser.ParsedDoc) error {
-	if doc.Title != "" {
+	// Only overwrite the row's title (which was seeded with the
+	// filename at upload time) when the parsed title looks usable.
+	// Watermarked PDFs whose overlay text shares a Y coordinate with
+	// the real title produce mojibake like "GGlloobbaall SSttrraatteeggyy"
+	// — we'd rather keep the original filename than show that to a user.
+	if doc.Title != "" && !isLikelyMojibakeTitle(doc.Title) {
 		if err := p.DB.SetDocumentTitle(ctx, docID, doc.Title); err != nil {
 			return err
 		}
@@ -363,6 +368,42 @@ func (p *Pipeline) fail(ctx context.Context, id tree.DocumentID, stage string, c
 	if err := p.DB.SetDocumentStatus(failCtx, id, db.StatusFailed, msg); err != nil {
 		p.Logger.Error("ingest: failed to mark document failed", "err", err, "cause", cause)
 	}
+}
+
+// isLikelyMojibakeTitle returns true when s shows the doubled-glyph
+// signature of two-layer PDFs (an overlay watermark drawn over real
+// text at the same Y coordinate, so chars from both layers interleave
+// into runs like "GGlloobbaall"). Also flags suspiciously short titles
+// that are pure punctuation/whitespace.
+//
+// Conservative on purpose: we'd rather show a slightly weird real
+// title than silently fall back to the filename for a normal doc.
+func isLikelyMojibakeTitle(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	// Count alphabetic chars + adjacent same-letter pairs (case-insensitive).
+	letters := 0
+	doubled := 0
+	var prev rune
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			letters++
+			if r == prev {
+				doubled++
+			}
+			prev = r
+		} else {
+			prev = 0
+		}
+	}
+	if letters < 4 {
+		return true // too few letters to be a real title
+	}
+	// >30% adjacent-doubled letters is the signature of the two-layer
+	// glyph interleaving — normal English titles sit well under 5%.
+	return doubled*100/letters > 30
 }
 
 // approxTokens is a cheap 4-chars-per-token heuristic used at ingest
