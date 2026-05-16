@@ -63,9 +63,10 @@ type DatabaseConfig struct {
 
 // StorageConfig configures the document storage backend.
 type StorageConfig struct {
-	Driver string         `yaml:"driver"`
-	Local  LocalStorage   `yaml:"local"`
-	S3     S3StorageBlock `yaml:"s3"`
+	Driver string          `yaml:"driver"`
+	Local  LocalStorage    `yaml:"local"`
+	S3     S3StorageBlock  `yaml:"s3"`
+	GCS    GCSStorageBlock `yaml:"gcs"`
 }
 
 // LocalStorage configures filesystem-backed storage.
@@ -81,6 +82,12 @@ type S3StorageBlock struct {
 	AccessKey    string `yaml:"access_key"`
 	SecretKey    string `yaml:"secret_key"`
 	UsePathStyle bool   `yaml:"use_path_style"`
+}
+
+// GCSStorageBlock configures native Google Cloud Storage. Auths via
+// Application Default Credentials, so no key fields needed.
+type GCSStorageBlock struct {
+	Bucket string `yaml:"bucket"`
 }
 
 // QueueConfig configures the background job queue.
@@ -150,6 +157,21 @@ type GeminiBlock struct {
 type RetrievalConfig struct {
 	Strategy    string           `yaml:"strategy"`
 	ChunkedTree ChunkedTreeBlock `yaml:"chunked_tree"`
+	Cache       CacheBlock       `yaml:"cache"`
+}
+
+// CacheBlock configures the retrieval-result cache.
+type CacheBlock struct {
+	// Enabled turns the retrieval cache on. Default: true.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxEntries is the maximum number of cached retrieval results.
+	// Default: 1024.
+	MaxEntries int `yaml:"max_entries"`
+
+	// TTLSeconds is how long (in seconds) a cached result remains valid.
+	// Default: 600 (10 minutes).
+	TTLSeconds int `yaml:"ttl_seconds"`
 }
 
 // ChunkedTreeBlock configures the chunked-tree strategy.
@@ -190,6 +212,11 @@ func Default() Config {
 				MaxTokensPerCall:         60000,
 				MaxParallelCalls:         8,
 				IncludeSiblingBreadcrumb: true,
+			},
+			Cache: CacheBlock{
+				Enabled:    true,
+				MaxEntries: 1024,
+				TTLSeconds: 600,
 			},
 		},
 		Log: LogConfig{Level: "info", Format: "json"},
@@ -263,6 +290,14 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := firstEnv("VLE_QSTASH_NEXT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY"); v != "" {
 		c.Queue.QStash.NextSigningKey = v
+	}
+	// Asynq / Redis env overrides. Accept both VLE_-prefixed and bare
+	// REDIS_* names so ops can set them once for multiple services.
+	if v := firstEnv("VLE_ASYNQ_ADDR", "REDIS_ADDR"); v != "" {
+		c.Queue.Asynq.Addr = v
+	}
+	if v := firstEnv("VLE_ASYNQ_PASSWORD", "REDIS_PASSWORD"); v != "" {
+		c.Queue.Asynq.Password = v
 	}
 	if v := os.Getenv("VLE_STORAGE_DRIVER"); v != "" {
 		c.Storage.Driver = v
