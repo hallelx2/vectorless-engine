@@ -20,9 +20,11 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hallelx2/llmgate"
 
@@ -57,12 +59,20 @@ type Pipeline struct {
 	// SummaryModel, when non-empty, overrides the LLM client's default
 	// model for summarization calls.
 	SummaryModel string
+
+	// SummaryConcurrency bounds the number of concurrent LLM calls during
+	// the summarization stage. Higher values speed up ingest for large
+	// documents at the cost of higher LLM throughput. Default: 4.
+	SummaryConcurrency int
 }
 
 // NewPipeline returns a Pipeline with sensible defaults filled in.
 func NewPipeline(p Pipeline) *Pipeline {
 	if p.SummaryMaxChars == 0 {
 		p.SummaryMaxChars = 4000
+	}
+	if p.SummaryConcurrency <= 0 {
+		p.SummaryConcurrency = 4
 	}
 	if p.Logger == nil {
 		p.Logger = slog.Default()
@@ -185,6 +195,14 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 // from storage; internal sections synthesize a summary from their
 // children's titles.
 //
+// Summarization is parallelized across sections, bounded by
+// Pipeline.SummaryConcurrency. This speeds up ingest for large
+// documents (100+ sections) from minutes to seconds.
+//
+// Processing order: leaf sections first (depth DESC, ordinal ASC) so
+// that by the time internal sections are summarized, their children's
+// titles are already populated.
+//
 // Non-fatal per-section errors are collected and returned joined — the
 // caller decides whether to fail the whole document.
 func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
@@ -201,20 +219,70 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
 		}
 	}
 
-	var errs []error
+	// Separate sections into depth layers so we can process leaves in
+	// parallel first, then move up the tree. Within each layer, sections
+	// are independent and safe to parallelize.
+	maxDepth := 0
+	for _, s := range sections {
+		if s.Depth > maxDepth {
+			maxDepth = s.Depth
+		}
+	}
+
+	byDepth := make(map[int][]db.Section)
 	for _, s := range sections {
 		if s.Summary != "" {
 			continue
 		}
-		summary, err := p.summaryFor(ctx, s, children[s.ID])
-		if err != nil {
-			errs = append(errs, fmt.Errorf("section %s: %w", s.ID, err))
+		byDepth[s.Depth] = append(byDepth[s.Depth], s)
+	}
+
+	var (
+		mu   sync.Mutex
+		errs []error
+	)
+
+	// Process from deepest to shallowest so children are summarized
+	// before their parents.
+	for depth := maxDepth; depth >= 0; depth-- {
+		layer := byDepth[depth]
+		if len(layer) == 0 {
 			continue
 		}
-		if err := p.DB.UpdateSectionSummary(ctx, s.ID, summary, s.TokenCount); err != nil {
-			errs = append(errs, err)
+
+		sem := make(chan struct{}, p.SummaryConcurrency)
+		g, gctx := errgroup.WithContext(ctx)
+
+		for _, s := range layer {
+			s := s
+			g.Go(func() error {
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-gctx.Done():
+					return nil
+				}
+
+				summary, err := p.summaryFor(gctx, s, children[s.ID])
+				if err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("section %s: %w", s.ID, err))
+					mu.Unlock()
+					return nil // non-fatal — don't abort siblings
+				}
+
+				if err := p.DB.UpdateSectionSummary(gctx, s.ID, summary, s.TokenCount); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+				return nil
+			})
 		}
+
+		_ = g.Wait() // errors collected in errs, not propagated
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -287,7 +355,12 @@ func fallbackSummary(title, body string) string {
 
 func (p *Pipeline) fail(ctx context.Context, id tree.DocumentID, stage string, cause error) {
 	msg := fmt.Sprintf("%s: %s", stage, cause.Error())
-	if err := p.DB.SetDocumentStatus(ctx, id, db.StatusFailed, msg); err != nil {
+	// Use a FRESH context for the failure write — the inbound one is
+	// almost certainly the reason we're failing (timeout/cancel) and
+	// reusing it would leave the doc stuck on "parsing" forever.
+	failCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.DB.SetDocumentStatus(failCtx, id, db.StatusFailed, msg); err != nil {
 		p.Logger.Error("ingest: failed to mark document failed", "err", err, "cause", cause)
 	}
 }
