@@ -113,6 +113,12 @@ func (q *QStash) Enqueue(ctx context.Context, j Job) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+q.cfg.Token)
 	req.Header.Set("Content-Type", "application/json")
+	// QStash's default callback delivery timeout is 30s — way too
+	// short for an ingest job that has to parse + summarize +
+	// section-store a multi-hundred-page PDF. Set the per-message
+	// timeout to 9m55s so we stay safely under Cloud Run's max
+	// request timeout (10m) and never get cut off mid-job.
+	req.Header.Set("Upstash-Timeout", "595s")
 	if !j.RunAt.IsZero() {
 		delay := time.Until(j.RunAt)
 		if delay > 0 {
