@@ -261,8 +261,15 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			var sb strings.Builder
 			var lastX float64
 			for i, ch := range b.chars {
-				// Insert a space if there's a visible gap between glyphs.
-				if i > 0 && ch.X-lastX > ch.FontSize*0.3 {
+				// Insert a space when the gap between the previous
+				// glyph's end and this glyph's start exceeds a fraction
+				// of the font size. 0.20 was tuned against real PDFs
+				// (arXiv papers): word-boundary gaps land around
+				// 0.20-0.30·fontSize while intra-word kerning stays
+				// well below. The old 0.30 threshold missed most word
+				// boundaries, producing run-together text like
+				// "implementingtensor2tensor".
+				if i > 0 && ch.X-lastX > ch.FontSize*0.20 {
 					sb.WriteString(" ")
 				}
 				sb.WriteString(ch.S)
