@@ -279,6 +279,13 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			if text == "" {
 				continue
 			}
+			// Drop publisher/preprint boilerplate (e.g. the rotated
+			// arXiv license stamp in the left margin). Left in, it
+			// pollutes the structure with junk top-level "headings"
+			// and the document title.
+			if isBoilerplateLine(text) {
+				continue
+			}
 			out = append(out, pdfRow{
 				page:     pageNum,
 				fontSize: b.maxFS,
@@ -450,6 +457,43 @@ func normalizeForMatch(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// boilerplateSignatures are substrings (lower-cased) that mark a line
+// as publisher / preprint / license boilerplate rather than document
+// content. Kept deliberately specific so we never drop real prose —
+// each phrase is something that essentially only appears in a
+// copyright/license stamp.
+var boilerplateSignatures = []string{
+	"hereby grants permission",
+	"provided proper attribution is provided",
+	"solely for use in journalistic",
+	"all rights reserved",
+	"is licensed under a creative commons",
+	"licensed under cc by",
+	"this work is licensed under",
+	"permission to make digital or hard copies",
+	"copyright held by the owner",
+	"preprint. under review",
+	"preprint submitted to",
+}
+
+// isBoilerplateLine reports whether a row is publisher/license noise.
+// Matches the curated signature list, plus the bare arXiv id stamp
+// ("arXiv:2401.01234v2 [cs.CL] 5 Jan 2024") that arXiv prints down
+// the page margin.
+func isBoilerplateLine(s string) bool {
+	low := strings.ToLower(strings.TrimSpace(s))
+	for _, sig := range boilerplateSignatures {
+		if strings.Contains(low, sig) {
+			return true
+		}
+	}
+	// arXiv margin stamp: starts with "arxiv:" followed by a digit.
+	if strings.HasPrefix(low, "arxiv:") && len(low) > 6 && low[6] >= '0' && low[6] <= '9' {
+		return true
+	}
+	return false
 }
 
 func looksLikeHeading(s string) bool {
