@@ -478,10 +478,22 @@ var boilerplateSignatures = []string{
 	"preprint submitted to",
 }
 
+// boilerplateFragments are short tails of a license sentence that the
+// PDF splits onto their own row (e.g. "...journalistic or scholarly
+// works." → a lone "scholarly works." row). These are too generic to
+// match anywhere in a line, so we only drop them when the whole row
+// is a short fragment (≤ 4 words) — real prose using the phrase lives
+// inside a longer sentence.
+var boilerplateFragments = []string{
+	"scholarly works",
+	"journalistic or",
+	"or scholarly",
+}
+
 // isBoilerplateLine reports whether a row is publisher/license noise.
-// Matches the curated signature list, plus the bare arXiv id stamp
-// ("arXiv:2401.01234v2 [cs.CL] 5 Jan 2024") that arXiv prints down
-// the page margin.
+// Matches the curated signature list, the bare arXiv id stamp
+// ("arXiv:2401.01234v2 [cs.CL] 5 Jan 2024"), and short license-tail
+// fragments.
 func isBoilerplateLine(s string) bool {
 	low := strings.ToLower(strings.TrimSpace(s))
 	for _, sig := range boilerplateSignatures {
@@ -492,6 +504,14 @@ func isBoilerplateLine(s string) bool {
 	// arXiv margin stamp: starts with "arxiv:" followed by a digit.
 	if strings.HasPrefix(low, "arxiv:") && len(low) > 6 && low[6] >= '0' && low[6] <= '9' {
 		return true
+	}
+	// Short license-tail fragments.
+	if len(strings.Fields(low)) <= 4 {
+		for _, frag := range boilerplateFragments {
+			if strings.Contains(low, frag) {
+				return true
+			}
+		}
 	}
 	return false
 }

@@ -10,6 +10,7 @@ func TestIsBoilerplateLine(t *testing.T) {
 		"This work is licensed under a Creative Commons Attribution 4.0 License.",
 		"arXiv:1706.03762v7 [cs.CL] 2 Aug 2023",
 		"Preprint. Under review.",
+		"scholarly works.", // short license-tail fragment
 	}
 	for _, s := range boiler {
 		if !isBoilerplateLine(s) {
@@ -24,6 +25,7 @@ func TestIsBoilerplateLine(t *testing.T) {
 		"Results",
 		"References",
 		"Recommendation: initiate low-dose therapy (evidence grade A).",
+		"This study was published in several scholarly works over the past decade.", // 'scholarly works' inside real prose
 	}
 	for _, s := range content {
 		if isBoilerplateLine(s) {
