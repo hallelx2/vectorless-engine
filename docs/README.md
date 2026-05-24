@@ -23,6 +23,7 @@ specific subsystem you're working on.
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | The whole stack, layer by layer. Read this first. |
 | [REPOS.md](./REPOS.md) | Which repositories exist, which are public vs private, when to split. |
 | [ENGINE.md](./ENGINE.md) | The core retrieval engine — library + daemon. |
+| [STORES.md](./STORES.md) | Stores — named collections (Org → Store → Documents). |
 | [PROFILES.md](./PROFILES.md) | Domain-aware structuring — typed, navigable maps per domain. |
 | [SERVER.md](./SERVER.md) | The HTTP + gRPC service that fronts the engine. |
 | [LLMGATE.md](./LLMGATE.md) | The "LiteLLM for Go" gateway layer. |

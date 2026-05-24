@@ -16,6 +16,7 @@ progress, and what's next.
 | Roadmap | Subsystem | Design doc |
 |---|---|---|
 | [ENGINE.md](./ENGINE.md) | Core engine | [../ENGINE.md](../ENGINE.md) |
+| [STORES.md](./STORES.md) | Stores (Org→Store→Docs) | [../STORES.md](../STORES.md) |
 | [PROFILES.md](./PROFILES.md) | Domain-aware structuring | [../PROFILES.md](../PROFILES.md) |
 | [SERVER.md](./SERVER.md) | HTTP/gRPC transport | [../SERVER.md](../SERVER.md) |
 | [LLMGATE.md](./LLMGATE.md) | LLM gateway library | [../LLMGATE.md](../LLMGATE.md) |
