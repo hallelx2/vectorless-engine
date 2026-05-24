@@ -109,9 +109,35 @@ column carries the typed fields — no schema churn there.
 ```
 sections
   ...
-  kind        TEXT NOT NULL DEFAULT ''   -- canonical section type
+  kind        TEXT NOT NULL DEFAULT ''   -- profile-specific type, e.g. "Method"
+  core_kind   TEXT NOT NULL DEFAULT ''   -- shared cross-domain bucket
   metadata    JSONB                       -- typed domain fields (exists)
 ```
+
+### Kind taxonomy: per-profile kinds over a shared core *(decided)*
+
+Each profile defines its own precise vocabulary (`Method`,
+`Recommendation`, `Dosage`, …) — that's what makes a domain
+expressive. But every profile kind also maps to a **small shared
+core** so cross-domain tooling (dashboards, filters, the generic UI)
+can assume *something* about any document:
+
+```
+core_kind ∈ { meta | body | reference | appendix | navigation }
+```
+
+| Profile kind | core_kind |
+|---|---|
+| Abstract, Contributions | `meta` |
+| Method, Result, Recommendation, Dosage | `body` |
+| References | `reference` |
+| Appendix, Attention Visualizations | `appendix` |
+| "Part II" (container with no own text) | `navigation` |
+
+So a generic filter like "exclude references" or "only substantive
+body" works on *any* document via `core_kind`, while a research-paper
+tool filters precisely on `kind = "Method"`. Profiles own the mapping;
+the core set is fixed and small.
 
 The tree `View` (what the agent reasons over) exposes `kind` next to
 `title` + `summary`, so the ToC the agent reads is already typed:
@@ -159,21 +185,22 @@ Future candidates: `legal-contract` (clauses, definitions, exhibits,
 obligations), `financial-filing` (10-K MD&A, risk factors,
 statements), `api-docs`, `clinical-note` (SOAP).
 
-## Profile selection
+## Profile selection: declared, else auto-detect *(decided)*
 
-Two ways a document gets a profile; **open design question** which to
-default to (see roadmap):
+A document resolves its profile in this order:
 
-- **Declared** — the caller sets it at upload (`X-Vectorless-Profile:
-  research-paper`, or an SDK arg). Predictable, explicit, best for a
-  specialized system that *knows* its corpus is all one kind.
-- **Auto-detected** — the engine runs every profile's `Detect`, picks
-  the highest-confidence one above a threshold, falls back to
-  `generic`. Zero-config, best for mixed corpora.
+1. **Declared** — if the caller sets `X-Vectorless-Profile:
+   research-paper` (or the SDK arg), use it. Explicit, predictable,
+   best for a specialized system that *knows* its corpus.
+2. **Auto-detected** — otherwise run every profile's `Detect` and pick
+   the highest-confidence one above a threshold. Detection is cheap
+   (outline heuristics, no LLM), so always-on costs nothing.
+3. **`generic`** — if nothing clears the threshold, fall back to the
+   no-op profile (today's behavior).
 
-The likely answer is **both**: honor a declared profile; otherwise
-auto-detect; otherwise `generic`. Detection is cheap (no LLM), so
-running it always is fine.
+The detection confidence threshold is the one knob left to tune (start
+conservative, ~0.6, so a weak match prefers `generic` over a wrong
+guess).
 
 ## How it plugs into the engine
 
@@ -243,21 +270,29 @@ So the design builds on a written starting point:
 Profiles are the **next layer up**: same parsers, same retrieval, same
 no-embeddings stance — a semantic typing + enrichment pass in between.
 
+## Decisions locked
+
+- **Profile selection** — declared → auto-detect → `generic`. ✓
+- **Kind taxonomy** — per-profile kinds, each mapped to a fixed shared
+  `core_kind` ({meta, body, reference, appendix, navigation}). ✓
+- **First domains** — `research-paper` *and* `medical-guideline`, built
+  in parallel on one scaffold. ✓ (needs a clean medical fixture.)
+- **Figures / tables** — metadata refs (`figure_refs`, `table_refs`)
+  on the owning section, *not* first-class nodes. An agent sees "this
+  section references Table 2"; we don't make Table 2 its own
+  navigable node (revisit only if a domain demands it). ✓
+
 ## Open questions
 
-- **Default selection** — declared-only, auto-only, or both? (Leaning
-  both.) What confidence threshold makes auto-detect safe?
-- **Kind taxonomy stability** — are kinds free strings per profile, or
-  is there a shared cross-domain core (`Body`, `Reference`, `Meta`)
-  every profile maps into for generic tooling?
+- **Detection threshold** — what confidence makes auto-detect safe
+  without false-claiming a `generic` doc? Start ~0.6, tune on real
+  uploads.
 - **Re-profiling** — if a better profile ships later, do we re-apply
   to existing docs? (Tie into the incremental re-ingest work in
   [ENGINE.md](./ENGINE.md) open questions.)
 - **Cross-refs storage** — new `section_refs` table vs. edges in
   section metadata. A table is queryable; metadata is cheaper.
-- **Figures/tables as nodes** — first-class `Section`s with a `Figure`
-  kind, or metadata refs on the owning section? Affects how an agent
-  addresses "Table 2".
+  (Phase 3 concern.)
 
 ## Related docs
 
