@@ -1,0 +1,48 @@
+# Build the multi-tenant transport server (cmd/server) from the unified
+# engine module. Unlike the old standalone server repo, there are no
+# sibling modules — the engine library lives here and llmgate is a normal
+# tagged dependency fetched by `go mod download`.
+#
+# Usage:  docker build -f Dockerfile.server -t vectorless-server .
+
+FROM golang:1.25-alpine AS build
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /src
+
+# Cache module downloads (includes llmgate from public GitHub).
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy only the source needed to compile the server binary.
+COPY cmd/      ./cmd/
+COPY pkg/      ./pkg/
+COPY internal/ ./internal/
+COPY gen/      ./gen/
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /bin/vectorless-server \
+      ./cmd/server
+
+# ── Runtime stage ──────────────────────────────────────────────────
+FROM gcr.io/distroless/static:nonroot
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /bin/vectorless-server /vectorless-server
+
+USER nonroot:nonroot
+ENTRYPOINT ["/vectorless-server"]
+CMD ["--role", "server"]
+
+EXPOSE 8080
+
+LABEL org.opencontainers.image.title="vectorless-server"
+LABEL org.opencontainers.image.description="Vectorless transport server — HTTP + gRPC over the engine library"
+LABEL org.opencontainers.image.source="https://github.com/hallelx2/vectorless-engine"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.vendor="Vectorless"

@@ -1,0 +1,16 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/hallelx2/vectorless-engine/gen
+plugins:
+  # Generate Go protobuf message types.
+  - remote: buf.build/protocolbuffers/go
+    out: gen
+    opt: paths=source_relative
+
+  # Generate Connect-RPC Go handler + client stubs.
+  - remote: buf.build/connectrpc/go
+    out: gen
+    opt: paths=source_relative

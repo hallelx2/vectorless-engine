@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package vectorless.v1;
+
+option go_package = "github.com/hallelx2/vectorless-server/gen/vectorless/v1;vectorlessv1";
+
+import "google/protobuf/timestamp.proto";
+
+// DocumentsService manages the lifecycle of documents in the vectorless
+// engine: ingest, inspect, list, and delete.
+service DocumentsService {
+  // CreateDocument ingests a new document. The bytes are stored and an
+  // asynchronous pipeline parses, builds a tree, and summarises every
+  // section. Returns immediately with the document ID in "pending" state.
+  rpc CreateDocument(CreateDocumentRequest) returns (CreateDocumentResponse);
+
+  // GetDocument returns metadata and lifecycle status for one document.
+  rpc GetDocument(GetDocumentRequest) returns (Document);
+
+  // ListDocuments returns a paginated list of documents, newest first.
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+
+  // DeleteDocument removes a document and all its sections.
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+
+  // GetDocumentTree returns the compact tree view used for LLM reasoning.
+  rpc GetDocumentTree(GetDocumentTreeRequest) returns (DocumentTree);
+
+  // GetDocumentSource streams the original document bytes back to the
+  // caller. Optional — not all deployments enable this.
+  rpc GetDocumentSource(GetDocumentSourceRequest) returns (stream DocumentSourceChunk);
+
+  // GetSection returns a single section with its full content fetched
+  // from storage.
+  rpc GetSection(GetSectionRequest) returns (Section);
+}
+
+// ── Requests & Responses ──────────────────────────────────────────
+
+message CreateDocumentRequest {
+  // Raw document content as bytes.
+  bytes content = 1;
+
+  // Original filename (e.g. "report.pdf"). Used for content-type
+  // detection when content_type is empty.
+  string filename = 2;
+
+  // MIME content type. If empty, inferred from filename extension.
+  string content_type = 3;
+
+  // Optional key-value metadata attached to the document.
+  map<string, string> metadata = 4;
+}
+
+message CreateDocumentResponse {
+  // The assigned document ID.
+  string document_id = 1;
+
+  // Initial status — always "pending".
+  string status = 2;
+}
+
+message GetDocumentRequest {
+  string document_id = 1;
+}
+
+message ListDocumentsRequest {
+  // Page size. Clamped to [1, 200], default 50.
+  int32 limit = 1;
+
+  // Cursor for keyset pagination — the next_cursor value from the
+  // previous page. Empty string means "start from newest".
+  string cursor = 2;
+
+  // Optional status filter (e.g. "ready", "pending", "failed").
+  string status = 3;
+}
+
+message ListDocumentsResponse {
+  repeated Document documents = 1;
+
+  // Cursor for the next page. Empty when there are no more results.
+  string next_cursor = 2;
+}
+
+message DeleteDocumentRequest {
+  string document_id = 1;
+}
+
+message DeleteDocumentResponse {}
+
+message GetDocumentTreeRequest {
+  string document_id = 1;
+}
+
+message GetDocumentSourceRequest {
+  string document_id = 1;
+}
+
+message DocumentSourceChunk {
+  bytes data = 1;
+}
+
+message GetSectionRequest {
+  string section_id = 1;
+}
+
+// ── Resource messages ─────────────────────────────────────────────
+
+message Document {
+  string id = 1;
+  string title = 2;
+  string content_type = 3;
+  string status = 4;
+  int64 byte_size = 5;
+  string error_message = 6;
+  map<string, string> metadata = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message DocumentTree {
+  string document_id = 1;
+  string title = 2;
+  repeated SectionView sections = 3;
+}
+
+message SectionView {
+  string id = 1;
+  string parent_id = 2;
+  int32 depth = 3;
+  string title = 4;
+  string summary = 5;
+  repeated string children = 6;
+  int32 tokens = 7;
+}
+
+message Section {
+  string id = 1;
+  string document_id = 2;
+  string parent_id = 3;
+  int32 ordinal = 4;
+  int32 depth = 5;
+  string title = 6;
+  string summary = 7;
+  int32 token_count = 8;
+  map<string, string> metadata = 9;
+
+  // Full section content fetched from storage.
+  string content = 10;
+}

@@ -1,0 +1,445 @@
+openapi: "3.1.0"
+info:
+  title: Vectorless API
+  description: |
+    Structure-preserving document retrieval API. Ingest documents, build
+    hierarchical trees, and query them using LLM-driven reasoning — no
+    embeddings, no chunks, no vectors.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.vectorless.dev
+    description: Managed SaaS
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Documents
+    description: Document lifecycle — ingest, inspect, list, delete.
+  - name: Sections
+    description: Individual document sections.
+  - name: Query
+    description: Structure-aware retrieval.
+  - name: Health
+    description: Liveness and version.
+
+paths:
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /v1/version:
+    get:
+      tags: [Health]
+      summary: Build version
+      operationId: getVersion
+      security: []
+      responses:
+        "200":
+          description: Server build version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: "1.2.3"
+
+  /v1/documents:
+    get:
+      tags: [Documents]
+      summary: List documents
+      operationId: listDocuments
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          description: RFC 3339 timestamp from previous page's next_cursor
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, parsing, summarizing, ready, failed]
+      responses:
+        "200":
+          description: Paginated document list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Document"
+                  next_cursor:
+                    type: string
+
+    post:
+      tags: [Documents]
+      summary: Ingest a document
+      operationId: createDocument
+      description: |
+        Upload a document for ingestion. Accepts multipart/form-data
+        (field: "file") or JSON body with content. Returns immediately
+        with a document_id in "pending" state. The ingest pipeline runs
+        asynchronously: parse → build tree → summarize sections.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                filename:
+                  type: string
+                  example: report.md
+                content_type:
+                  type: string
+                  example: text/markdown
+                content:
+                  type: string
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "202":
+          description: Document accepted for ingestion
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document_id:
+                    type: string
+                  status:
+                    type: string
+                    example: pending
+
+  /v1/documents/{id}:
+    get:
+      tags: [Documents]
+      summary: Get document metadata
+      operationId: getDocument
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Document metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [Documents]
+      summary: Delete a document
+      operationId: deleteDocument
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "204":
+          description: Document deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/documents/{id}/tree:
+    get:
+      tags: [Documents]
+      summary: Get document tree
+      operationId: getDocumentTree
+      description: |
+        Returns the compact hierarchical tree view of a document.
+        This is the structure the retrieval strategy feeds to the LLM.
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Document tree
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentTree"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sections/{id}:
+    get:
+      tags: [Sections]
+      summary: Get a section with full content
+      operationId: getSection
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Section with content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Section"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/query:
+    post:
+      tags: [Query]
+      summary: Query a document
+      operationId: query
+      description: |
+        Runs the configured retrieval strategy (single-pass or
+        chunked-tree) against the document's tree. The LLM reasons
+        over the tree structure and returns the sections it judges
+        most relevant to the query.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: Retrieval result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/query/stream:
+    post:
+      tags: [Query]
+      summary: Streaming query (SSE)
+      operationId: queryStream
+      description: |
+        Streaming variant of the query endpoint. Returns Server-Sent
+        Events as sections are identified, before the full strategy
+        run completes. Each event is a JSON object.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Static API key for self-hosted deployments.
+
+  parameters:
+    DocumentID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: document not found
+
+  schemas:
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        content_type:
+          type: string
+        status:
+          type: string
+          enum: [pending, parsing, summarizing, ready, failed]
+        byte_size:
+          type: integer
+        error_message:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DocumentTree:
+      type: object
+      properties:
+        document_id:
+          type: string
+        title:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/SectionView"
+
+    SectionView:
+      type: object
+      properties:
+        id:
+          type: string
+        parent_id:
+          type: string
+        depth:
+          type: integer
+        title:
+          type: string
+        summary:
+          type: string
+        children:
+          type: array
+          items:
+            type: string
+        tokens:
+          type: integer
+
+    Section:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        parent_id:
+          type: string
+        ordinal:
+          type: integer
+        depth:
+          type: integer
+        title:
+          type: string
+        summary:
+          type: string
+        token_count:
+          type: integer
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        content:
+          type: string
+          description: Full section content from storage.
+
+    QueryRequest:
+      type: object
+      required: [document_id, query]
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+          description: Natural-language query.
+        model:
+          type: string
+          description: Override the LLM model used for retrieval.
+        max_tokens:
+          type: integer
+          default: 100000
+        reserved_for_prompt:
+          type: integer
+          default: 4000
+        max_parallel_calls:
+          type: integer
+          default: 8
+        max_sections:
+          type: integer
+          description: Cap on returned sections. 0 = no cap.
+
+    QueryResponse:
+      type: object
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+        strategy:
+          type: string
+          enum: [single-pass, chunked-tree]
+        model:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuerySection"
+        elapsed_ms:
+          type: integer
+
+    QuerySection:
+      type: object
+      properties:
+        id:
+          type: string
+        parent_id:
+          type: string
+        title:
+          type: string
+        summary:
+          type: string
+        token_count:
+          type: integer
+        content:
+          type: string
+          description: Full section content from storage.

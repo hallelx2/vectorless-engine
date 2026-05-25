@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package vectorless.v1;
+
+option go_package = "github.com/hallelx2/vectorless-server/gen/vectorless/v1;vectorlessv1";
+
+// QueryService runs structure-aware retrieval against a document's tree.
+//
+// The engine loads the document tree, invokes the configured retrieval
+// strategy (single-pass or chunked-tree), and returns the sections the
+// model judged relevant — with full content, not fragments.
+service QueryService {
+  // Query retrieves sections relevant to a natural-language query.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // QueryStream is the streaming variant — sections are returned as
+  // they are selected, before the full strategy run completes.
+  rpc QueryStream(QueryRequest) returns (stream QueryStreamEvent);
+
+  // QueryMulti runs retrieval against multiple documents in parallel.
+  // Partial success: results are returned for docs that succeed even
+  // if some fail. Per-document errors are surfaced in the response.
+  rpc QueryMulti(QueryMultiRequest) returns (QueryMultiResponse);
+
+  // QueryMultiStream is the streaming variant of QueryMulti. Events
+  // include document attribution so the client can separate per-doc
+  // results.
+  rpc QueryMultiStream(QueryMultiRequest) returns (stream QueryMultiStreamEvent);
+}
+
+// QueryStreamEvent is a single event in a streaming query response.
+// Events arrive in order: started → (slice_started → section_selected*
+// → slice_completed)* → completed.
+message QueryStreamEvent {
+  // Event type: "started", "slice_started", "section_selected",
+  // "slice_completed", "completed", "error".
+  string type = 1;
+
+  // Set when type is "section_selected" — the full section data.
+  QuerySection section = 2;
+
+  // Which slice produced this event (chunked-tree). -1 for single-pass.
+  int32 slice_index = 3;
+
+  // Total number of slices being processed.
+  int32 total_slices = 4;
+
+  // Human-readable status message.
+  string message = 5;
+
+  // Strategy name (set in "started" event).
+  string strategy = 6;
+
+  // Document ID (set in "started" event).
+  string document_id = 7;
+
+  // Original query (set in "started" event).
+  string query = 8;
+
+  // Elapsed time in ms (set in "completed" event).
+  int64 elapsed_ms = 9;
+}
+
+message QueryRequest {
+  // The document to query against.
+  string document_id = 1;
+
+  // The natural-language query.
+  string query = 2;
+
+  // Optional: override the LLM model used for retrieval.
+  string model = 3;
+
+  // Optional: maximum context window tokens. Default 100,000.
+  int32 max_tokens = 4;
+
+  // Optional: tokens reserved for system prompt + response. Default 4,000.
+  int32 reserved_for_prompt = 5;
+
+  // Optional: max parallel LLM calls for chunked-tree. Default 8.
+  int32 max_parallel_calls = 6;
+
+  // Optional: cap on the number of returned sections. 0 = no cap.
+  int32 max_sections = 7;
+}
+
+message QueryResponse {
+  string document_id = 1;
+  string query = 2;
+  string strategy = 3;
+  string model = 4;
+  repeated QuerySection sections = 5;
+  int64 elapsed_ms = 6;
+}
+
+message QuerySection {
+  string id = 1;
+  string parent_id = 2;
+  string title = 3;
+  string summary = 4;
+  int32 token_count = 5;
+
+  // Full section content from storage.
+  string content = 6;
+}
+
+// ── Multi-document query ─────────────────────────────────────────
+
+message QueryMultiRequest {
+  // One or more documents to query against in parallel.
+  repeated string document_ids = 1;
+
+  // The natural-language query.
+  string query = 2;
+
+  // Optional: override the LLM model used for retrieval.
+  string model = 3;
+
+  // Optional: maximum context window tokens. Default 100,000.
+  int32 max_tokens = 4;
+
+  // Optional: tokens reserved for system prompt + response. Default 4,000.
+  int32 reserved_for_prompt = 5;
+
+  // Optional: max parallel LLM calls for chunked-tree. Default 8.
+  int32 max_parallel_calls = 6;
+
+  // Optional: cap on the number of returned sections per document. 0 = no cap.
+  int32 max_sections = 7;
+}
+
+message QueryMultiResponse {
+  string query = 1;
+  string strategy = 2;
+  string model = 3;
+
+  // Per-document results.
+  repeated DocumentQueryResult documents = 4;
+
+  // Per-document errors (keyed by document_id).
+  map<string, string> errors = 5;
+
+  int64 elapsed_ms = 6;
+
+  // Aggregated usage across all documents.
+  QueryUsage total_usage = 7;
+}
+
+// DocumentQueryResult holds the retrieval outcome for one document
+// within a multi-document query.
+message DocumentQueryResult {
+  string document_id = 1;
+  repeated QuerySection sections = 2;
+  QueryUsage usage = 3;
+}
+
+// QueryUsage aggregates token + cost accounting for a retrieval run.
+message QueryUsage {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+  int32 total_tokens = 3;
+  double cost_usd = 4;
+  int32 llm_calls = 5;
+}
+
+// QueryMultiStreamEvent wraps a streaming event with document attribution.
+message QueryMultiStreamEvent {
+  // Which document produced this event.
+  string document_id = 1;
+
+  // 0-based index of the document in the request's document_ids.
+  int32 doc_index = 2;
+
+  // The underlying retrieval event.
+  string type = 3;
+  QuerySection section = 4;
+  int32 slice_index = 5;
+  int32 total_slices = 6;
+  string message = 7;
+  string query = 8;
+  int64 elapsed_ms = 9;
+}

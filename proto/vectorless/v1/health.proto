@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package vectorless.v1;
+
+option go_package = "github.com/hallelx2/vectorless-server/gen/vectorless/v1;vectorlessv1";
+
+// HealthService provides liveness, readiness, and version information.
+service HealthService {
+  // Check returns the current health status. Used as a liveness probe
+  // in Kubernetes and load-balancer health checks.
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Version returns the server build version, useful for deploy
+  // verification and debugging.
+  rpc Version(VersionRequest) returns (VersionResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  // "ok" when healthy.
+  string status = 1;
+}
+
+message VersionRequest {}
+
+message VersionResponse {
+  string version = 1;
+}
