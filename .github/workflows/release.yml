@@ -1,0 +1,78 @@
+name: release
+
+# Tag-driven deploy of the transport server (cmd/server) to Cloud Run.
+#
+# Pushing a semver tag (v1.2.3) builds the server image from this repo at
+# that tag and deploys it. Keyless auth via Workload Identity Federation
+# (the deployer SA is owner-scoped, so this public repo can use it). No
+# secrets are needed — the server builds from this module alone and
+# llmgate is a public tagged dependency.
+#
+# workflow_dispatch is also enabled for manual re-deploys / testing.
+#
+# Migrations run on container boot, so the deploy applies any pending
+# engine/server DB migrations automatically. The control plane has its
+# own deploy path (vectorless-deploy); this workflow only ships the server.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write   # required for the WIF OIDC token
+
+jobs:
+  deploy-server:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+    steps:
+      - name: Checkout (at the tag / triggering ref)
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build + push server image
+        run: |
+          VER="${GITHUB_REF_NAME}"            # tag name on a tag push, else branch name
+          IMG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/server"
+          docker build \
+            -f Dockerfile.server \
+            --build-arg VERSION="${VER}" \
+            -t "${IMG}:${VER}" -t "${IMG}:latest" \
+            .
+          docker push "${IMG}:${VER}"
+          docker push "${IMG}:latest"
+          echo "SERVER_IMG=${IMG}:${VER}" >> "$GITHUB_ENV"
+
+      - name: Deploy server (image-only update)
+        run: |
+          gcloud run deploy vectorless-server \
+            --image="${SERVER_IMG}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT}" \
+            --quiet
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Server release"
+            echo "- ref: \`${GITHUB_REF_NAME}\`"
+            echo "- image: \`${SERVER_IMG:-build failed}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
