@@ -23,10 +23,17 @@ const (
 	StatusFailed      DocumentStatus = "failed"
 )
 
+// NilScope is the sentinel store_id used for documents ingested
+// without a store context (header-less / pre-stores callers). Reads
+// with an empty store filter ignore the column entirely; this value
+// just keeps the NOT NULL column populated.
+const NilScope = "00000000-0000-0000-0000-000000000000"
+
 // Document is the row-shape for the documents table.
 type Document struct {
 	ID           tree.DocumentID
 	OrgID        string // tenant scope — set on insert, filtered on every read
+	StoreID      string // collection scope within the org
 	Title        string
 	ContentType  string
 	SourceRef    string
@@ -53,34 +60,42 @@ func (p *Pool) NewDocument(ctx context.Context, d Document) error {
 	if d.OrgID == "" {
 		return fmt.Errorf("NewDocument: OrgID is required")
 	}
+	storeID := d.StoreID
+	if storeID == "" {
+		storeID = NilScope
+	}
 	_, err = p.Exec(ctx, `
-        INSERT INTO documents (id, org_id, title, content_type, source_ref, status, byte_size, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		string(d.ID), d.OrgID, d.Title, d.ContentType, d.SourceRef, string(d.Status), d.ByteSize, meta,
+        INSERT INTO documents (id, org_id, store_id, title, content_type, source_ref, status, byte_size, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		string(d.ID), d.OrgID, storeID, d.Title, d.ContentType, d.SourceRef, string(d.Status), d.ByteSize, meta,
 	)
 	return mapErr(err)
 }
 
-// GetDocument fetches a document by id, scoped to an org. Cross-org
-// lookups return ErrNotFound rather than the actual row, so document
-// IDs from another tenant can't be confirmed by probing this endpoint.
-//
-// orgID == "" intentionally panics in callers via the empty-string
-// check on the SQL side: it ensures we never accidentally call without
-// an org context.
-func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID string) (*Document, error) {
+// GetDocument fetches a document scoped to an org and (optionally) a
+// store. storeID == "" means "don't filter by store" — used by
+// header-less / pre-stores callers. A non-empty storeID restricts the
+// lookup to that collection, so a document in store A is invisible
+// when querying store B.
+func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, storeID string) (*Document, error) {
 	if orgID == "" {
 		return nil, fmt.Errorf("GetDocument: orgID is required")
 	}
-	row := p.QueryRow(ctx, `
-        SELECT id, org_id, title, content_type, source_ref, status, error_message,
+	q := `
+        SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
                byte_size, metadata, created_at, updated_at
-        FROM documents WHERE id = $1 AND org_id = $2`, string(id), orgID)
+        FROM documents WHERE id = $1 AND org_id = $2`
+	args := []any{string(id), orgID}
+	if storeID != "" {
+		q += " AND store_id = $3"
+		args = append(args, storeID)
+	}
+	row := p.QueryRow(ctx, q, args...)
 
 	var d Document
 	var status string
 	var rawMeta []byte
-	if err := row.Scan(&d.ID, &d.OrgID, &d.Title, &d.ContentType, &d.SourceRef, &status,
+	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
 		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
 		return nil, mapErr(err)
 	}
@@ -95,14 +110,14 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID string
 // from any user-facing path.
 func (p *Pool) GetDocumentForWorker(ctx context.Context, id tree.DocumentID) (*Document, error) {
 	row := p.QueryRow(ctx, `
-        SELECT id, org_id, title, content_type, source_ref, status, error_message,
+        SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
                byte_size, metadata, created_at, updated_at
         FROM documents WHERE id = $1`, string(id))
 
 	var d Document
 	var status string
 	var rawMeta []byte
-	if err := row.Scan(&d.ID, &d.OrgID, &d.Title, &d.ContentType, &d.SourceRef, &status,
+	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
 		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
 		return nil, mapErr(err)
 	}
@@ -132,6 +147,9 @@ func (p *Pool) SetDocumentTitle(ctx context.Context, id tree.DocumentID, title s
 type ListDocumentsOpts struct {
 	// OrgID restricts the listing to a single tenant. Required.
 	OrgID string
+	// StoreID restricts the listing to one collection. Empty means
+	// "all stores in the org" (header-less / pre-stores callers).
+	StoreID string
 	// Limit bounds the page size. Values <= 0 default to 50, capped at 200.
 	Limit int
 	// Cursor is the last-seen created_at timestamp for keyset pagination.
@@ -160,6 +178,11 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 	where := "WHERE org_id = $1"
 	args := []any{o.OrgID}
 	next := 2
+	if o.StoreID != "" {
+		where += " AND store_id = $" + itoa(next)
+		args = append(args, o.StoreID)
+		next++
+	}
 	if !o.Cursor.IsZero() {
 		where += " AND created_at < $" + itoa(next)
 		args = append(args, o.Cursor)
@@ -173,7 +196,7 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 	args = append(args, limit+1) // +1 to detect "has more"
 
 	q := `
-        SELECT id, org_id, title, content_type, source_ref, status, error_message,
+        SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
                byte_size, metadata, created_at, updated_at
         FROM documents ` + where + `
         ORDER BY created_at DESC
@@ -190,7 +213,7 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 		var d Document
 		var status string
 		var rawMeta []byte
-		if err := rows.Scan(&d.ID, &d.OrgID, &d.Title, &d.ContentType, &d.SourceRef, &status,
+		if err := rows.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
 			&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, time.Time{}, err
 		}
@@ -211,12 +234,19 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 }
 
 // DeleteDocument removes a document (and cascades to its sections),
-// scoped to an org. Cross-org deletes return ErrNotFound.
-func (p *Pool) DeleteDocument(ctx context.Context, id tree.DocumentID, orgID string) error {
+// scoped to an org and (optionally) a store. Cross-scope deletes
+// return ErrNotFound.
+func (p *Pool) DeleteDocument(ctx context.Context, id tree.DocumentID, orgID, storeID string) error {
 	if orgID == "" {
 		return fmt.Errorf("DeleteDocument: orgID is required")
 	}
-	tag, err := p.Exec(ctx, `DELETE FROM documents WHERE id = $1 AND org_id = $2`, string(id), orgID)
+	q := `DELETE FROM documents WHERE id = $1 AND org_id = $2`
+	args := []any{string(id), orgID}
+	if storeID != "" {
+		q += " AND store_id = $3"
+		args = append(args, storeID)
+	}
+	tag, err := p.Exec(ctx, q, args...)
 	if err != nil {
 		return mapErr(err)
 	}

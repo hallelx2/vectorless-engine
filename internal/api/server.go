@@ -250,7 +250,7 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	doc, err := d.DB.GetDocument(r.Context(), id, standaloneOrgID)
+	doc, err := d.DB.GetDocument(r.Context(), id, standaloneOrgID, "")
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -274,7 +274,7 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	if err := d.DB.DeleteDocument(r.Context(), id, standaloneOrgID); err != nil {
+	if err := d.DB.DeleteDocument(r.Context(), id, standaloneOrgID, ""); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
 			return
@@ -287,7 +287,7 @@ func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetTree(w http.ResponseWriter, r *http.Request) {
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	t, err := d.DB.LoadTree(r.Context(), id, standaloneOrgID)
+	t, err := d.DB.LoadTree(r.Context(), id, standaloneOrgID, "")
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -301,7 +301,7 @@ func (d Deps) handleGetTree(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 	id := tree.SectionID(chi.URLParam(r, "id"))
-	sec, err := d.DB.GetSection(r.Context(), id, standaloneOrgID)
+	sec, err := d.DB.GetSection(r.Context(), id, standaloneOrgID, "")
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "section not found")
@@ -363,7 +363,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t, err := d.DB.LoadTree(r.Context(), body.DocumentID, standaloneOrgID)
+	t, err := d.DB.LoadTree(r.Context(), body.DocumentID, standaloneOrgID, "")
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -479,7 +479,7 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
-	result, err := d.MultiDoc.Query(r.Context(), standaloneOrgID, body.DocumentIDs, body.Query, budget)
+	result, err := d.MultiDoc.Query(r.Context(), standaloneOrgID, "", body.DocumentIDs, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query/multi: failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "multi-doc retrieval failed: "+err.Error())

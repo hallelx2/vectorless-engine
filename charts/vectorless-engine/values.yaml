@@ -1,0 +1,130 @@
+# Default values for vectorless-engine.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/hallelx2/vectorless-engine
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created.
+  create: true
+  # Annotations to add to the service account.
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: vectorless-engine.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: vectorless-engine-tls
+  #    hosts:
+  #      - vectorless-engine.local
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# -- Environment variables sourced from the Secret.
+env:
+  # -- PostgreSQL connection string.
+  VLE_DATABASE_URL: ""
+  # -- Anthropic API key for LLM-powered features.
+  VLE_ANTHROPIC_API_KEY: ""
+
+# -- Create a Kubernetes Secret with the env values above.
+# Set to false if you manage the secret externally.
+secret:
+  create: true
+  # -- Name override for the secret. Defaults to fullname-secret.
+  name: ""
+
+# -- Application configuration file mounted at /etc/vectorless-engine/config.yaml.
+config:
+  # -- Raw YAML content for config.yaml.
+  content: |
+    server:
+      host: "0.0.0.0"
+      port: 8080
+    database:
+      max_open_conns: 25
+      max_idle_conns: 5
+      conn_max_lifetime: "5m"
+    engine:
+      chunk_size: 512
+      chunk_overlap: 64
+      embedding_model: "text-embedding-3-small"
+
+# -- Path where the config.yaml ConfigMap is mounted inside the container.
+configMountPath: /etc/vectorless-engine
+
+# -- Liveness probe configuration.
+livenessProbe:
+  httpGet:
+    path: /v1/health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# -- Readiness probe configuration.
+readinessProbe:
+  httpGet:
+    path: /v1/health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3

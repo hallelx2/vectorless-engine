@@ -89,6 +89,25 @@ func run() error {
 	}
 	strategy := buildStrategy(cfg.Retrieval, llmClient)
 
+	// Wrap with caching if enabled.
+	if cfg.Retrieval.Cache.Enabled {
+		ttl := time.Duration(cfg.Retrieval.Cache.TTLSeconds) * time.Second
+		if ttl == 0 {
+			ttl = 10 * time.Minute
+		}
+		strategy = retrieval.NewCached(strategy, retrieval.CachedConfig{
+			MaxEntries: cfg.Retrieval.Cache.MaxEntries,
+			TTL:        ttl,
+		})
+		logger.Info("retrieval: cache enabled",
+			"max_entries", cfg.Retrieval.Cache.MaxEntries,
+			"ttl_seconds", cfg.Retrieval.Cache.TTLSeconds,
+		)
+	}
+
+	// Multi-document query dispatcher.
+	multiDoc := retrieval.NewMultiDoc(strategy, pool.LoadTree)
+
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:      pool,
 		Storage: store,
@@ -105,6 +124,7 @@ func run() error {
 		Queue:    q,
 		Strategy: strategy,
 		Version:  version,
+		MultiDoc: multiDoc,
 	}
 
 	srv := &http.Server{

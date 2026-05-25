@@ -30,8 +30,17 @@ func (s *SinglePass) Name() string { return "single-pass" }
 
 // Select implements Strategy.
 func (s *SinglePass) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
+	r, err := s.SelectWithCost(ctx, t, query, budget)
+	if err != nil {
+		return nil, err
+	}
+	return r.SelectedIDs, nil
+}
+
+// SelectWithCost implements CostStrategy.
+func (s *SinglePass) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	if t == nil || t.Root == nil {
-		return nil, nil
+		return &Result{}, nil
 	}
 	view := t.BuildView()
 
@@ -59,7 +68,18 @@ func (s *SinglePass) Select(ctx context.Context, t *tree.Tree, query string, bud
 	if err != nil {
 		return nil, fmt.Errorf("single-pass parse: %w", err)
 	}
-	return FilterKnownIDs(ids, view.Sections), nil
+
+	return &Result{
+		SelectedIDs: FilterKnownIDs(ids, view.Sections),
+		ModelUsed:   resp.Model,
+		Usage: Usage{
+			InputTokens:  resp.Usage.InputTokens,
+			OutputTokens: resp.Usage.OutputTokens,
+			TotalTokens:  resp.Usage.TotalTokens,
+			CostUSD:      resp.Usage.CostUSD,
+			LLMCalls:     1,
+		},
+	}, nil
 }
 
 // --- shared prompt scaffolding ---

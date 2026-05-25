@@ -46,6 +46,15 @@ func (c *ChunkedTree) Name() string { return "chunked-tree" }
 
 // Select implements Strategy.
 func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
+	r, err := c.SelectWithCost(ctx, t, query, budget)
+	if err != nil {
+		return nil, err
+	}
+	return r.SelectedIDs, nil
+}
+
+// SelectWithCost implements CostStrategy.
+func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	tok := LLMTokenizer{C: c.LLM}
 	slices, err := c.Splitter.Split(ctx, t, budget, tok)
 	if err != nil {
@@ -58,7 +67,11 @@ func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, bu
 	}
 
 	sem := make(chan struct{}, maxPar)
-	results := make([][]tree.SectionID, len(slices))
+	type sliceResult struct {
+		ids   []tree.SectionID
+		usage Usage
+	}
+	results := make([]sliceResult, len(slices))
 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
@@ -73,12 +86,12 @@ func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, bu
 				return gctx.Err()
 			}
 
-			ids, err := c.reasonOverSlice(gctx, sl, query, budget)
+			ids, usage, err := c.reasonOverSliceWithCost(gctx, sl, query, budget)
 			if err != nil {
 				return err
 			}
 			mu.Lock()
-			results[i] = ids
+			results[i] = sliceResult{ids: ids, usage: usage}
 			mu.Unlock()
 			return nil
 		})
@@ -87,13 +100,31 @@ func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, bu
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	return c.Merge.Merge(results), nil
+
+	// Merge IDs and aggregate costs.
+	allIDs := make([][]tree.SectionID, len(results))
+	var totalUsage Usage
+	for i, r := range results {
+		allIDs[i] = r.ids
+		totalUsage.Add(r.usage)
+	}
+
+	return &Result{
+		SelectedIDs: c.Merge.Merge(allIDs),
+		Usage:       totalUsage,
+	}, nil
 }
 
 // reasonOverSlice runs one LLM call for one slice and returns the IDs the
 // model picked, filtered against sl.Sections so a model can never fabricate
 // an ID that lives in a different slice.
 func (c *ChunkedTree) reasonOverSlice(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, error) {
+	ids, _, err := c.reasonOverSliceWithCost(ctx, sl, query, budget)
+	return ids, err
+}
+
+// reasonOverSliceWithCost is like reasonOverSlice but also returns usage.
+func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, Usage, error) {
 	prompt := BuildSelectionPrompt(sl.Breadcrumb, sl.Sections, sl.SiblingSummaries, query)
 
 	resp, err := c.LLM.Complete(ctx, llmgate.Request{
@@ -108,13 +139,22 @@ func (c *ChunkedTree) reasonOverSlice(ctx context.Context, sl Slice, query strin
 		JSONSchema:  []byte(selectionJSONSchema),
 	})
 	if err != nil {
-		return nil, err
+		return nil, Usage{}, err
 	}
+
+	usage := Usage{
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+		CostUSD:      resp.Usage.CostUSD,
+		LLMCalls:     1,
+	}
+
 	ids, err := ParseSelection(resp.Content)
 	if err != nil {
-		return nil, err
+		return nil, usage, err
 	}
-	return FilterKnownIDs(ids, sl.Sections), nil
+	return FilterKnownIDs(ids, sl.Sections), usage, nil
 }
 
 // MergePolicy determines how per-slice ID lists are combined into a single

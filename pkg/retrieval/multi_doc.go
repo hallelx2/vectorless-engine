@@ -15,7 +15,7 @@ import (
 // document ID, scoped to an org. The API layer injects a closure that
 // adapts to db.Pool.LoadTree (which takes orgID directly); tests inject
 // a stub.
-type TreeLoader func(ctx context.Context, docID tree.DocumentID, orgID string) (*tree.Tree, error)
+type TreeLoader func(ctx context.Context, docID tree.DocumentID, orgID, storeID string) (*tree.Tree, error)
 
 // MultiDocResult groups per-document retrieval outcomes so the caller can
 // attribute sections back to their source documents.
@@ -91,7 +91,7 @@ func NewMultiDoc(strategy Strategy, loader TreeLoader) *MultiDoc {
 
 // Query runs the wrapped strategy against every document in docIDs and
 // returns a MultiDocResult. It is safe for concurrent use.
-func (m *MultiDoc) Query(ctx context.Context, orgID string, docIDs []tree.DocumentID, query string, budget ContextBudget) (*MultiDocResult, error) {
+func (m *MultiDoc) Query(ctx context.Context, orgID, storeID string, docIDs []tree.DocumentID, query string, budget ContextBudget) (*MultiDocResult, error) {
 	if len(docIDs) == 0 {
 		return nil, fmt.Errorf("multi-doc: at least one document_id is required")
 	}
@@ -101,7 +101,7 @@ func (m *MultiDoc) Query(ctx context.Context, orgID string, docIDs []tree.Docume
 
 	// Single-doc fast path — skip the fan-out machinery.
 	if len(docIDs) == 1 {
-		return m.querySingle(ctx, orgID, docIDs[0], query, budget)
+		return m.querySingle(ctx, orgID, storeID, docIDs[0], query, budget)
 	}
 
 	maxPar := budget.MaxParallelCalls
@@ -139,7 +139,7 @@ func (m *MultiDoc) Query(ctx context.Context, orgID string, docIDs []tree.Docume
 				return nil // don't propagate; partial results are OK
 			}
 
-			dr, err := m.queryOneDoc(gctx, orgID, docID, query, budget)
+			dr, err := m.queryOneDoc(gctx, orgID, storeID, docID, query, budget)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -170,8 +170,8 @@ func (m *MultiDoc) Query(ctx context.Context, orgID string, docIDs []tree.Docume
 }
 
 // querySingle handles the fast path for a single document.
-func (m *MultiDoc) querySingle(ctx context.Context, orgID string, docID tree.DocumentID, query string, budget ContextBudget) (*MultiDocResult, error) {
-	dr, err := m.queryOneDoc(ctx, orgID, docID, query, budget)
+func (m *MultiDoc) querySingle(ctx context.Context, orgID, storeID string, docID tree.DocumentID, query string, budget ContextBudget) (*MultiDocResult, error) {
+	dr, err := m.queryOneDoc(ctx, orgID, storeID, docID, query, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +183,8 @@ func (m *MultiDoc) querySingle(ctx context.Context, orgID string, docID tree.Doc
 }
 
 // queryOneDoc loads a tree and runs the strategy for one document.
-func (m *MultiDoc) queryOneDoc(ctx context.Context, orgID string, docID tree.DocumentID, query string, budget ContextBudget) (*DocResult, error) {
-	t, err := m.loader(ctx, docID, orgID)
+func (m *MultiDoc) queryOneDoc(ctx context.Context, orgID, storeID string, docID tree.DocumentID, query string, budget ContextBudget) (*DocResult, error) {
+	t, err := m.loader(ctx, docID, orgID, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("load tree %s: %w", docID, err)
 	}
@@ -218,7 +218,7 @@ func (m *MultiDoc) queryOneDoc(ctx context.Context, orgID string, docID tree.Doc
 // per-document events.
 //
 // The channel is closed when all documents finish.
-func (m *MultiDoc) QueryStream(ctx context.Context, orgID string, docIDs []tree.DocumentID, query string, budget ContextBudget) <-chan MultiDocStreamEvent {
+func (m *MultiDoc) QueryStream(ctx context.Context, orgID, storeID string, docIDs []tree.DocumentID, query string, budget ContextBudget) <-chan MultiDocStreamEvent {
 	out := make(chan MultiDocStreamEvent, 64)
 
 	go func() {
@@ -260,7 +260,7 @@ func (m *MultiDoc) QueryStream(ctx context.Context, orgID string, docIDs []tree.
 					return
 				}
 
-				t, err := m.loader(ctx, did, orgID)
+				t, err := m.loader(ctx, did, orgID, storeID)
 				if err != nil {
 					select {
 					case out <- MultiDocStreamEvent{

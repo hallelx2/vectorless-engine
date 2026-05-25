@@ -1,0 +1,17 @@
+apiVersion: v2
+name: vectorless-engine
+description: A Helm chart for deploying the Vectorless Engine - intelligent document processing and semantic query engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: hallelx2
+    url: https://github.com/hallelx2
+keywords:
+  - vectorless
+  - engine
+  - document-processing
+  - semantic-search
+home: https://github.com/hallelx2/vectorless-engine
+sources:
+  - https://github.com/hallelx2/vectorless-engine

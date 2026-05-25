@@ -1,0 +1,26 @@
+Thank you for installing {{ include "vectorless-engine.fullname" . }}!
+
+Your release is named: {{ .Release.Name }}
+
+To verify the deployment, run:
+
+  kubectl get pods -l "app.kubernetes.io/name={{ include "vectorless-engine.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+
+To access the Vectorless Engine API from your local machine:
+
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "vectorless-engine.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:8080
+
+Then open http://localhost:8080/v1/health in your browser.
+
+{{- if .Values.ingress.enabled }}
+
+The application is available at the following URLs:
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
+For more information, visit: https://github.com/hallelx2/vectorless-engine

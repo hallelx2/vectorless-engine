@@ -58,9 +58,46 @@ func (b ContextBudget) Available() int {
 }
 
 // Result is returned to the API layer. It includes not just IDs but the
-// reasoning trace when the strategy supports it.
+// reasoning trace and cost accounting when the strategy supports it.
 type Result struct {
 	SelectedIDs []tree.SectionID
 	Reasoning   string
 	ModelUsed   string
+	Usage       Usage
+}
+
+// Usage is the aggregated token + cost accounting across all LLM calls
+// made during a single retrieval run.
+type Usage struct {
+	// InputTokens is the total prompt tokens across all calls.
+	InputTokens int
+	// OutputTokens is the total completion tokens across all calls.
+	OutputTokens int
+	// TotalTokens is InputTokens + OutputTokens.
+	TotalTokens int
+	// CostUSD is the estimated cost in US dollars. 0 if unknown.
+	CostUSD float64
+	// LLMCalls is the number of LLM calls made.
+	LLMCalls int
+}
+
+// Add adds the token counts and cost from another Usage.
+func (u *Usage) Add(other Usage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.TotalTokens += other.TotalTokens
+	u.CostUSD += other.CostUSD
+	u.LLMCalls += other.LLMCalls
+}
+
+// CostStrategy extends Strategy with a richer return value that
+// includes cost accounting. Strategies that support cost tracking
+// implement this interface in addition to Strategy. The server
+// checks for it at runtime via type assertion.
+type CostStrategy interface {
+	Strategy
+
+	// SelectWithCost works like Select but returns a full Result
+	// including token usage and cost.
+	SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error)
 }

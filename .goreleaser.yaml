@@ -1,0 +1,125 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+project_name: vectorless-engine
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: vectorless-engine
+    main: ./cmd/engine/main.go
+    binary: vectorless-engine
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+
+archives:
+  - id: vectorless-engine
+    builds:
+      - vectorless-engine
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+dockers:
+  - id: vectorless-engine-amd64
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/hallelx2/vectorless-engine:{{ .Version }}-amd64"
+      - "ghcr.io/hallelx2/vectorless-engine:latest-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/hallelx2/vectorless-engine"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+
+  - id: vectorless-engine-arm64
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/hallelx2/vectorless-engine:{{ .Version }}-arm64"
+      - "ghcr.io/hallelx2/vectorless-engine:latest-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/hallelx2/vectorless-engine"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+
+docker_manifests:
+  - name_template: "ghcr.io/hallelx2/vectorless-engine:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/hallelx2/vectorless-engine:{{ .Version }}-amd64"
+      - "ghcr.io/hallelx2/vectorless-engine:{{ .Version }}-arm64"
+
+  - name_template: "ghcr.io/hallelx2/vectorless-engine:latest"
+    image_templates:
+      - "ghcr.io/hallelx2/vectorless-engine:latest-amd64"
+      - "ghcr.io/hallelx2/vectorless-engine:latest-arm64"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Performance"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "Other"
+      order: 999
+
+release:
+  github:
+    owner: hallelx2
+    name: vectorless-engine
+  prerelease: auto
+  name_template: "v{{ .Version }}"
