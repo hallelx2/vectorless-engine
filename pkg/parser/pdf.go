@@ -230,8 +230,116 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 
 	return &ParsedDoc{
 		Title:    title,
-		Sections: rootSec.Children,
+		Sections: chunkOversizedLeaves(rootSec.Children),
 	}, nil
+}
+
+// Filing cover pages (and any other long, mixed-topic leaf) often produce one
+// 2-3k-char section under a generic title like "3M COMPANY", which mixes
+// registration tables, addresses, IRS IDs and contact info. A single summary
+// can't cover all those topics, so retrieval misses. Split such leaves into
+// smaller sub-sections at word boundaries; each sub-section then gets its own
+// title (from a natural colon-terminated header, e.g. "Securities registered
+// pursuant to Section 12(b) of the Act", or the first few words) and its own
+// summary downstream.
+const (
+	leafChunkThreshold = 2400 // chars; high enough to leave paper sub-sections alone
+	leafChunkTarget    = 900  // chars per chunk, give or take
+)
+
+// chunkOversizedLeaves splits any LEAF section whose content exceeds
+// leafChunkThreshold into smaller sub-sections. Internal nodes (sections with
+// children) are recursed into but never split — they're already structured.
+func chunkOversizedLeaves(sections []Section) []Section {
+	out := make([]Section, 0, len(sections))
+	for _, s := range sections {
+		if len(s.Children) > 0 {
+			s.Children = chunkOversizedLeaves(s.Children)
+			out = append(out, s)
+			continue
+		}
+		if len(s.Content) <= leafChunkThreshold {
+			out = append(out, s)
+			continue
+		}
+		pieces := splitContentByWords(s.Content, leafChunkTarget)
+		if len(pieces) <= 1 {
+			out = append(out, s)
+			continue
+		}
+		parent := Section{Level: s.Level, Title: s.Title}
+		for i, piece := range pieces {
+			fallback := fmt.Sprintf("%s — part %d", s.Title, i+1)
+			parent.Children = append(parent.Children, Section{
+				Level:   s.Level + 1,
+				Title:   deriveChunkTitle(piece, fallback),
+				Content: piece,
+			})
+		}
+		out = append(out, parent)
+	}
+	return out
+}
+
+// splitContentByWords breaks a long string into pieces near target size at
+// word boundaries. The last piece may be smaller; pieces are never midword.
+func splitContentByWords(s string, target int) []string {
+	s = strings.TrimSpace(s)
+	if target < 200 {
+		target = 200
+	}
+	slack := target / 4
+	if len(s) <= target+slack {
+		return []string{s}
+	}
+	var chunks []string
+	for len(s) > 0 {
+		if len(s) <= target+slack {
+			chunks = append(chunks, strings.TrimSpace(s))
+			break
+		}
+		upper := target + slack
+		if upper > len(s) {
+			upper = len(s)
+		}
+		cut := strings.LastIndex(s[:upper], " ")
+		if cut < target/2 {
+			cut = upper // no good break: hard-cut at upper bound
+		}
+		chunks = append(chunks, strings.TrimSpace(s[:cut]))
+		s = strings.TrimSpace(s[cut:])
+	}
+	return chunks
+}
+
+// deriveChunkTitle picks a readable label for a content chunk. Prefers a
+// phrase ending in ":" within the first ~80 chars (filings use these as
+// natural sub-headers, e.g. "Securities registered pursuant to Section 12(b)
+// of the Act:"); otherwise takes the first ~60 chars trimmed at a word
+// boundary. Falls back to the supplied default when degenerate.
+func deriveChunkTitle(chunk, fallback string) string {
+	s := strings.TrimSpace(chunk)
+	if s == "" {
+		return fallback
+	}
+	if i := strings.Index(s, ":"); i > 0 && i < 80 {
+		candidate := strings.TrimSpace(s[:i])
+		if len(strings.Fields(candidate)) >= 2 {
+			return candidate
+		}
+	}
+	if len(s) <= 60 {
+		return strings.TrimRight(s, " ,;.:")
+	}
+	cut := strings.LastIndex(s[:60], " ")
+	if cut < 30 {
+		cut = 60
+	}
+	t := strings.TrimRight(strings.TrimSpace(s[:cut]), " ,;.:")
+	if t == "" {
+		return fallback
+	}
+	return t
 }
 
 type pdfRow struct {
