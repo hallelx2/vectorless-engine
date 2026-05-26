@@ -69,6 +69,7 @@ func (s *SinglePass) SelectWithCost(ctx context.Context, t *tree.Tree, query str
 		SelectedIDs: FilterKnownIDs(ids, view.Sections),
 		ModelUsed:   model,
 		Usage:       usage,
+		HopsTaken:   1,
 	}, nil
 }
 
