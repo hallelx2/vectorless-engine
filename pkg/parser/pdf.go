@@ -120,6 +120,20 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	// the largest bucket is level 1, next is level 2, etc. (capped at 6).
 	levelForSize := buildHeadingLevelMap(rows, headingFloor)
 
+	// Bold rows at (at least) body size are headings too. Filings bold their
+	// section headers rather than enlarging them, so a size-only heuristic
+	// collapses the whole body into one block. Bold-derived headings nest one
+	// level below the smallest font-derived heading level.
+	boldLevel := 1
+	for _, lv := range levelForSize {
+		if lv+1 > boldLevel {
+			boldLevel = lv + 1
+		}
+	}
+	if boldLevel > 6 {
+		boldLevel = 6
+	}
+
 	type flat struct {
 		level int
 		title string
@@ -134,6 +148,10 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 			continue
 		}
 		lvl, isHeading := levelForSize[roundSize(row.fontSize)]
+		if !isHeading && row.bold && row.fontSize >= median && looksLikeHeading(text) {
+			isHeading = true
+			lvl = boldLevel
+		}
 		if isHeading && looksLikeHeading(text) {
 			// A *sub-numbered* prefix ("3.1", "3.1.2") signals extra nesting
 			// depth relative to the font-derived level. We only ever DEEPEN
@@ -219,6 +237,7 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 type pdfRow struct {
 	page     int
 	fontSize float64
+	bold     bool
 	text     string
 }
 
@@ -268,6 +287,7 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			sort.Slice(b.chars, func(i, j int) bool { return b.chars[i].X < b.chars[j].X })
 			var sb strings.Builder
 			var lastX float64
+			boldGlyphs, totalGlyphs := 0, 0
 			for i, ch := range b.chars {
 				// Insert a space when the gap between the previous
 				// glyph's end and this glyph's start exceeds a fraction
@@ -282,8 +302,18 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 				}
 				sb.WriteString(ch.S)
 				lastX = ch.X + ch.W
+				if strings.TrimSpace(ch.S) != "" {
+					totalGlyphs++
+					if isBoldFont(ch.Font) {
+						boldGlyphs++
+					}
+				}
 			}
-			text := strings.TrimSpace(sb.String())
+			// Wide letter-tracking — common on filing cover pages and
+			// bold section headers — makes every glyph gap exceed the
+			// space threshold, yielding "U N I T E D   S T A T E S".
+			// Re-join those runs into real words.
+			text := collapseLetterSpacing(strings.TrimSpace(sb.String()))
 			if text == "" {
 				continue
 			}
@@ -297,6 +327,7 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			out = append(out, pdfRow{
 				page:     pageNum,
 				fontSize: b.maxFS,
+				bold:     totalGlyphs > 0 && boldGlyphs*2 > totalGlyphs,
 				text:     text,
 			})
 		}
@@ -548,10 +579,12 @@ func numberedHeadingDepth(s string) (int, bool) {
 }
 
 func looksLikeHeading(s string) bool {
-	// Headings are rarely > 14 words and never end with sentence punctuation
-	// from the middle of a paragraph.
+	// Headings are rarely > 25 words and never end with sentence punctuation
+	// from the middle of a paragraph. (Filing headings like "Item 2.
+	// Management's Discussion and Analysis of Financial Condition and Results
+	// of Operations" run long, so the cap is generous.)
 	words := strings.Fields(s)
-	if len(words) == 0 || len(words) > 14 {
+	if len(words) == 0 || len(words) > 25 {
 		return false
 	}
 	// Common body-text tells: trailing comma, trailing ellipsis.
@@ -559,6 +592,59 @@ func looksLikeHeading(s string) bool {
 		return false
 	}
 	return true
+}
+
+var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
+
+// isBoldFont reports whether a PDF font name denotes a bold weight. SEC filing
+// section headings are typically bold at body font size (not larger), so this is
+// how we recover them — a size-only heuristic misses them entirely.
+func isBoldFont(font string) bool {
+	f := strings.ToLower(font)
+	return strings.Contains(f, "bold") || strings.Contains(f, "-bd") || strings.Contains(f, ",bd")
+}
+
+// looksLetterSpaced reports whether a row is dominated by solitary-character
+// tokens — the signature of wide letter-tracking ("U N I T E D   S T A T E S").
+func looksLetterSpaced(s string) bool {
+	toks := strings.Fields(s)
+	if len(toks) < 4 {
+		return false
+	}
+	single := 0
+	for _, t := range toks {
+		if len([]rune(t)) == 1 {
+			single++
+		}
+	}
+	return single*2 > len(toks)
+}
+
+// collapseLetterSpacing rejoins letter-tracked text. Word boundaries survive as
+// runs of 2+ spaces; within each word the single spaces between solitary glyphs
+// are removed ("F O R M   1 0 - Q" → "FORM 10-Q"). Rows that aren't
+// letter-spaced are returned unchanged, so normal prose is never touched.
+func collapseLetterSpacing(s string) string {
+	if !looksLetterSpaced(s) {
+		return s
+	}
+	words := multiSpaceRe.Split(s, -1)
+	for i, w := range words {
+		parts := strings.Fields(w)
+		allSingle := len(parts) > 0
+		for _, p := range parts {
+			if len([]rune(p)) > 1 {
+				allSingle = false
+				break
+			}
+		}
+		if allSingle {
+			words[i] = strings.Join(parts, "")
+		} else {
+			words[i] = strings.Join(parts, " ")
+		}
+	}
+	return strings.TrimSpace(strings.Join(words, " "))
 }
 
 func abs(f float64) float64 {
