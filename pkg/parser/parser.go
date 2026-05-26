@@ -49,6 +49,13 @@ type Section struct {
 	// content. Empty for purely structural nodes.
 	Content string
 
+	// PageStart / PageEnd is the inclusive page range this section covers
+	// in the source document. Zero (the default) means "unknown" —
+	// formats without pages (Markdown, HTML, DOCX, text) leave both at 0;
+	// the PDF parser populates them.
+	PageStart int
+	PageEnd   int
+
 	// Children are nested sub-sections.
 	Children []Section
 
