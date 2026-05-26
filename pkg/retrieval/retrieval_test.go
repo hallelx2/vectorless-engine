@@ -78,6 +78,28 @@ func buildTree() *tree.Tree {
 	return &tree.Tree{DocumentID: "doc_x", Title: "Atlas", Root: root}
 }
 
+// buildTreeWithCandidates returns a tree where sec_b carries HyDE
+// candidate questions. Used to assert the retrieval prompt surfaces them.
+func buildTreeWithCandidates() *tree.Tree {
+	root := &tree.Section{
+		ID: "sec_root", Title: "Atlas",
+		Children: []*tree.Section{
+			{ID: "sec_a", ParentID: "sec_root", Title: "Setup", Summary: "install steps"},
+			{
+				ID: "sec_b", ParentID: "sec_root", Title: "Usage", Summary: "how to query",
+				CandidateQuestions: []string{
+					"How do I run a query against the engine?",
+					"What ports does the server use?",
+				},
+			},
+			{ID: "sec_c", ParentID: "sec_root", Title: "FAQ", Summary: "common questions"},
+		},
+		PageStart: 1,
+		PageEnd:   4,
+	}
+	return &tree.Tree{DocumentID: "doc_x", Title: "Atlas", Root: root}
+}
+
 func TestSinglePassHappy(t *testing.T) {
 	tr := buildTree()
 	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_b"}}
@@ -238,6 +260,42 @@ func TestChunkedTreeIDFabricationIsFiltered(t *testing.T) {
 		if id == "sec_made_up" {
 			t.Fatalf("fabricated id leaked through: %v", ids)
 		}
+	}
+}
+
+// TestSelectionPromptSurfacesCandidateQuestion asserts the rendered
+// outline includes an "answers: ..." line per section that carries
+// HyDE candidate questions. Only the first question is surfaced (to
+// keep the prompt budget small) — this guards the contract retrieval
+// depends on.
+func TestSelectionPromptSurfacesCandidateQuestion(t *testing.T) {
+	tr := buildTreeWithCandidates()
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_b"}}
+	s := retrieval.NewSinglePass(m)
+
+	_, err := s.Select(context.Background(), tr, "querying", retrieval.ContextBudget{MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if atomic.LoadInt32(&m.calls) != 1 {
+		t.Fatalf("want 1 call, got %d", m.calls)
+	}
+	m.mu.Lock()
+	prompts := append([]string(nil), m.lastPrompts...)
+	m.mu.Unlock()
+	if len(prompts) == 0 {
+		t.Fatal("no prompts captured")
+	}
+	prompt := prompts[0]
+	if !strings.Contains(prompt, "answers: ") {
+		t.Errorf("prompt missing answers hint:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "How do I run a query against the engine?") {
+		t.Errorf("prompt missing first candidate question:\n%s", prompt)
+	}
+	// Only the FIRST question is surfaced — the second must NOT appear.
+	if strings.Contains(prompt, "What ports does the server use?") {
+		t.Errorf("prompt should surface only first candidate question, got both:\n%s", prompt)
 	}
 }
 
