@@ -60,10 +60,16 @@ func (b ContextBudget) Available() int {
 // Result is returned to the API layer. It includes not just IDs but the
 // reasoning trace and cost accounting when the strategy supports it.
 type Result struct {
-	SelectedIDs []tree.SectionID
-	Reasoning   string
-	ModelUsed   string
-	Usage       Usage
+	SelectedIDs []tree.SectionID `json:"selected_ids"`
+	Reasoning   string           `json:"reasoning,omitempty"`
+	ModelUsed   string           `json:"model_used,omitempty"`
+	Usage       Usage            `json:"usage"`
+
+	// HopsTaken is the number of LLM turns the strategy issued to reach the
+	// final selection. Single-shot strategies set this to 1; iterative
+	// strategies (e.g. agentic) set it to the number of tool-using turns
+	// actually consumed, including the terminal "done" turn.
+	HopsTaken int `json:"hops_taken,omitempty"`
 }
 
 // Usage is the aggregated token + cost accounting across all LLM calls

@@ -188,6 +188,7 @@ type GeminiBlock struct {
 type RetrievalConfig struct {
 	Strategy    string           `yaml:"strategy"`
 	ChunkedTree ChunkedTreeBlock `yaml:"chunked_tree"`
+	Agentic     AgenticBlock     `yaml:"agentic"`
 	Cache       CacheBlock       `yaml:"cache"`
 }
 
@@ -210,6 +211,23 @@ type ChunkedTreeBlock struct {
 	MaxTokensPerCall         int  `yaml:"max_tokens_per_call"`
 	MaxParallelCalls         int  `yaml:"max_parallel_calls"`
 	IncludeSiblingBreadcrumb bool `yaml:"include_sibling_breadcrumbs"`
+}
+
+// AgenticBlock configures the agentic-navigation strategy.
+//
+// The agentic loop trades sequential latency for the ability to handle
+// arbitrarily large trees: the model issues outline/expand/read actions
+// until it picks a final set of section IDs or hits MaxHops.
+type AgenticBlock struct {
+	// MaxHops caps the number of LLM turns one query consumes, counting
+	// the terminal "done" turn. Default: 6.
+	MaxHops int `yaml:"max_hops"`
+
+	// Model optionally overrides the budget's model for navigation
+	// turns. Empty means use the budget's model. Useful when the
+	// retrieval engine wants the navigation loop on a fast/cheap
+	// model while answering is on a stronger one.
+	Model string `yaml:"model"`
 }
 
 // LogConfig configures logging.
@@ -243,6 +261,9 @@ func Default() Config {
 				MaxTokensPerCall:         60000,
 				MaxParallelCalls:         8,
 				IncludeSiblingBreadcrumb: true,
+			},
+			Agentic: AgenticBlock{
+				MaxHops: 6,
 			},
 			Cache: CacheBlock{
 				Enabled:    true,
@@ -352,6 +373,14 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_TLS_KEY_FILE"); v != "" {
 		c.Server.TLS.KeyFile = v
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_AGENTIC_MAX_HOPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Retrieval.Agentic.MaxHops = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_AGENTIC_MODEL"); v != "" {
+		c.Retrieval.Agentic.Model = v
+	}
 	// Ingest / HyDE knobs. Booleans accept the usual truthy strings —
 	// kept narrow so a typo doesn't silently flip the flag.
 	if v := os.Getenv("VLE_INGEST_HYDE_ENABLED"); v != "" {
@@ -428,9 +457,13 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Retrieval.Strategy {
-	case "single-pass", "chunked-tree":
+	case "single-pass", "chunked-tree", "agentic":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
+	}
+
+	if c.Retrieval.Agentic.MaxHops < 0 {
+		return fmt.Errorf("retrieval.agentic.max_hops must be >= 0, got %d", c.Retrieval.Agentic.MaxHops)
 	}
 
 	if c.Server.TLS.CertFile != "" && c.Server.TLS.KeyFile == "" {

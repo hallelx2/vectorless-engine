@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -87,7 +88,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init llm: %w", err)
 	}
-	strategy := buildStrategy(cfg.Retrieval, llmClient)
+	strategy := buildStrategy(cfg.Retrieval, llmClient, store)
 
 	// Wrap with caching if enabled.
 	if cfg.Retrieval.Cache.Enabled {
@@ -252,15 +253,37 @@ func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
 	}
 }
 
-func buildStrategy(c config.RetrievalConfig, client llmgate.Client) retrieval.Strategy {
+func buildStrategy(c config.RetrievalConfig, client llmgate.Client, store storage.Storage) retrieval.Strategy {
 	switch c.Strategy {
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
 	case "chunked-tree":
 		return retrieval.NewChunkedTree(client)
+	case "agentic":
+		a := retrieval.NewAgentic(client, storageFetcher{s: store})
+		if c.Agentic.MaxHops > 0 {
+			a.MaxHops = c.Agentic.MaxHops
+		}
+		a.ModelOverride = c.Agentic.Model
+		return a
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
+}
+
+// storageFetcher adapts a storage.Storage to retrieval.ContentFetcher.
+// The agentic strategy reads section bodies one at a time, so we
+// materialize the full reader contents into a []byte here rather than
+// streaming — section bodies are typically a few KB.
+type storageFetcher struct{ s storage.Storage }
+
+func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
+	rc, _, err := sf.s.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
 }
 
 // buildTLSConfig returns a *tls.Config when direct TLS is enabled, or nil

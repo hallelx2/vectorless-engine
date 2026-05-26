@@ -112,6 +112,7 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 	return &Result{
 		SelectedIDs: c.Merge.Merge(allIDs),
 		Usage:       totalUsage,
+		HopsTaken:   1,
 	}, nil
 }
 
