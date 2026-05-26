@@ -135,12 +135,30 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	}
 
 	type flat struct {
-		level int
-		title string
-		body  strings.Builder
+		level     int
+		title     string
+		body      strings.Builder
+		pageStart int // min source page touched by this flat (0 = none seen yet)
+		pageEnd   int // max source page touched by this flat
 	}
 	flats := []*flat{{level: 0, title: ""}}
 	current := flats[0]
+
+	// touch records that this flat consumed a row from the given page,
+	// expanding pageStart/pageEnd. Pages on rows that aren't body text
+	// (e.g. a heading row itself) are also counted: the heading lives on
+	// that page, so the section visibly starts there.
+	touch := func(f *flat, page int) {
+		if page <= 0 {
+			return
+		}
+		if f.pageStart == 0 || page < f.pageStart {
+			f.pageStart = page
+		}
+		if page > f.pageEnd {
+			f.pageEnd = page
+		}
+	}
 
 	for _, row := range rows {
 		text := strings.TrimSpace(row.text)
@@ -161,6 +179,7 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 				lvl += nd - 1
 			}
 			current = &flat{level: lvl, title: text}
+			touch(current, row.page)
 			flats = append(flats, current)
 			continue
 		}
@@ -168,6 +187,7 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 			current.body.WriteString(" ")
 		}
 		current.body.WriteString(text)
+		touch(current, row.page)
 	}
 
 	if len(flats) > 1 && flats[0].level == 0 && strings.TrimSpace(flats[0].body.String()) == "" {
@@ -190,9 +210,11 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	stack := []*Section{rootSec}
 	for _, f := range flats {
 		sec := Section{
-			Level:   f.level,
-			Title:   f.title,
-			Content: strings.TrimSpace(f.body.String()),
+			Level:     f.level,
+			Title:     f.title,
+			Content:   strings.TrimSpace(f.body.String()),
+			PageStart: f.pageStart,
+			PageEnd:   f.pageEnd,
 		}
 		if f.level == 0 {
 			if sec.Content == "" {
@@ -210,9 +232,11 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		stack = append(stack, tail)
 	}
 
-	// No headings recovered? Fall back to one "Document" section.
+	// No headings recovered? Fall back to one "Document" section spanning
+	// every page we saw.
 	if len(rootSec.Children) == 0 {
 		var all strings.Builder
+		minPage, maxPage := 0, 0
 		for _, f := range flats {
 			if s := strings.TrimSpace(f.body.String()); s != "" {
 				if all.Len() > 0 {
@@ -220,18 +244,62 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 				}
 				all.WriteString(s)
 			}
+			if f.pageStart > 0 && (minPage == 0 || f.pageStart < minPage) {
+				minPage = f.pageStart
+			}
+			if f.pageEnd > maxPage {
+				maxPage = f.pageEnd
+			}
 		}
 		rootSec.Children = []Section{{
-			Level:   1,
-			Title:   "Document",
-			Content: all.String(),
+			Level:     1,
+			Title:     "Document",
+			Content:   all.String(),
+			PageStart: minPage,
+			PageEnd:   maxPage,
 		}}
 	}
+
+	// Internal sections inherit the union of their children's page ranges
+	// so callers reading the outline can still cite a page span.
+	propagateSectionPages(rootSec.Children)
 
 	return &ParsedDoc{
 		Title:    title,
 		Sections: chunkOversizedLeaves(rootSec.Children),
 	}, nil
+}
+
+// propagateSectionPages fills internal-node PageStart/PageEnd from the union
+// of descendant leaf ranges where the internal node didn't have its own
+// (because its body was empty / hoisted into children). Leaves keep their
+// own range untouched.
+func propagateSectionPages(sections []Section) (minPage, maxPage int) {
+	for i := range sections {
+		s := &sections[i]
+		childMin, childMax := propagateSectionPages(s.Children)
+		// Fold the section's own range with its children's.
+		if s.PageStart > 0 && (childMin == 0 || s.PageStart < childMin) {
+			childMin = s.PageStart
+		}
+		if s.PageEnd > childMax {
+			childMax = s.PageEnd
+		}
+		// Only widen the section — never shrink a populated range to 0.
+		if childMin > 0 {
+			s.PageStart = childMin
+		}
+		if childMax > 0 {
+			s.PageEnd = childMax
+		}
+		if s.PageStart > 0 && (minPage == 0 || s.PageStart < minPage) {
+			minPage = s.PageStart
+		}
+		if s.PageEnd > maxPage {
+			maxPage = s.PageEnd
+		}
+	}
+	return minPage, maxPage
 }
 
 // Filing cover pages (and any other long, mixed-topic leaf) often produce one
@@ -267,13 +335,18 @@ func chunkOversizedLeaves(sections []Section) []Section {
 			out = append(out, s)
 			continue
 		}
-		parent := Section{Level: s.Level, Title: s.Title}
+		parent := Section{Level: s.Level, Title: s.Title, PageStart: s.PageStart, PageEnd: s.PageEnd}
 		for i, piece := range pieces {
 			fallback := fmt.Sprintf("%s — part %d", s.Title, i+1)
+			// We don't track per-chunk pages once content is byte-split — each
+			// chunk inherits the parent's range (the leaf is the same source
+			// material). Good-enough for retrieval citations.
 			parent.Children = append(parent.Children, Section{
-				Level:   s.Level + 1,
-				Title:   deriveChunkTitle(piece, fallback),
-				Content: piece,
+				Level:     s.Level + 1,
+				Title:     deriveChunkTitle(piece, fallback),
+				Content:   piece,
+				PageStart: s.PageStart,
+				PageEnd:   s.PageEnd,
 			})
 		}
 		out = append(out, parent)
@@ -546,7 +619,8 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 	}
 
 	// Assemble sections: body text is the concatenation of rows between
-	// one match and the next (exclusive).
+	// one match and the next (exclusive). Page range = min/max page across
+	// the heading row + body rows.
 	rootSec := &Section{Level: 0}
 	stack := []*Section{rootSec}
 	for i, m := range chosen {
@@ -555,6 +629,7 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 			end = chosen[i+1].rowIdx
 		}
 		var body strings.Builder
+		minPage, maxPage := rows[m.rowIdx].page, rows[m.rowIdx].page
 		for _, row := range rows[m.rowIdx+1 : end] {
 			text := strings.TrimSpace(row.text)
 			if text == "" {
@@ -564,8 +639,20 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 				body.WriteByte(' ')
 			}
 			body.WriteString(text)
+			if row.page > 0 && (minPage == 0 || row.page < minPage) {
+				minPage = row.page
+			}
+			if row.page > maxPage {
+				maxPage = row.page
+			}
 		}
-		sec := Section{Level: m.level, Title: m.title, Content: body.String()}
+		sec := Section{
+			Level:     m.level,
+			Title:     m.title,
+			Content:   body.String(),
+			PageStart: minPage,
+			PageEnd:   maxPage,
+		}
 		for len(stack) > 1 && stack[len(stack)-1].Level >= sec.Level {
 			stack = stack[:len(stack)-1]
 		}
@@ -579,6 +666,9 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 	if len(rootSec.Children) > 0 {
 		title = rootSec.Children[0].Title
 	}
+
+	// Propagate page ranges so internal nodes span their children.
+	propagateSectionPages(rootSec.Children)
 
 	return &ParsedDoc{
 		Title:    title,

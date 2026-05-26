@@ -51,6 +51,18 @@ type Section struct {
 	// by ContentRef. Used for context budgeting during retrieval.
 	TokenCount int `json:"token_count,omitempty"`
 
+	// PageStart / PageEnd is the inclusive page range this section covers.
+	// Zero (the default) means "unknown" — non-paginated formats (Markdown,
+	// HTML, DOCX, text) leave both at 0; the PDF parser populates them.
+	PageStart int `json:"page_start,omitempty"`
+	PageEnd   int `json:"page_end,omitempty"`
+
+	// CandidateQuestions is the HyDE-generated list of questions this
+	// section can answer, written by the ingest pipeline. Empty for
+	// sections that haven't been HyDE'd yet, internal nodes that skip
+	// the stage, or when the LLM produces non-parseable output.
+	CandidateQuestions []string `json:"candidate_questions,omitempty"`
+
 	// Metadata holds structural hints that retrieval strategies may use
 	// (page ranges, keywords, entities, content type, etc.).
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -106,6 +118,16 @@ type SectionView struct {
 	Summary  string      `json:"summary,omitempty"`
 	Children []SectionID `json:"children,omitempty"`
 	Tokens   int         `json:"tokens"`
+
+	// PageStart / PageEnd mirror the Section fields so retrieval prompts
+	// and API responses can cite page ranges. Zero means "unknown".
+	PageStart int `json:"page_start,omitempty"`
+	PageEnd   int `json:"page_end,omitempty"`
+
+	// CandidateQuestions are the HyDE-generated questions this section
+	// can answer. Surfaced into the retrieval prompt to widen the model's
+	// lexical/semantic overlap with the user query.
+	CandidateQuestions []string `json:"candidate_questions,omitempty"`
 }
 
 // BuildView renders the tree as a flat list of SectionViews in depth-first
@@ -121,12 +143,15 @@ func (t *Tree) BuildView() View {
 			return
 		}
 		sv := SectionView{
-			ID:       s.ID,
-			ParentID: s.ParentID,
-			Depth:    depth,
-			Title:    s.Title,
-			Summary:  s.Summary,
-			Tokens:   s.TokenCount,
+			ID:                 s.ID,
+			ParentID:           s.ParentID,
+			Depth:              depth,
+			Title:              s.Title,
+			Summary:            s.Summary,
+			Tokens:             s.TokenCount,
+			PageStart:          s.PageStart,
+			PageEnd:            s.PageEnd,
+			CandidateQuestions: s.CandidateQuestions,
 		}
 		for _, c := range s.Children {
 			sv.Children = append(sv.Children, c.ID)
