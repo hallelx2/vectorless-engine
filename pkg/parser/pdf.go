@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -134,6 +135,12 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		}
 		lvl, isHeading := levelForSize[roundSize(row.fontSize)]
 		if isHeading && looksLikeHeading(text) {
+			// A numbered prefix ("3", "3.1", "3.1.2") is a more reliable
+			// depth signal than font-size bucketing — use it to set the
+			// level when present (1 + number of dot groups).
+			if nlvl, ok := numberedHeadingLevel(text); ok {
+				lvl = nlvl
+			}
 			current = &flat{level: lvl, title: text}
 			flats = append(flats, current)
 			continue
@@ -514,6 +521,25 @@ func isBoilerplateLine(s string) bool {
 		}
 	}
 	return false
+}
+
+// numberedHeadingRe matches a leading section number like "3", "3.1",
+// "3.1.2", or "3." followed by whitespace and the heading text.
+var numberedHeadingRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\.?\s+\S`)
+
+// numberedHeadingLevel returns the heading depth implied by a leading
+// section number: "3 Foo" → 1, "3.1 Bar" → 2, "3.1.2 Baz" → 3. Returns
+// ok=false when there is no numbered prefix. Levels are clamped to 6.
+func numberedHeadingLevel(s string) (int, bool) {
+	m := numberedHeadingRe.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return 0, false
+	}
+	level := strings.Count(m[1], ".") + 1
+	if level > 6 {
+		level = 6
+	}
+	return level, true
 }
 
 func looksLikeHeading(s string) bool {

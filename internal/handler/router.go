@@ -145,6 +145,7 @@ func Router(d Deps) http.Handler {
 			r.Get("/{id}", docs.HandleGetDocument)
 			r.Delete("/{id}", docs.HandleDeleteDocument)
 			r.Get("/{id}/tree", docs.HandleGetTree)
+			r.Get("/{id}/llms.txt", docs.HandleGetLlmsTxt)
 			r.Get("/{id}/source", docs.HandleGetDocumentSource)
 		})
 

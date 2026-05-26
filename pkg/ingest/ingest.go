@@ -42,6 +42,10 @@ type Payload struct {
 	ContentType string          `json:"content_type"`
 	Filename    string          `json:"filename"`
 	SourceRef   string          `json:"source_ref"` // storage key of the original bytes
+	// Profile selects domain-aware structuring/summarization prompts
+	// ("generic", "research", "medical"). Empty = generic. Sourced from
+	// the document's store (the control plane injects X-Vectorless-Profile).
+	Profile string `json:"profile,omitempty"`
 }
 
 // Pipeline runs the ingest stages.
@@ -116,7 +120,7 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusSummarizing, ""); err != nil {
 		return err
 	}
-	if err := p.summarize(ctx, pl.DocumentID); err != nil {
+	if err := p.summarize(ctx, pl.DocumentID, pl.Profile); err != nil {
 		// Summarization failures are recoverable — a section without a
 		// summary is still query-able, just less efficient. We log and
 		// proceed rather than dead-letter the document.
@@ -216,7 +220,7 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 //
 // Non-fatal per-section errors are collected and returned joined — the
 // caller decides whether to fail the whole document.
-func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
+func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile string) error {
 	sections, err := p.DB.ListSectionsForWorker(ctx, docID)
 	if err != nil {
 		return err
@@ -249,8 +253,9 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
 	}
 
 	var (
-		mu   sync.Mutex
-		errs []error
+		mu       sync.Mutex
+		errs     []error
+		computed = map[tree.SectionID]string{} // section ID → freshly-written summary
 	)
 
 	// Process from deepest to shallowest so children are summarized
@@ -274,13 +279,38 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
 					return nil
 				}
 
-				summary, err := p.summaryFor(gctx, s, children[s.ID])
+				// Build child context from already-computed summaries.
+				// Children live in deeper layers that completed before this
+				// one (g.Wait between layers), so their summaries are ready.
+				// Fall back to a child's stored summary, then its title.
+				var childLines []string
+				if kids := children[s.ID]; len(kids) > 0 {
+					mu.Lock()
+					for _, c := range kids {
+						cs := computed[c.ID]
+						if cs == "" {
+							cs = c.Summary
+						}
+						if cs == "" {
+							childLines = append(childLines, fmt.Sprintf("- %s", c.Title))
+						} else {
+							childLines = append(childLines, fmt.Sprintf("- %s: %s", c.Title, cs))
+						}
+					}
+					mu.Unlock()
+				}
+
+				summary, err := p.summaryFor(gctx, s, childLines, profile)
 				if err != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Errorf("section %s: %w", s.ID, err))
 					mu.Unlock()
 					return nil // non-fatal — don't abort siblings
 				}
+
+				mu.Lock()
+				computed[s.ID] = summary
+				mu.Unlock()
 
 				if err := p.DB.UpdateSectionSummary(gctx, s.ID, summary, s.TokenCount); err != nil {
 					mu.Lock()
@@ -297,9 +327,9 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID) error {
 	return errors.Join(errs...)
 }
 
-func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Section) (string, error) {
+func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []string, profile string) (string, error) {
 	var body string
-	if len(kids) == 0 {
+	if len(childLines) == 0 {
 		// Leaf: fetch the stored text.
 		if s.ContentRef == "" {
 			return cleanForLLM(s.Title), nil
@@ -315,12 +345,13 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 		}
 		body = cleanForLLM(string(raw))
 	} else {
-		// Internal: compose from children's titles so we have SOMETHING to
-		// summarize even without bringing all children content into memory.
+		// Internal: compose from children's *summaries* (richer than bare
+		// titles) so a parent's summary reflects what's actually inside it.
 		var b strings.Builder
-		b.WriteString("This section contains:\n")
-		for _, c := range kids {
-			fmt.Fprintf(&b, "- %s\n", c.Title)
+		b.WriteString("This section's subsections, each with a short summary:\n")
+		for _, line := range childLines {
+			b.WriteString(cleanForLLM(line))
+			b.WriteByte('\n')
 		}
 		body = b.String()
 	}
@@ -330,7 +361,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, kids []db.Secti
 		Temperature: 0.0,
 		MaxTokens:   200,
 		Messages: []llmgate.Message{
-			{Role: llmgate.RoleSystem, Content: "You write short, factual section summaries. One sentence, no preamble, no quotes."},
+			{Role: llmgate.RoleSystem, Content: summarySystemPrompt(profile)},
 			{Role: llmgate.RoleUser, Content: fmt.Sprintf(
 				"Summarize this section titled %q in a single sentence (max 40 words):\n\n%s",
 				cleanForLLM(s.Title), body)},
@@ -452,17 +483,40 @@ func isLikelyMojibakeTitle(s string) bool {
 	return doubled*100/letters > 30
 }
 
-// approxTokens is a cheap 4-chars-per-token heuristic used at ingest
-// time so we don't spend a provider round-trip per section just to
-// populate metadata. Real token counts are reconciled when a retrieval
-// strategy runs.
+// summarySystemPrompt returns a domain-aware system prompt for the
+// summarization LLM based on the document's store profile. Domain framing
+// nudges the model toward the salient facts of that document class.
+func summarySystemPrompt(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "research":
+		return "You summarize sections of academic research papers. In one factual sentence capture the key claim, method, dataset, or result of the section. No preamble, no quotes, no citations."
+	case "medical":
+		return "You summarize sections of clinical and medical documents. In one factual sentence capture the key finding, recommendation, dosage, definition, or guideline of the section. No preamble, no quotes."
+	default:
+		return "You write short, factual section summaries. One sentence, no preamble, no quotes."
+	}
+}
+
+// approxTokens estimates the token count of s without a provider
+// round-trip. We use a word-based estimate (~1.3 tokens/word for English,
+// which matches GPT/Gemini BPE behaviour closely) with a character-based
+// floor so non-space-delimited text (CJK, code) isn't under-counted.
+//
+// Exact counts would need the provider's own tokenizer (e.g. Gemini's
+// countTokens API) — a per-section round-trip the ingest path
+// deliberately avoids. Retrieval reconciles real counts at query time.
 func approxTokens(s string) int {
 	if s == "" {
 		return 0
 	}
-	n := len(s) / 4
+	byWords := len(strings.Fields(s)) * 13 / 10 // ~1.3 tokens per word
+	byChars := len(s) / 4
+	n := byWords
+	if byChars > n {
+		n = byChars
+	}
 	if n < 1 {
-		return 1
+		n = 1
 	}
 	return n
 }

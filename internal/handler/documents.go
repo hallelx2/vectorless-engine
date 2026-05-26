@@ -246,6 +246,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		ContentType: contentType,
 		Filename:    filename,
 		SourceRef:   key,
+		Profile:     r.Header.Get("X-Vectorless-Profile"),
 	})
 	if err := h.queue.Enqueue(ctx, queue.Job{
 		Kind:      queue.KindIngestDocument,
@@ -380,6 +381,29 @@ func (h *DocumentsHandler) HandleGetTree(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, t.BuildView())
+}
+
+// HandleGetLlmsTxt renders the document tree as an llms.txt Markdown map —
+// the navigable, LLM-friendly index of the document (H1 title, blockquote
+// summary, nested section headings with one-line summaries).
+func (h *DocumentsHandler) HandleGetLlmsTxt(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrgID(w, r)
+	if !ok {
+		return
+	}
+	id := tree.DocumentID(chi.URLParam(r, "id"))
+	t, err := h.db.LoadTree(r.Context(), id, orgID, storeID(r))
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, t.RenderLLMSTxt())
 }
 
 // HandleGetSection returns a single section with full content from storage.

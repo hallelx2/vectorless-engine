@@ -123,6 +123,7 @@ func (s *DocumentsService) CreateDocument(
 		ContentType: contentType,
 		Filename:    msg.Filename,
 		SourceRef:   key,
+		Profile:     req.Header().Get("X-Vectorless-Profile"),
 	})
 	if err := s.queue.Enqueue(ctx, queue.Job{
 		Kind:      queue.KindIngestDocument,
