@@ -123,6 +123,30 @@ func TestSinglePassToleratesCodeFences(t *testing.T) {
 	}
 }
 
+// When the model returns prose without any JSON (Gemini's occasional JSON-mode
+// blip), the strategy must retry and then degrade gracefully — empty selection
+// with no error — instead of bubbling the parse failure up as a 500.
+func TestSinglePassGracefulOnNonJSON(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{reply: "The most relevant section is the one about debt securities."}
+	s := retrieval.NewSinglePass(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("want graceful nil error on persistent parse failure, got %v", err)
+	}
+	if len(res.SelectedIDs) != 0 {
+		t.Errorf("want empty selection on parse failure, got %v", res.SelectedIDs)
+	}
+	// 1 initial attempt + 2 retries = 3 LLM calls, all counted in usage.
+	if got := atomic.LoadInt32(&m.calls); got != 3 {
+		t.Errorf("expected 3 LLM attempts (1 + 2 retries), got %d", got)
+	}
+	if res.Usage.LLMCalls != 3 {
+		t.Errorf("expected Usage.LLMCalls=3, got %d", res.Usage.LLMCalls)
+	}
+}
+
 func TestParseSelection(t *testing.T) {
 	cases := []struct {
 		name string

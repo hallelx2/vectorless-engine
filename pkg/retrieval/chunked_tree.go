@@ -127,7 +127,7 @@ func (c *ChunkedTree) reasonOverSlice(ctx context.Context, sl Slice, query strin
 func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, Usage, error) {
 	prompt := BuildSelectionPrompt(sl.Breadcrumb, sl.Sections, sl.SiblingSummaries, query)
 
-	resp, err := c.LLM.Complete(ctx, llmgate.Request{
+	req := llmgate.Request{
 		Model: budget.ModelName,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: selectionSystemPrompt},
@@ -137,20 +137,9 @@ func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, que
 		Temperature: 0,
 		JSONMode:    true,
 		JSONSchema:  []byte(selectionJSONSchema),
-	})
-	if err != nil {
-		return nil, Usage{}, err
 	}
 
-	usage := Usage{
-		InputTokens:  resp.Usage.InputTokens,
-		OutputTokens: resp.Usage.OutputTokens,
-		TotalTokens:  resp.Usage.TotalTokens,
-		CostUSD:      resp.Usage.CostUSD,
-		LLMCalls:     1,
-	}
-
-	ids, err := ParseSelection(resp.Content)
+	ids, usage, err := runSelectionWithRetry(ctx, c.LLM, req, defaultSelectionRetries)
 	if err != nil {
 		return nil, usage, err
 	}

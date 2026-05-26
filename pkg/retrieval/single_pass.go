@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/hallelx2/llmgate"
@@ -59,27 +60,69 @@ func (s *SinglePass) SelectWithCost(ctx context.Context, t *tree.Tree, query str
 		JSONSchema:  []byte(selectionJSONSchema),
 	}
 
-	resp, err := s.LLM.Complete(ctx, req)
+	ids, usage, err := runSelectionWithRetry(ctx, s.LLM, req, defaultSelectionRetries)
 	if err != nil {
 		return nil, fmt.Errorf("single-pass llm call: %w", err)
 	}
 
-	ids, err := ParseSelection(resp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("single-pass parse: %w", err)
-	}
-
 	return &Result{
 		SelectedIDs: FilterKnownIDs(ids, view.Sections),
-		ModelUsed:   resp.Model,
-		Usage: Usage{
+		ModelUsed:   model,
+		Usage:       usage,
+	}, nil
+}
+
+// defaultSelectionRetries is the number of EXTRA attempts (on top of the first)
+// the selection LLM call gets when its response fails to parse as JSON. Gemini's
+// JSON mode occasionally returns plain text ("The most relevant section is...");
+// without retry, that surfaces as a 500 to the SDK on every such glitch.
+const defaultSelectionRetries = 2
+
+// runSelectionWithRetry runs a selection LLM call and parses the response,
+// retrying up to maxRetries additional times if the model returns something
+// that doesn't parse as JSON. Returns the parsed IDs and the cumulative usage
+// across all attempts. An error is returned only on a transport/LLM failure —
+// final parse failure degrades gracefully to an empty selection (logged) so a
+// single LLM-formatting blip doesn't 500 the entire query.
+func runSelectionWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int) ([]tree.SectionID, Usage, error) {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	var totalUsage Usage
+	var lastParseErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req := baseReq
+		if attempt > 0 {
+			// Strengthen the last user message on retry; some models (notably
+			// Gemini) sometimes ignore JSON mode on the first try.
+			msgs := make([]llmgate.Message, len(baseReq.Messages))
+			copy(msgs, baseReq.Messages)
+			tail := len(msgs) - 1
+			msgs[tail] = llmgate.Message{
+				Role:    msgs[tail].Role,
+				Content: msgs[tail].Content + "\n\nIMPORTANT: respond with ONLY a JSON object matching the schema. Do not include prose, explanation, or markdown fences.",
+			}
+			req.Messages = msgs
+		}
+		resp, err := client.Complete(ctx, req)
+		if err != nil {
+			return nil, totalUsage, err
+		}
+		totalUsage.Add(Usage{
 			InputTokens:  resp.Usage.InputTokens,
 			OutputTokens: resp.Usage.OutputTokens,
 			TotalTokens:  resp.Usage.TotalTokens,
 			CostUSD:      resp.Usage.CostUSD,
 			LLMCalls:     1,
-		},
-	}, nil
+		})
+		ids, parseErr := ParseSelection(resp.Content)
+		if parseErr == nil {
+			return ids, totalUsage, nil
+		}
+		lastParseErr = parseErr
+	}
+	log.Printf("retrieval: selection parse failed after %d attempts (%v); returning empty selection", maxRetries+1, lastParseErr)
+	return nil, totalUsage, nil
 }
 
 // --- shared prompt scaffolding ---

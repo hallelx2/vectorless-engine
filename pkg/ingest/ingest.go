@@ -359,11 +359,11 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 	resp, err := p.LLM.Complete(ctx, llmgate.Request{
 		Model:       p.SummaryModel,
 		Temperature: 0.0,
-		MaxTokens:   200,
+		MaxTokens:   260,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: summarySystemPrompt(profile)},
 			{Role: llmgate.RoleUser, Content: fmt.Sprintf(
-				"Summarize this section titled %q in a single sentence (max 40 words):\n\n%s",
+				"Section titled %q.\n\n%s\n\nReturn a single sentence (≤ 60 words) that names this section's concrete topics, entities, identifiers, and key items so a retrieval engine can match it to user questions.",
 				cleanForLLM(s.Title), body)},
 		},
 	})
@@ -484,16 +484,21 @@ func isLikelyMojibakeTitle(s string) bool {
 }
 
 // summarySystemPrompt returns a domain-aware system prompt for the
-// summarization LLM based on the document's store profile. Domain framing
-// nudges the model toward the salient facts of that document class.
+// summarization LLM based on the document's store profile. Summaries are
+// optimized for RETRIEVAL: a downstream retrieval engine, given only the
+// summary, should be able to tell whether the section answers a specific
+// question. So we ask the model to name the concrete topics, entities,
+// identifiers, and key items the section covers — not just describe it
+// generically.
 func summarySystemPrompt(profile string) string {
+	const retrievalRule = "Write so a downstream retrieval engine, reading only your summary, can tell whether this section answers a specific user question. Name the section's concrete topics — entities, identifiers, table contents, named items, key numbers — not just a generic description. One factual sentence, ≤ 60 words, no preamble, no quotes."
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "research":
-		return "You summarize sections of academic research papers. In one factual sentence capture the key claim, method, dataset, or result of the section. No preamble, no quotes, no citations."
+		return "You summarize sections of academic research papers. Capture the key claim, method, dataset, or result. " + retrievalRule
 	case "medical":
-		return "You summarize sections of clinical and medical documents. In one factual sentence capture the key finding, recommendation, dosage, definition, or guideline of the section. No preamble, no quotes."
+		return "You summarize sections of clinical and medical documents. Capture the key finding, recommendation, dosage, drug name, definition, or guideline. " + retrievalRule
 	default:
-		return "You write short, factual section summaries. One sentence, no preamble, no quotes."
+		return "You summarize sections of business, legal, and financial documents (filings, reports, contracts). " + retrievalRule
 	}
 }
 
