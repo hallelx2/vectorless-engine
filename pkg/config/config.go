@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -24,7 +26,36 @@ type Config struct {
 	Queue     QueueConfig     `yaml:"queue"`
 	LLM       LLMConfig       `yaml:"llm"`
 	Retrieval RetrievalConfig `yaml:"retrieval"`
+	Ingest    IngestConfig    `yaml:"ingest"`
 	Log       LogConfig       `yaml:"log"`
+}
+
+// IngestConfig configures retrieval-quality boosters that run during
+// the ingest pipeline (between summarize and StatusReady).
+type IngestConfig struct {
+	HyDE HyDEConfig `yaml:"hyde"`
+}
+
+// HyDEConfig configures the HyDE candidate-question stage. For each
+// leaf section the pipeline asks the LLM to enumerate questions the
+// section's content can answer; those are later folded into the
+// retrieval prompt to widen lexical/semantic overlap with user queries.
+type HyDEConfig struct {
+	// Enabled toggles the stage. Default: true. Disable to skip an LLM
+	// call per leaf when ingest budget matters more than recall.
+	Enabled bool `yaml:"enabled"`
+
+	// Model, when non-empty, overrides the LLM model used for HyDE
+	// generation. Defaults to the same model used for summarization.
+	Model string `yaml:"model"`
+
+	// NumQuestions caps the questions generated per leaf section.
+	// Default: 5.
+	NumQuestions int `yaml:"num_questions"`
+
+	// Concurrency bounds parallel LLM calls during the HyDE stage.
+	// Default: 4.
+	Concurrency int `yaml:"concurrency"`
 }
 
 // ServerConfig configures the HTTP server.
@@ -219,6 +250,13 @@ func Default() Config {
 				TTLSeconds: 600,
 			},
 		},
+		Ingest: IngestConfig{
+			HyDE: HyDEConfig{
+				Enabled:      true,
+				NumQuestions: 5,
+				Concurrency:  4,
+			},
+		},
 		Log: LogConfig{Level: "info", Format: "json"},
 	}
 }
@@ -314,6 +352,29 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_TLS_KEY_FILE"); v != "" {
 		c.Server.TLS.KeyFile = v
 	}
+	// Ingest / HyDE knobs. Booleans accept the usual truthy strings —
+	// kept narrow so a typo doesn't silently flip the flag.
+	if v := os.Getenv("VLE_INGEST_HYDE_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ingest.HyDE.Enabled = true
+		case "0", "false", "no", "off":
+			c.Ingest.HyDE.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_HYDE_MODEL"); v != "" {
+		c.Ingest.HyDE.Model = v
+	}
+	if v := os.Getenv("VLE_INGEST_HYDE_NUM_QUESTIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.HyDE.NumQuestions = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_HYDE_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.HyDE.Concurrency = n
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -380,6 +441,13 @@ func (c Config) Validate() error {
 	}
 	if v := c.Server.TLS.MinVersion; v != "" && v != "1.2" && v != "1.3" {
 		return fmt.Errorf("server.tls.min_version must be 1.2 or 1.3, got %q", v)
+	}
+
+	if c.Ingest.HyDE.NumQuestions < 0 {
+		return fmt.Errorf("ingest.hyde.num_questions must be >= 0, got %d", c.Ingest.HyDE.NumQuestions)
+	}
+	if c.Ingest.HyDE.Concurrency < 0 {
+		return fmt.Errorf("ingest.hyde.concurrency must be >= 0, got %d", c.Ingest.HyDE.Concurrency)
 	}
 
 	return nil

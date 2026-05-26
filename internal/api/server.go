@@ -321,7 +321,7 @@ func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"id":          sec.ID,
 		"document_id": sec.DocumentID,
 		"parent_id":   sec.ParentID,
@@ -332,7 +332,17 @@ func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 		"token_count": sec.TokenCount,
 		"metadata":    sec.Metadata,
 		"content":     content,
-	})
+	}
+	if sec.PageStart > 0 {
+		resp["page_start"] = sec.PageStart
+	}
+	if sec.PageEnd > 0 {
+		resp["page_end"] = sec.PageEnd
+	}
+	if len(sec.CandidateQuestions) > 0 {
+		resp["candidate_questions"] = sec.CandidateQuestions
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- query ---
@@ -415,14 +425,24 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 				content = string(raw)
 			}
 		}
-		sections = append(sections, map[string]any{
+		s := map[string]any{
 			"id":          sec.ID,
 			"parent_id":   sec.ParentID,
 			"title":       sec.Title,
 			"summary":     sec.Summary,
 			"token_count": sec.TokenCount,
 			"content":     content,
-		})
+		}
+		if sec.PageStart > 0 {
+			s["page_start"] = sec.PageStart
+		}
+		if sec.PageEnd > 0 {
+			s["page_end"] = sec.PageEnd
+		}
+		if len(sec.CandidateQuestions) > 0 {
+			s["candidate_questions"] = sec.CandidateQuestions
+		}
+		sections = append(sections, s)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -511,6 +531,15 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 				"summary":     sec.Summary,
 				"token_count": sec.TokenCount,
 				"content":     content,
+			}
+			if sec.PageStart > 0 {
+				s["page_start"] = sec.PageStart
+			}
+			if sec.PageEnd > 0 {
+				s["page_end"] = sec.PageEnd
+			}
+			if len(sec.CandidateQuestions) > 0 {
+				s["candidate_questions"] = sec.CandidateQuestions
 			}
 			sections = append(sections, s)
 			if body.MaxSections > 0 && len(sections) >= body.MaxSections {

@@ -98,6 +98,16 @@ engine:
       max_parallel_calls: 8
       include_sibling_breadcrumbs: true
 
+  ingest:
+    # HyDE candidate-question generation per leaf section. Folded into
+    # the retrieval prompt at query time to widen recall on queries that
+    # don't echo the section's exact wording.
+    hyde:
+      enabled: true
+      model: ""             # empty => same model as summarization
+      num_questions: 5
+      concurrency: 4
+
   log:
     level: "info"     # "debug", "info", "warn", "error"
     format: "json"    # "json" or "console"

@@ -183,6 +183,42 @@ func writeSectionLine(b *strings.Builder, sv tree.SectionView) {
 		b.WriteString(sv.Summary)
 	}
 	b.WriteByte('\n')
+	// HyDE: surface the first candidate question (truncated) as an
+	// "answers:" hint. Keeps the prompt budget impact small (~120 chars
+	// per section) while widening the lexical/semantic overlap the
+	// retrieval model sees vs. an unfamiliarly-worded user query.
+	if q := firstCandidateQuestion(sv.CandidateQuestions); q != "" {
+		for i := 0; i < sv.Depth; i++ {
+			b.WriteString("  ")
+		}
+		b.WriteString("    answers: ")
+		b.WriteString(q)
+		b.WriteByte('\n')
+	}
+}
+
+// firstCandidateQuestion returns the first non-empty candidate question,
+// truncated to ~120 chars so the outline doesn't blow up. Returns ""
+// when no usable question is present.
+func firstCandidateQuestion(qs []string) string {
+	const max = 120
+	for _, q := range qs {
+		q = strings.TrimSpace(q)
+		if q == "" {
+			continue
+		}
+		if len(q) > max {
+			// Cut at a word boundary if one is near the cap; otherwise
+			// hard-cut so we always respect the budget.
+			if cut := strings.LastIndex(q[:max], " "); cut > max-20 {
+				q = q[:cut] + "…"
+			} else {
+				q = q[:max] + "…"
+			}
+		}
+		return q
+	}
+	return ""
 }
 
 // selectionPayload is the expected JSON-mode shape.
