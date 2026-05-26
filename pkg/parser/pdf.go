@@ -135,11 +135,12 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		}
 		lvl, isHeading := levelForSize[roundSize(row.fontSize)]
 		if isHeading && looksLikeHeading(text) {
-			// A numbered prefix ("3", "3.1", "3.1.2") is a more reliable
-			// depth signal than font-size bucketing — use it to set the
-			// level when present (1 + number of dot groups).
-			if nlvl, ok := numberedHeadingLevel(text); ok {
-				lvl = nlvl
+			// A *sub-numbered* prefix ("3.1", "3.1.2") signals extra nesting
+			// depth relative to the font-derived level. We only ever DEEPEN
+			// (never change the base level), so top-level headings — numbered
+			// "3" or not ("Abstract") — stay siblings at the same font level.
+			if nd, ok := numberedHeadingDepth(text); ok && nd > 1 {
+				lvl += nd - 1
 			}
 			current = &flat{level: lvl, title: text}
 			flats = append(flats, current)
@@ -527,19 +528,23 @@ func isBoilerplateLine(s string) bool {
 // "3.1.2", or "3." followed by whitespace and the heading text.
 var numberedHeadingRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\.?\s+\S`)
 
-// numberedHeadingLevel returns the heading depth implied by a leading
+// numberedHeadingDepth returns the nesting depth implied by a leading
 // section number: "3 Foo" → 1, "3.1 Bar" → 2, "3.1.2 Baz" → 3. Returns
-// ok=false when there is no numbered prefix. Levels are clamped to 6.
-func numberedHeadingLevel(s string) (int, bool) {
+// ok=false when there is no numbered prefix. Depth is clamped to 6.
+//
+// Callers use depth>1 only to deepen a heading relative to its font-size
+// level — never to set the absolute level — so numbered and unnumbered
+// top-level headings remain siblings.
+func numberedHeadingDepth(s string) (int, bool) {
 	m := numberedHeadingRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
 		return 0, false
 	}
-	level := strings.Count(m[1], ".") + 1
-	if level > 6 {
-		level = 6
+	depth := strings.Count(m[1], ".") + 1
+	if depth > 6 {
+		depth = 6
 	}
-	return level, true
+	return depth, true
 }
 
 func looksLikeHeading(s string) bool {

@@ -105,7 +105,7 @@ type SectionView struct {
 	Title    string      `json:"title"`
 	Summary  string      `json:"summary,omitempty"`
 	Children []SectionID `json:"children,omitempty"`
-	Tokens   int         `json:"tokens,omitempty"`
+	Tokens   int         `json:"tokens"`
 }
 
 // BuildView renders the tree as a flat list of SectionViews in depth-first
