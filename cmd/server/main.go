@@ -155,11 +155,15 @@ func run() error {
 
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		DB:      pool,
-		Storage: store,
-		LLM:     llmClient,
-		Parsers: ingest.DefaultRegistry(),
-		Logger:  logger,
+		DB:               pool,
+		Storage:          store,
+		LLM:              llmClient,
+		Parsers:          ingest.DefaultRegistry(),
+		Logger:           logger,
+		HyDEEnabled:      cfg.Engine.Ingest.HyDE.Enabled,
+		HyDEModel:        cfg.Engine.Ingest.HyDE.Model,
+		HyDENumQuestions: cfg.Engine.Ingest.HyDE.NumQuestions,
+		HyDEConcurrency:  cfg.Engine.Ingest.HyDE.Concurrency,
 	})
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 

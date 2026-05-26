@@ -69,6 +69,24 @@ type Pipeline struct {
 	// the summarization stage. Higher values speed up ingest for large
 	// documents at the cost of higher LLM throughput. Default: 4.
 	SummaryConcurrency int
+
+	// HyDEEnabled toggles the candidate-question generation stage.
+	// Defaulted to true by config wiring; left as the Go zero value
+	// (false) when Pipeline is constructed directly, so unit tests with
+	// no LLM can opt out by simply not setting it.
+	HyDEEnabled bool
+
+	// HyDEModel, when non-empty, overrides the model used for HyDE
+	// candidate-question generation. Defaults to SummaryModel.
+	HyDEModel string
+
+	// HyDENumQuestions is the target number of candidate questions
+	// generated per leaf section. Default: 5.
+	HyDENumQuestions int
+
+	// HyDEConcurrency bounds parallel LLM calls during the HyDE stage.
+	// Default: 4.
+	HyDEConcurrency int
 }
 
 // NewPipeline returns a Pipeline with sensible defaults filled in.
@@ -78,6 +96,12 @@ func NewPipeline(p Pipeline) *Pipeline {
 	}
 	if p.SummaryConcurrency <= 0 {
 		p.SummaryConcurrency = 4
+	}
+	if p.HyDENumQuestions <= 0 {
+		p.HyDENumQuestions = 5
+	}
+	if p.HyDEConcurrency <= 0 {
+		p.HyDEConcurrency = 4
 	}
 	if p.Logger == nil {
 		p.Logger = slog.Default()
@@ -125,6 +149,16 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 		// summary is still query-able, just less efficient. We log and
 		// proceed rather than dead-letter the document.
 		log.Warn("ingest: summarize had errors", "err", err)
+	}
+
+	if p.HyDEEnabled {
+		if err := p.generateCandidateQuestions(ctx, pl.DocumentID, pl.Profile); err != nil {
+			// HyDE is a retrieval-quality booster, not a correctness
+			// requirement. Failures here leave the document fully usable
+			// (just with less recall on lexically-distant queries), so we
+			// log and proceed.
+			log.Warn("ingest: hyde had errors", "err", err)
+		}
 	}
 
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
@@ -189,6 +223,8 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 				Title:      cleanForLLM(s.Title),
 				ContentRef: contentKey,
 				TokenCount: approxTokens(cleanedContent),
+				PageStart:  s.PageStart,
+				PageEnd:    s.PageEnd,
 				Metadata:   s.Metadata,
 			}); err != nil {
 				return err

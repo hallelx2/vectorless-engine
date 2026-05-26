@@ -375,6 +375,17 @@ components:
           type: string
         token_count:
           type: integer
+        page_start:
+          type: integer
+          description: Inclusive first page covered by this section. Omitted for non-paginated formats.
+        page_end:
+          type: integer
+          description: Inclusive last page covered by this section. Omitted for non-paginated formats.
+        candidate_questions:
+          type: array
+          items:
+            type: string
+          description: HyDE-generated questions this section can answer. Omitted when not yet generated.
         metadata:
           type: object
           additionalProperties:
@@ -440,6 +451,17 @@ components:
           type: string
         token_count:
           type: integer
+        page_start:
+          type: integer
+          description: Inclusive first page covered by this section. Omitted for non-paginated formats.
+        page_end:
+          type: integer
+          description: Inclusive last page covered by this section. Omitted for non-paginated formats.
+        candidate_questions:
+          type: array
+          items:
+            type: string
+          description: HyDE-generated questions this section can answer. Omitted when not yet generated.
         content:
           type: string
           description: Full section content from storage.

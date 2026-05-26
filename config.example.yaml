@@ -107,6 +107,18 @@ retrieval:
     # doesn't own, so the model knows what else exists in the document.
     include_sibling_breadcrumbs: true
 
+ingest:
+  # HyDE candidate-question stage. For each leaf section the pipeline asks
+  # the LLM to enumerate questions the section answers; those are folded
+  # into the retrieval prompt at query time to widen recall on queries
+  # that don't echo the section's exact wording.
+  hyde:
+    enabled: true
+    # Override the LLM model used for HyDE; empty inherits the summary model.
+    model: ""
+    num_questions: 5
+    concurrency: 4
+
 log:
   level: "info"            # debug | info | warn | error
   format: "json"           # json | console
