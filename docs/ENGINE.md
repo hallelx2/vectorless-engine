@@ -234,8 +234,15 @@ internals.
   pooling.
 - **Embedded SQL migrations** via `//go:embed`. No Atlas, no goose, no
   Flyway. Migration is ten lines of Go; external tools are overkill.
-- **ledongthuc/pdf** for PDF — pure Go, no cgo, cross-compiles cleanly.
-  Trade-off: no OCR, no encrypted PDFs. Deferred to Phase 2+.
+- **hallelx2/pdftable** (primary) + **ledongthuc/pdf** (fallback for
+  `/Outlines` only) for PDF. pdftable is a pure-Go port of pdfplumber:
+  positioned-word extraction + pdfplumber-parity table-finding pipeline
+  (`lines` / `lines_strict` / `text` / `explicit` strategies). Detected
+  tables become Sections flagged with `Metadata["table"]="true"` and
+  Markdown-rendered content. Encrypted PDFs are auto-decrypted via
+  pdfcpu's empty-password path. Trade-off: no OCR (scanned PDFs still
+  unsupported); single-bookmark / outline access still requires
+  ledongthuc until pdftable exposes the dictionary.
 - **goldmark** for Markdown — the Go community's standard, actively
   maintained.
 - **`golang.org/x/net/html`** for HTML — stdlib-ish, no third-party dep.

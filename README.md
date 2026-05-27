@@ -222,7 +222,7 @@ Or via environment variables: `VLE_TLS_CERT_FILE`, `VLE_TLS_KEY_FILE`.
 | Markdown | `goldmark` | ATX + Setext headings become section boundaries |
 | HTML | `golang.org/x/net/html` | Prefers `<main>`/`<article>`; skips nav/footer/script |
 | DOCX | stdlib `archive/zip` + `encoding/xml` | `Heading 1…9` styles become section boundaries |
-| PDF | `ledongthuc/pdf` | Font-size heuristic recovers headings from unstructured PDFs |
+| PDF | `hallelx2/pdftable` + `ledongthuc/pdf` | pdftable extracts positioned words + ruled / borderless tables (Markdown-rendered, `Metadata["table"]="true"`); font-size heuristic recovers headings; ledongthuc supplies `/Outlines` when present |
 | Text | stdlib | Single-section fallback |
 
 New parsers drop in behind a one-method `Parser` interface — see [`pkg/parser/`](pkg/parser/).

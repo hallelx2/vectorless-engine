@@ -13,6 +13,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
 	github.com/hallelx2/llmgate v0.2.0
+	github.com/hallelx2/pdftable v0.3.0
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
@@ -129,3 +130,9 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+// v0.3.0 lands the full pdfplumber-parity table-finding pipeline (lines,
+// lines_strict, text, explicit strategies) and is not yet tagged on the
+// pdftable remote. Strip this directive once the tag is pushed and
+// `go get github.com/hallelx2/pdftable@v0.3.0` resolves cleanly.
+replace github.com/hallelx2/pdftable => ../pdftable
