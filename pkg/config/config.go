@@ -201,6 +201,44 @@ type RetrievalConfig struct {
 	ChunkedTree ChunkedTreeBlock `yaml:"chunked_tree"`
 	Agentic     AgenticBlock     `yaml:"agentic"`
 	Cache       CacheBlock       `yaml:"cache"`
+	AnswerSpan  AnswerSpanBlock  `yaml:"answer_span"`
+	Answer      AnswerBlock      `yaml:"answer"`
+}
+
+// AnswerSpanBlock configures the answer-span extractor.
+//
+// When enabled, every section returned by /v1/query gets an extra
+// `answer_span` field carrying the verbatim quote the model judged
+// most relevant to the query, plus byte offsets back into the
+// section's content. Costs one LLM call per returned section.
+type AnswerSpanBlock struct {
+	// Enabled toggles per-section span extraction on /v1/query. Default: false.
+	Enabled bool `yaml:"enabled"`
+	// Model overrides the budget's model for the span extraction call.
+	// Empty means use the request's model. Keep this on a cheap/fast
+	// model (the call is short and runs once per returned section).
+	Model string `yaml:"model"`
+	// MaxConcurrency caps parallel span-extraction calls per request.
+	// Default: 4.
+	MaxConcurrency int `yaml:"max_concurrency"`
+	// MaxQuoteLen caps the per-section quote length (characters).
+	// Default: 400.
+	MaxQuoteLen int `yaml:"max_quote_len"`
+}
+
+// AnswerBlock configures the /v1/answer endpoint, which runs retrieval
+// + span extraction + a synthesis LLM call to return a quote-grounded
+// answer in a single round-trip.
+type AnswerBlock struct {
+	// Model overrides the budget's model for the synthesis call.
+	// Empty means use the request's model.
+	Model string `yaml:"model"`
+	// MaxSections caps how many sections are fed into synthesis.
+	// Default: 5.
+	MaxSections int `yaml:"max_sections"`
+	// MaxAnswerTokens bounds the synthesised answer length.
+	// Default: 1024.
+	MaxAnswerTokens int `yaml:"max_answer_tokens"`
 }
 
 // CacheBlock configures the retrieval-result cache.
@@ -280,6 +318,15 @@ func Default() Config {
 				Enabled:    true,
 				MaxEntries: 1024,
 				TTLSeconds: 600,
+			},
+			AnswerSpan: AnswerSpanBlock{
+				Enabled:        false,
+				MaxConcurrency: 4,
+				MaxQuoteLen:    400,
+			},
+			Answer: AnswerBlock{
+				MaxSections:     5,
+				MaxAnswerTokens: 1024,
 			},
 		},
 		Ingest: IngestConfig{
@@ -419,6 +466,30 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_GLOBAL_LLM_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Ingest.GlobalLLMConcurrency = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.AnswerSpan.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.AnswerSpan.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_MODEL"); v != "" {
+		c.Retrieval.AnswerSpan.Model = v
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_MAX_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.AnswerSpan.MaxConcurrency = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_MODEL"); v != "" {
+		c.Retrieval.Answer.Model = v
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_MAX_SECTIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.Answer.MaxSections = n
 		}
 	}
 }

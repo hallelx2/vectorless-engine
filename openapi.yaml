@@ -246,6 +246,39 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/answer:
+    post:
+      tags: [Query]
+      summary: Quote-grounded answer (retrieval + span + synthesis)
+      operationId: answer
+      description: |
+        Single round-trip endpoint that runs retrieval, per-section
+        answer-span extraction, and a synthesis LLM call to return a
+        natural-language answer plus citations. Every citation
+        includes the cited section's ID, page range (when known), and
+        the verbatim quote the answer relies on.
+
+        This is the most regulator-defensible endpoint: the answer is
+        grounded in retrieved sections, and each claim carries a
+        replayable provenance trail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnswerRequest"
+      responses:
+        "200":
+          description: Synthesised answer with citations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnswerResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          description: Endpoint not available — no LLM client configured
+
   /v1/query/stream:
     post:
       tags: [Query]
@@ -465,3 +498,98 @@ components:
         content:
           type: string
           description: Full section content from storage.
+        answer_span:
+          $ref: "#/components/schemas/AnswerSpan"
+
+    AnswerSpan:
+      type: object
+      description: |
+        Verbatim quote from the section judged most relevant to the
+        query, plus byte offsets back into the section's content.
+        Returned only when `retrieval.answer_span.enabled` is true.
+        When `start` and `end` are both -1 the model paraphrased
+        despite the verbatim-quote rule — the text is preserved but
+        the offsets are sentinel.
+      properties:
+        start:
+          type: integer
+        end:
+          type: integer
+        text:
+          type: string
+
+    AnswerRequest:
+      type: object
+      required: [document_id, query]
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+        model:
+          type: string
+        max_tokens:
+          type: integer
+        reserved_for_prompt:
+          type: integer
+        max_parallel_calls:
+          type: integer
+        max_sections:
+          type: integer
+          description: Cap on sections fed into synthesis. Defaults to retrieval.answer.max_sections (5).
+        max_answer_tokens:
+          type: integer
+          description: Bound the synthesised answer length. Defaults to retrieval.answer.max_answer_tokens (1024).
+
+    AnswerResponse:
+      type: object
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+        answer:
+          type: string
+          description: Natural-language answer grounded in the cited sections.
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnswerCitation"
+        strategy:
+          type: string
+        model:
+          type: string
+        usage:
+          type: object
+          properties:
+            input_tokens: {type: integer}
+            output_tokens: {type: integer}
+            total_tokens: {type: integer}
+            cost_usd: {type: number}
+            llm_calls: {type: integer}
+        elapsed_ms:
+          type: integer
+
+    AnswerCitation:
+      type: object
+      description: |
+        One citation behind the synthesised answer. `quote` is the
+        verbatim span the answer relies on (when the span extractor
+        found one). `quote_start`/`quote_end` give byte offsets into
+        the source section's content. `page_start`/`page_end` are the
+        section's page range — omitted for non-paginated formats.
+      properties:
+        section_id:
+          type: string
+        title:
+          type: string
+        quote:
+          type: string
+        quote_start:
+          type: integer
+        quote_end:
+          type: integer
+        page_start:
+          type: integer
+        page_end:
+          type: integer

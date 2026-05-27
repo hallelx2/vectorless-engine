@@ -124,13 +124,17 @@ func run() error {
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
 	deps := api.Deps{
-		Logger:   logger,
-		DB:       pool,
-		Storage:  store,
-		Queue:    q,
-		Strategy: strategy,
-		Version:  version,
-		MultiDoc: multiDoc,
+		Logger:     logger,
+		DB:         pool,
+		Storage:    store,
+		Queue:      q,
+		Strategy:   strategy,
+		Version:    version,
+		MultiDoc:   multiDoc,
+		LLM:        llmClient,
+		LLMModel:   modelFor(cfg.LLM),
+		AnswerSpan: cfg.Retrieval.AnswerSpan,
+		Answer:     cfg.Retrieval.Answer,
 	}
 
 	srv := &http.Server{
@@ -226,6 +230,21 @@ func buildQueue(c config.QueueConfig, dbURL string) (queue.Queue, error) {
 	default:
 		return nil, fmt.Errorf("unknown queue driver: %s", c.Driver)
 	}
+}
+
+// modelFor returns the configured chat/general-purpose model name for
+// the selected LLM driver. Used as a fallback when an API request
+// omits an explicit model.
+func modelFor(c config.LLMConfig) string {
+	switch c.Driver {
+	case "anthropic":
+		return c.Anthropic.Model
+	case "openai":
+		return c.OpenAI.Model
+	case "gemini":
+		return c.Gemini.Model
+	}
+	return ""
 }
 
 func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
