@@ -232,6 +232,66 @@ func TestAgenticBadJSONGraceful(t *testing.T) {
 	}
 }
 
+// TestAgenticDoneWithConfidences exercises the Phase 2.4 new-shape
+// done action: each pick carries a confidence in [0.0, 1.0] and the
+// resulting Result.Confidences map mirrors the picks. The strategy
+// itself never abstains; the API layer alone does that.
+func TestAgenticDoneWithConfidences(t *testing.T) {
+	t.Parallel()
+
+	tr := buildAgenticTree()
+	llm := &scriptedLLM{
+		replies: []string{
+			`{"action":"done","picks":[{"id":"sec_a1","confidence":0.85},{"id":"sec_b1","confidence":0.42}],"reasoning":"two-section answer"}`,
+		},
+	}
+	s := retrieval.NewAgentic(llm, mapFetcher{data: map[string]string{}})
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SelectedIDs) != 2 {
+		t.Fatalf("want 2 picks, got %v", res.SelectedIDs)
+	}
+	if res.Confidences == nil {
+		t.Fatal("Confidences must be populated when model returns picks")
+	}
+	if res.Confidences["sec_a1"] != 0.85 {
+		t.Errorf("sec_a1 = %v, want 0.85", res.Confidences["sec_a1"])
+	}
+	if res.Confidences["sec_b1"] != 0.42 {
+		t.Errorf("sec_b1 = %v, want 0.42", res.Confidences["sec_b1"])
+	}
+}
+
+// TestAgenticDoneLegacyShapeNoConfidences confirms the legacy
+// picked_ids shape continues to work — Confidences must stay nil so
+// the API layer treats this as "no confidence signal" and does not
+// fire abstention.
+func TestAgenticDoneLegacyShapeNoConfidences(t *testing.T) {
+	t.Parallel()
+
+	tr := buildAgenticTree()
+	llm := &scriptedLLM{
+		replies: []string{
+			`{"action":"done","picked_ids":["sec_a1","sec_b1"],"reasoning":"legacy"}`,
+		},
+	}
+	s := retrieval.NewAgentic(llm, mapFetcher{data: map[string]string{}})
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SelectedIDs) != 2 {
+		t.Fatalf("want 2 IDs, got %v", res.SelectedIDs)
+	}
+	if res.Confidences != nil {
+		t.Errorf("legacy picked_ids must NOT populate Confidences, got %v", res.Confidences)
+	}
+}
+
 // TestAgenticFiltersUnknownPicks mirrors single-pass: if the model
 // invents IDs not present in the tree, they must be dropped.
 func TestAgenticFiltersUnknownPicks(t *testing.T) {

@@ -125,10 +125,11 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 	}
 
 	var (
-		totalUsage Usage
-		hopsTaken  int
-		finalIDs   []tree.SectionID
-		reasoning  string
+		totalUsage       Usage
+		hopsTaken        int
+		finalIDs         []tree.SectionID
+		finalConfidences map[tree.SectionID]float64
+		reasoning        string
 	)
 
 	for hop := 0; hop < maxHops; hop++ {
@@ -176,10 +177,11 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 
 		switch action.Action {
 		case actionDone:
-			finalIDs = filterToTreeIDs(action.PickedIDs, bySectionID)
+			finalIDs, finalConfidences = collectDonePicks(action, bySectionID)
 			reasoning = action.Reasoning
 			return &Result{
 				SelectedIDs: finalIDs,
+				Confidences: filterConfidences(finalConfidences, finalIDs),
 				Reasoning:   reasoning,
 				ModelUsed:   model,
 				Usage:       totalUsage,
@@ -240,12 +242,55 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 	log.Printf("retrieval: agentic strategy hit max_hops=%d without done; returning %d ids", maxHops, len(finalIDs))
 	return &Result{
 		SelectedIDs: finalIDs,
+		Confidences: filterConfidences(finalConfidences, finalIDs),
 		Reasoning:   reasoning,
 		ModelUsed:   model,
 		Usage:       totalUsage,
 		HopsTaken:   hopsTaken,
 		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, model, finalIDs),
 	}, nil
+}
+
+// collectDonePicks extracts the final IDs and per-pick confidences
+// from a 'done' action. It honours the new Picks shape first; falls
+// back to the legacy PickedIDs list when Picks is empty. Both shapes
+// are filtered to the known tree IDs so a model can never inject an
+// invented section into the result.
+func collectDonePicks(action Action, bySectionID map[tree.SectionID]tree.SectionView) ([]tree.SectionID, map[tree.SectionID]float64) {
+	if len(action.Picks) > 0 {
+		ids := make([]tree.SectionID, 0, len(action.Picks))
+		confidences := make(map[tree.SectionID]float64, len(action.Picks))
+		seen := make(map[tree.SectionID]struct{}, len(action.Picks))
+		for _, pk := range action.Picks {
+			sid := tree.SectionID(strings.TrimSpace(pk.ID))
+			if sid == "" {
+				continue
+			}
+			if _, ok := bySectionID[sid]; !ok {
+				continue
+			}
+			if _, dup := seen[sid]; dup {
+				continue
+			}
+			seen[sid] = struct{}{}
+			ids = append(ids, sid)
+			if pk.Confidence != nil {
+				c := *pk.Confidence
+				if c < 0 {
+					c = 0
+				} else if c > 1 {
+					c = 1
+				}
+				confidences[sid] = c
+			}
+		}
+		if len(confidences) == 0 {
+			confidences = nil
+		}
+		return ids, confidences
+	}
+	// Legacy shape — no confidence signal.
+	return filterToTreeIDs(action.PickedIDs, bySectionID), nil
 }
 
 // initialUserPrompt is the very first user turn: it explains the task,
@@ -316,15 +361,27 @@ Rules:
 - Prefer leaf sections. Include a parent only if its own body is directly relevant.
 - Include as few sections as possible. Quality over quantity.
 - Only return IDs you have seen in a prior observation. Do not invent IDs.
-- If nothing in the document is relevant, return done with an empty picked_ids array.`
+- When you finalise with 'done', attach a confidence score in [0.0, 1.0]
+  to every pick. Confidence reflects how directly the section answers
+  the query: 1.0 = near-certain, 0.0 = no signal. Use the full range —
+  do NOT score every pick at 1.0. If you genuinely cannot reason about
+  confidence, you may fall back to the legacy picked_ids array form.
+- If nothing in the document is relevant, return done with an empty
+  picks (or picked_ids) array.`
 
 // actionProtocolHelp is the one-shot reminder appended to the initial
 // user prompt so the model gets concrete examples of valid actions
 // without us needing to maintain a separate few-shot block.
+//
+// The 'done' action accepts EITHER picked_ids (legacy, no
+// confidence) OR picks (preferred, per-id confidence). Both shapes
+// are parsed by ParseAction. The confidence-bearing shape unlocks
+// abstention at the API layer.
 const actionProtocolHelp = `- {"action":"outline","level":2} — re-render the outline N levels deep
 - {"action":"expand","section_id":"sec_x"} — list immediate children of sec_x
 - {"action":"read","section_id":"sec_x"} — fetch the full body of sec_x
-- {"action":"done","picked_ids":["sec_x","sec_y"],"reasoning":"why"} — finalize
+- {"action":"done","picks":[{"id":"sec_x","confidence":0.8}],"reasoning":"why"} — finalize with per-pick confidence in [0.0, 1.0]
+- {"action":"done","picked_ids":["sec_x","sec_y"],"reasoning":"why"} — legacy fallback when you cannot reason about confidence
 
 Reply with ONLY the JSON object. No prose, no markdown fences.`
 
@@ -346,8 +403,16 @@ type Action struct {
 	// SectionID is the target of expand and read actions.
 	SectionID string `json:"section_id,omitempty"`
 
-	// PickedIDs is the final selection for a done action.
+	// PickedIDs is the legacy-shape final selection for a done action
+	// (no per-pick confidence). Either this or Picks may be set; if
+	// both are present, Picks wins.
 	PickedIDs []string `json:"picked_ids,omitempty"`
+
+	// Picks is the preferred final selection for a done action: each
+	// entry carries an ID + optional confidence in [0.0, 1.0]. When
+	// the model populates this, the strategy surfaces per-pick
+	// confidences on the returned Result.
+	Picks []selectionPick `json:"picks,omitempty"`
 
 	// Reasoning is an optional explanation accompanying done.
 	Reasoning string `json:"reasoning,omitempty"`
