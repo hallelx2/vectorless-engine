@@ -184,6 +184,7 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 				ModelUsed:   model,
 				Usage:       totalUsage,
 				HopsTaken:   hopsTaken,
+				TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, model, finalIDs),
 			}, nil
 
 		case actionOutline:
@@ -243,6 +244,7 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 		ModelUsed:   model,
 		Usage:       totalUsage,
 		HopsTaken:   hopsTaken,
+		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, model, finalIDs),
 	}, nil
 }
 

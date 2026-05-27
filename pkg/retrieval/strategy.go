@@ -70,6 +70,14 @@ type Result struct {
 	// strategies (e.g. agentic) set it to the number of tool-using turns
 	// actually consumed, including the terminal "done" turn.
 	HopsTaken int `json:"hops_taken,omitempty"`
+
+	// TraceToken is the replay token computed by ComputeTraceToken over
+	// the inputs that determine selection (document ID + version,
+	// retrieval model, system prompt version, sorted selected IDs).
+	// Two retrieval runs with identical inputs produce the same token,
+	// regardless of reasoning path. Empty when the strategy did not
+	// populate it (e.g. tests, fallback paths).
+	TraceToken string `json:"trace_token,omitempty"`
 }
 
 // Usage is the aggregated token + cost accounting across all LLM calls

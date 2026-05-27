@@ -83,6 +83,14 @@ type Deps struct {
 	// `enable_rerank` field on /v1/query and /v1/answer overrides
 	// ReRank.Enabled. TopK truncates the post-rerank candidate list.
 	ReRank config.ReRankBlock
+
+	// Replay is the Phase 3.1 in-memory replay-trace store. Every
+	// /v1/query and /v1/answer response is stamped with a
+	// deterministic trace_token and its body bytes are persisted
+	// here so /v1/replay can return them verbatim. Nil disables
+	// /v1/replay (the endpoint returns 501) and skips the per-
+	// response store write.
+	Replay retrieval.ReplayStore
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -109,6 +117,7 @@ func Router(d Deps) http.Handler {
 		r.Post("/query", d.handleQuery)
 		r.Post("/query/multi", d.handleQueryMulti)
 		r.Post("/answer", d.handleAnswer)
+		r.Post("/replay", d.handleReplay)
 	})
 
 	r.Post("/internal/jobs/{kind}", d.handleQueueWebhook)
@@ -503,9 +512,20 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sections := make([]map[string]any, 0, len(enriched))
+	finalIDs := make([]tree.SectionID, 0, len(enriched))
 	for _, e := range enriched {
 		sections = append(sections, sectionWithContentToMap(e))
+		finalIDs = append(finalIDs, e.sec.ID)
 	}
+
+	// Trace token is computed over the FINAL IDs that ship in the
+	// response (after max_sections + ReRank truncation). Recomputing
+	// rather than reusing Result.TraceToken keeps the response and
+	// the replay log in sync even when post-processing reshapes the
+	// IDs the strategy originally picked. The model is the request's
+	// model (the same value the strategy used to stamp its result;
+	// trace_token is order-invariant so a sorted compare suffices).
+	traceToken := retrieval.ComputeTraceToken(body.DocumentID, "1", body.Model, finalIDs)
 
 	resp := map[string]any{
 		"document_id": body.DocumentID,
@@ -514,11 +534,26 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"model":       body.Model,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
+		"trace_token": traceToken,
 	}
 	if plan != nil {
 		resp["plan"] = plan
 	}
-	writeJSON(w, http.StatusOK, resp)
+
+	raw, err := marshalJSONForReplay(resp)
+	if err != nil {
+		// Marshal failures here are unexpected (no custom MarshalJSON
+		// in the response tree); fall back to the encoder path so we
+		// still serve a response, just without replay capture.
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	d.writeJSONWithReplay(w, http.StatusOK, raw, traceToken, retrieval.ReplayEntry{
+		DocumentID:  body.DocumentID,
+		Query:       body.Query,
+		Model:       body.Model,
+		SelectedIDs: finalIDs,
+	})
 }
 
 // sectionWithContent bundles a tree section with its loaded content
@@ -776,7 +811,9 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	totalUsage.Add(synthUsage)
 
 	citations := make([]map[string]any, 0, len(enriched))
+	finalIDs := make([]tree.SectionID, 0, len(enriched))
 	for _, e := range enriched {
+		finalIDs = append(finalIDs, e.sec.ID)
 		c := map[string]any{
 			"section_id": e.sec.ID,
 			"title":      e.sec.Title,
@@ -800,6 +837,12 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		citations = append(citations, c)
 	}
 
+	// Trace token mirrors handleQuery: hash over the final IDs that
+	// ground the answer + synthModel (the LLM that actually wrote
+	// the answer). Different synth models for the same retrieval set
+	// produce different responses and therefore different tokens.
+	traceToken := retrieval.ComputeTraceToken(body.DocumentID, "1", synthModel, finalIDs)
+
 	resp := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
@@ -814,12 +857,24 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 			"cost_usd":      totalUsage.CostUSD,
 			"llm_calls":     totalUsage.LLMCalls,
 		},
-		"elapsed_ms": time.Since(started).Milliseconds(),
+		"elapsed_ms":  time.Since(started).Milliseconds(),
+		"trace_token": traceToken,
 	}
 	if plan != nil {
 		resp["plan"] = plan
 	}
-	writeJSON(w, http.StatusOK, resp)
+
+	raw, err := marshalJSONForReplay(resp)
+	if err != nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	d.writeJSONWithReplay(w, http.StatusOK, raw, traceToken, retrieval.ReplayEntry{
+		DocumentID:  body.DocumentID,
+		Query:       body.Query,
+		Model:       synthModel,
+		SelectedIDs: finalIDs,
+	})
 }
 
 // synthesiseAnswer runs one LLM call producing the final answer from
@@ -1334,6 +1389,111 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// marshalJSONForReplay marshals v to JSON exactly as it would be sent
+// on the wire so the bytes can be both stored in the replay log AND
+// returned to the caller in lock-step. Returns the bytes plus any
+// marshal error; on error the caller falls back to writeJSON (which
+// loses replay capture for that request but still serves the response).
+//
+// Why json.Marshal and not json.Encoder.Encode: Encoder appends a
+// trailing newline; Marshal does not. The replay handler returns the
+// stored bytes verbatim, so the byte representation must match the
+// wire representation exactly. We append the newline ourselves here
+// to match Encoder's behaviour and avoid a behavioural change for
+// existing clients.
+func marshalJSONForReplay(v any) ([]byte, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	// Match encoding/json.Encoder.Encode: it always emits a trailing
+	// newline. Adding it here keeps the wire format identical to the
+	// pre-3.1 behaviour and keeps replay byte-exact.
+	raw = append(raw, '\n')
+	return raw, nil
+}
+
+// writeJSONWithReplay writes pre-marshalled JSON bytes verbatim and
+// stores them in the replay log under the given token. Both writes
+// MUST see the same bytes; the function is the single point where
+// that invariant is enforced.
+//
+// When token is empty (no strategy ran, or the request opted out)
+// the replay store is skipped silently — replay simply isn't
+// available for that response.
+func (d Deps) writeJSONWithReplay(w http.ResponseWriter, status int, raw []byte, token string, entry retrieval.ReplayEntry) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(raw)
+	if d.Replay != nil && token != "" {
+		entry.ResponseJSON = raw
+		entry.CreatedAt = time.Now()
+		d.Replay.Put(token, entry)
+	}
+}
+
+// handleReplay returns a byte-identical response previously stored
+// against a trace_token. The body must echo the original query and
+// document_id; mismatches return 409 with a specific `details` field
+// so the caller knows which input drifted. Unknown tokens return 404.
+//
+// This is the endpoint that turns the whitepaper's "every answer is
+// reproducible" claim into a working surface: an auditor can replay
+// any /v1/query or /v1/answer response by retaining only the trace
+// token, the query, and the document_id.
+func (d Deps) handleReplay(w http.ResponseWriter, r *http.Request) {
+	if d.Replay == nil {
+		writeErr(w, http.StatusNotImplemented, "replay store not configured")
+		return
+	}
+
+	var body struct {
+		TraceToken string          `json:"trace_token"`
+		Query      string          `json:"query"`
+		DocumentID tree.DocumentID `json:"document_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body.TraceToken == "" || body.Query == "" || body.DocumentID == "" {
+		writeErr(w, http.StatusBadRequest, "trace_token, query, and document_id are required")
+		return
+	}
+
+	entry, ok := d.Replay.Get(body.TraceToken)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "trace_token not found")
+		return
+	}
+
+	// Strict input check. Order matters: we want the operator's
+	// diagnostic output to surface the FIRST drifting field rather
+	// than a vague "input mismatch". document_id is checked first
+	// because it's the highest-cardinality identifier; a wrong doc
+	// is the easiest way to misuse this endpoint.
+	if entry.DocumentID != body.DocumentID {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":   "input mismatch",
+			"details": "document_id differs from original",
+		})
+		return
+	}
+	if entry.Query != body.Query {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":   "input mismatch",
+			"details": "query differs from original",
+		})
+		return
+	}
+
+	// Replay the original bytes verbatim. Content-Type matches the
+	// original response (always JSON for /v1/query and /v1/answer).
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(entry.ResponseJSON)
 }
 
 func guessContentType(filename string) string {

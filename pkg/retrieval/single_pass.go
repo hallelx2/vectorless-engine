@@ -65,13 +65,20 @@ func (s *SinglePass) SelectWithCost(ctx context.Context, t *tree.Tree, query str
 		return nil, fmt.Errorf("single-pass llm call: %w", err)
 	}
 
+	selected := FilterKnownIDs(ids, view.Sections)
 	return &Result{
-		SelectedIDs: FilterKnownIDs(ids, view.Sections),
+		SelectedIDs: selected,
 		ModelUsed:   model,
 		Usage:       usage,
 		HopsTaken:   1,
+		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, model, selected),
 	}, nil
 }
+
+// traceDocVersionV1 is the placeholder document version used by every
+// strategy until Phase 3.2 wires real per-document versioning. Defined
+// once so the bump is a one-line change.
+const traceDocVersionV1 = "1"
 
 // defaultSelectionRetries is the number of EXTRA attempts (on top of the first)
 // the selection LLM call gets when its response fails to parse as JSON. Gemini's

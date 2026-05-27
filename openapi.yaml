@@ -279,6 +279,82 @@ paths:
         "501":
           description: Endpoint not available — no LLM client configured
 
+  /v1/replay:
+    post:
+      tags: [Query]
+      summary: Replay a prior response byte-for-byte
+      operationId: replay
+      description: |
+        Returns the exact bytes of a previously-served /v1/query or
+        /v1/answer response keyed by its `trace_token`. The trace
+        token is surfaced on every retrieval response and is a
+        sha256 over (document_id, doc_version, model, sorted
+        selected section IDs, system prompt version). The body must
+        echo the original `query` and `document_id` so the engine
+        can refuse replay attempts under drifting inputs.
+
+        Replay is the operational expression of the engine's
+        reproducibility guarantee: with only the trace token plus
+        the original inputs, an auditor can reconstruct the answer
+        an end-user actually saw, byte-for-byte, without storing
+        the full response themselves.
+
+        Opt out at the server level by setting
+        `retrieval.replay.enabled=false` (or
+        `VLE_RETRIEVAL_REPLAY_ENABLED=false`); the endpoint then
+        returns 501.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplayRequest"
+      responses:
+        "200":
+          description: |
+            Byte-identical original response. The body shape is whatever
+            /v1/query or /v1/answer originally returned.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/QueryResponse"
+                  - $ref: "#/components/schemas/AnswerResponse"
+        "400":
+          description: Missing or invalid request body.
+        "404":
+          description: |
+            Unknown trace_token — entry not found in the replay store
+            (never stored, evicted from the LRU, or past its TTL).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: trace_token not found
+        "409":
+          description: |
+            Input mismatch — the request's query and/or document_id
+            do not match the stored entry. The `details` field
+            identifies the specific drifting field so an auditor can
+            tell whether the query was tampered with vs. pointed at
+            the wrong document.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: input mismatch
+                  details:
+                    type: string
+                    example: document_id differs from original
+        "501":
+          description: Replay store disabled on this server.
+
   /v1/query/stream:
     post:
       tags: [Query]
@@ -496,6 +572,16 @@ components:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
+        trace_token:
+          type: string
+          description: |
+            Deterministic 64-char hex sha256 over the inputs that
+            determine this response (document_id, document version,
+            model, sorted final section IDs, system prompt version).
+            Pass this token to /v1/replay along with the original
+            `query` and `document_id` to retrieve the byte-identical
+            response. Empty when the server has
+            `retrieval.replay.enabled=false`.
 
     QuerySection:
       type: object
@@ -620,6 +706,16 @@ components:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
+        trace_token:
+          type: string
+          description: |
+            Deterministic 64-char hex sha256 token over the inputs
+            that determine this answer (document_id, document
+            version, synthesis model, sorted citation section IDs,
+            system prompt version). Pass to /v1/replay with the
+            original `query` and `document_id` to fetch the
+            byte-identical response. Empty when the server has
+            `retrieval.replay.enabled=false`.
 
     Plan:
       type: object
@@ -700,3 +796,26 @@ components:
             Re-rank relevance score on a 0-100 scale. Omitted when no
             re-rank ran. Higher means the section is more directly
             relevant to the query.
+
+    ReplayRequest:
+      type: object
+      description: |
+        Request body for POST /v1/replay. All three fields are
+        required: the trace_token identifies the stored response,
+        the query + document_id are validated against the stored
+        inputs so the engine rejects replay attempts under drifting
+        inputs (returns 409 with a `details` field identifying the
+        first drifting field).
+      required: [trace_token, query, document_id]
+      properties:
+        trace_token:
+          type: string
+          description: |
+            64-char hex sha256 trace token surfaced on the original
+            /v1/query or /v1/answer response.
+        query:
+          type: string
+          description: The user query the original request carried.
+        document_id:
+          type: string
+          description: The document the original request targeted.
