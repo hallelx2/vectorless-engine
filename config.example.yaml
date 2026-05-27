@@ -129,6 +129,29 @@ retrieval:
     max_sections: 5
     max_answer_tokens: 1024
 
+  # planning: Phase 2.1 query planning + Phase 2.2 multi-hop decomposition.
+  # When enabled, every /v1/query and /v1/answer request first issues a
+  # short LLM call that returns a structured Plan (intent, entities,
+  # expected document areas, multi-hop flag, sub-questions). Multi-hop
+  # plans fan retrieval out one selection call per sub-question and
+  # union the results.
+  #
+  # OPT-IN. Default disabled. Per-request `enable_planning` body field
+  # overrides this block, so callers can experiment without a restart.
+  # Plans are cached in a per-process LRU keyed on (query, model);
+  # repeated questions don't burn extra LLM budget.
+  planning:
+    enabled: false
+    # Override the planner's model; empty inherits the engine's
+    # configured default. Point this at a small/fast model — planning
+    # is a short prompt that shouldn't run on the flagship model.
+    model: ""
+    cache_size: 128
+    # decompose: when planning runs, multi-hop plans fan retrieval
+    # out per sub-question. Set false to validate the planner in
+    # isolation (plan returned, but retrieval uses the original query).
+    decompose: true
+
 ingest:
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the

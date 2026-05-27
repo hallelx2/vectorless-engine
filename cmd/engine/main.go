@@ -109,6 +109,26 @@ func run() error {
 	// Multi-document query dispatcher.
 	multiDoc := retrieval.NewMultiDoc(strategy, pool.LoadTree)
 
+	// Planner: opt-in Phase 2.1. When disabled at boot we still
+	// instantiate it lazily — the per-request `enable_planning` body
+	// field overrides the config, so a server with planning.enabled=false
+	// but a Planner configured can still serve opt-in callers.
+	var planner *retrieval.Planner
+	if llmClient != nil {
+		plannerModel := cfg.Retrieval.Planning.Model
+		if plannerModel == "" {
+			plannerModel = modelFor(cfg.LLM)
+		}
+		planner = retrieval.NewPlannerWithCacheSize(llmClient, plannerModel, cfg.Retrieval.Planning.CacheSize)
+		if cfg.Retrieval.Planning.Enabled {
+			logger.Info("retrieval: planner enabled",
+				"model", plannerModel,
+				"cache_size", cfg.Retrieval.Planning.CacheSize,
+				"decompose", cfg.Retrieval.Planning.Decompose,
+			)
+		}
+	}
+
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                   pool,
 		Storage:              store,
@@ -135,6 +155,8 @@ func run() error {
 		LLMModel:   modelFor(cfg.LLM),
 		AnswerSpan: cfg.Retrieval.AnswerSpan,
 		Answer:     cfg.Retrieval.Answer,
+		Planner:    planner,
+		Planning:   cfg.Retrieval.Planning,
 	}
 
 	srv := &http.Server{
