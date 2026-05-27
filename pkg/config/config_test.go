@@ -503,3 +503,83 @@ func TestLoadInvalidYAML(t *testing.T) {
 		t.Error("expected error for invalid YAML")
 	}
 }
+
+func TestTablesDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if !cfg.Ingest.Tables.Enabled {
+		t.Error("ingest.tables.enabled should default to true")
+	}
+	if cfg.Ingest.Tables.VerticalStrategy != "lines" {
+		t.Errorf("vertical_strategy = %q, want lines", cfg.Ingest.Tables.VerticalStrategy)
+	}
+	if cfg.Ingest.Tables.HorizontalStrategy != "lines" {
+		t.Errorf("horizontal_strategy = %q, want lines", cfg.Ingest.Tables.HorizontalStrategy)
+	}
+	if cfg.Ingest.Tables.MinTableRows != 2 {
+		t.Errorf("min_table_rows = %d, want 2", cfg.Ingest.Tables.MinTableRows)
+	}
+	if cfg.Ingest.Tables.MinTableCols != 2 {
+		t.Errorf("min_table_cols = %d, want 2", cfg.Ingest.Tables.MinTableCols)
+	}
+}
+
+func TestTablesEnvOverride(t *testing.T) {
+	// Mutates env — restore on exit. Not parallel.
+	prevEnabled := os.Getenv("VLE_INGEST_TABLES_ENABLED")
+	prevV := os.Getenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY")
+	prevH := os.Getenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY")
+	prevRows := os.Getenv("VLE_INGEST_TABLES_MIN_ROWS")
+	prevCols := os.Getenv("VLE_INGEST_TABLES_MIN_COLS")
+	defer func() {
+		os.Setenv("VLE_INGEST_TABLES_ENABLED", prevEnabled)
+		os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", prevV)
+		os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", prevH)
+		os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", prevRows)
+		os.Setenv("VLE_INGEST_TABLES_MIN_COLS", prevCols)
+	}()
+
+	os.Setenv("VLE_INGEST_TABLES_ENABLED", "false")
+	os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", "text")
+	os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", "lines_strict")
+	os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", "4")
+	os.Setenv("VLE_INGEST_TABLES_MIN_COLS", "3")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if cfg.Ingest.Tables.Enabled {
+		t.Error("VLE_INGEST_TABLES_ENABLED=false should disable")
+	}
+	if cfg.Ingest.Tables.VerticalStrategy != "text" {
+		t.Errorf("vertical_strategy = %q, want text", cfg.Ingest.Tables.VerticalStrategy)
+	}
+	if cfg.Ingest.Tables.HorizontalStrategy != "lines_strict" {
+		t.Errorf("horizontal_strategy = %q, want lines_strict", cfg.Ingest.Tables.HorizontalStrategy)
+	}
+	if cfg.Ingest.Tables.MinTableRows != 4 {
+		t.Errorf("min_table_rows = %d, want 4", cfg.Ingest.Tables.MinTableRows)
+	}
+	if cfg.Ingest.Tables.MinTableCols != 3 {
+		t.Errorf("min_table_cols = %d, want 3", cfg.Ingest.Tables.MinTableCols)
+	}
+}
+
+func TestTablesValidateRejectsBadStrategy(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Ingest.Tables.VerticalStrategy = "magic"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unknown vertical_strategy")
+	}
+	cfg = Default()
+	cfg.Ingest.Tables.HorizontalStrategy = "wacky"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unknown horizontal_strategy")
+	}
+	cfg = Default()
+	cfg.Ingest.Tables.MinTableRows = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative min_table_rows")
+	}
+}
