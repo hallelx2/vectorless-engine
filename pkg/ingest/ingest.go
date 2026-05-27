@@ -79,6 +79,30 @@ type Pipeline struct {
 	// documents at the cost of higher LLM throughput. Default: 4.
 	SummaryConcurrency int
 
+	// SummaryAxesEnabled toggles the Phase 2.5 multi-axis structured
+	// summary path. When true (the default), the summarizer asks the LLM
+	// for a JSON object {topics, entities, numbers, one_line} and
+	// persists both the axes blob and the one_line into the existing
+	// summary column. When false, the pipeline falls back to the
+	// pre-2.5 single-sentence prompt — no axes are written and the
+	// retrieval prompt sees only summary + HyDE questions.
+	//
+	// Defaulted to true by config wiring. Left as the Go zero value
+	// (false) when Pipeline is constructed directly, so old test paths
+	// that build a Pipeline literal without the field keep the legacy
+	// behaviour.
+	SummaryAxesEnabled bool
+
+	// SummaryAxesMaxTopics caps the topic axis returned by the
+	// structured summarizer. Default: 4.
+	SummaryAxesMaxTopics int
+
+	// SummaryAxesMaxEntities caps the entities axis. Default: 8.
+	SummaryAxesMaxEntities int
+
+	// SummaryAxesMaxNumbers caps the numbers axis. Default: 6.
+	SummaryAxesMaxNumbers int
+
 	// HyDEEnabled toggles the candidate-question generation stage.
 	// Defaulted to true by config wiring; left as the Go zero value
 	// (false) when Pipeline is constructed directly, so unit tests with
@@ -123,6 +147,20 @@ func NewPipeline(p Pipeline) *Pipeline {
 	}
 	if p.SummaryConcurrency <= 0 {
 		p.SummaryConcurrency = 4
+	}
+	// Multi-axis structured summaries are on by default — they unlock
+	// Phase 2.5 retrieval signal without changing the existing summary
+	// field's contract. Callers that construct a Pipeline literal
+	// directly and don't set this still get the legacy single-line
+	// path (Go zero value), matching the historical test contract.
+	if p.SummaryAxesMaxTopics <= 0 {
+		p.SummaryAxesMaxTopics = 4
+	}
+	if p.SummaryAxesMaxEntities <= 0 {
+		p.SummaryAxesMaxEntities = 8
+	}
+	if p.SummaryAxesMaxNumbers <= 0 {
+		p.SummaryAxesMaxNumbers = 6
 	}
 	if p.HyDENumQuestions <= 0 {
 		p.HyDENumQuestions = 5
@@ -383,7 +421,7 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile
 	var (
 		mu       sync.Mutex
 		errs     []error
-		computed = map[tree.SectionID]string{} // section ID → freshly-written summary
+		computed = map[tree.SectionID]string{} // section ID → freshly-written one-line summary
 	)
 
 	// Process from deepest to shallowest so children are summarized
@@ -434,7 +472,7 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile
 				if !ok {
 					return nil
 				}
-				summary, err := p.summaryFor(gctx, s, childLines, profile)
+				axes, err := p.summaryFor(gctx, s, childLines, profile)
 				release()
 				if err != nil {
 					mu.Lock()
@@ -443,14 +481,31 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile
 					return nil // non-fatal — don't abort siblings
 				}
 
+				oneLine := ""
+				if axes != nil {
+					oneLine = axes.OneLine
+				}
 				mu.Lock()
-				computed[s.ID] = summary
+				computed[s.ID] = oneLine
 				mu.Unlock()
 
-				if err := p.DB.UpdateSectionSummary(gctx, s.ID, summary, s.TokenCount); err != nil {
+				// Always patch the flat `summary` column with the
+				// one-line sentence so older API consumers continue to
+				// see a populated summary. The axes blob is patched
+				// separately and only when the multi-axis path is on,
+				// so a future opt-out (or a parse failure) cleanly
+				// leaves summary_axes NULL.
+				if err := p.DB.UpdateSectionSummary(gctx, s.ID, oneLine, s.TokenCount); err != nil {
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
+				}
+				if p.SummaryAxesEnabled && axes != nil {
+					if err := p.DB.UpdateSectionSummaryAxes(gctx, s.ID, axes); err != nil {
+						mu.Lock()
+						errs = append(errs, err)
+						mu.Unlock()
+					}
 				}
 				return nil
 			})
@@ -462,21 +517,31 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile
 	return errors.Join(errs...)
 }
 
-func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []string, profile string) (string, error) {
+// summaryFor produces the multi-axis structured summary for a single
+// section. Returns a non-nil *tree.SummaryAxes even on parse failure:
+// in the failure case OneLine carries the model's raw text (or a
+// fallback excerpt) and the slice axes are empty, so the section is
+// still retrieval-able via the flat summary column.
+//
+// When SummaryAxesEnabled is false the function falls back to the
+// pre-2.5 single-sentence prompt and returns axes with only OneLine
+// populated. Callers (summarize) skip the axes JSONB write in that
+// case, leaving summary_axes NULL.
+func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []string, profile string) (*tree.SummaryAxes, error) {
 	var body string
 	if len(childLines) == 0 {
 		// Leaf: fetch the stored text.
 		if s.ContentRef == "" {
-			return cleanForLLM(s.Title), nil
+			return &tree.SummaryAxes{OneLine: cleanForLLM(s.Title)}, nil
 		}
 		rc, _, err := p.Storage.Get(ctx, s.ContentRef)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		defer rc.Close()
 		raw, err := io.ReadAll(io.LimitReader(rc, int64(p.SummaryMaxChars)))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		body = cleanForLLM(string(raw))
 	} else {
@@ -491,6 +556,20 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 		body = b.String()
 	}
 
+	if !p.SummaryAxesEnabled {
+		oneLine, err := p.legacyOneLineSummary(ctx, s, body, profile)
+		if err != nil {
+			return nil, err
+		}
+		return &tree.SummaryAxes{OneLine: oneLine}, nil
+	}
+	return p.structuredSummaryFor(ctx, s, body, profile), nil
+}
+
+// legacyOneLineSummary is the pre-Phase-2.5 path: a single-sentence
+// request. Kept for the SummaryAxesEnabled=false opt-out branch and
+// for unit tests that build a Pipeline literal without the new flag.
+func (p *Pipeline) legacyOneLineSummary(ctx context.Context, s db.Section, body, profile string) (string, error) {
 	resp, err := p.LLM.Complete(ctx, llmgate.Request{
 		Model:       p.SummaryModel,
 		Temperature: 0.0,
@@ -504,8 +583,8 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 	})
 	if err != nil {
 		// Stub LLMs return ErrNotImplemented. Degrade gracefully: use a
-		// truncated excerpt as the "summary" so downstream retrieval still
-		// has something to reason over.
+		// truncated excerpt as the "summary" so downstream retrieval
+		// still has something to reason over.
 		if errors.Is(err, llmgate.ErrNotImplemented) {
 			return fallbackSummary(s.Title, body), nil
 		}
@@ -515,6 +594,61 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 		return out, nil
 	}
 	return fallbackSummary(s.Title, body), nil
+}
+
+// structuredSummaryFor is the Phase 2.5 path: a JSON-mode request that
+// returns {topics, entities, numbers, one_line}. Mirrors the HyDE
+// retry-on-parse-failure shape — if the model produces non-JSON we
+// retry with a stricter nudge; final failure degrades to an axes
+// object whose OneLine carries the model's raw text and whose axis
+// lists are empty, so ingest never calls p.fail for a summarization
+// parse blip.
+//
+// ErrNotImplemented (stub LLM) collapses to the legacy text fallback
+// so unit tests with no LLM keep producing a non-empty summary.
+func (p *Pipeline) structuredSummaryFor(ctx context.Context, s db.Section, body, profile string) *tree.SummaryAxes {
+	req := llmgate.Request{
+		Model:       p.SummaryModel,
+		Temperature: 0.0,
+		MaxTokens:   600,
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: summaryAxesSystemPrompt(profile)},
+			{Role: llmgate.RoleUser, Content: fmt.Sprintf(
+				"Section titled %q.\n\nContent:\n%s\n\n%s",
+				cleanForLLM(s.Title), body,
+				summaryAxesUserSuffix(p.SummaryAxesMaxTopics, p.SummaryAxesMaxEntities, p.SummaryAxesMaxNumbers),
+			)},
+		},
+		JSONMode:   true,
+		JSONSchema: []byte(summaryAxesJSONSchema),
+	}
+
+	axes, rawText, err := runSummaryAxesWithRetry(ctx, p.LLM, req, defaultSummaryAxesRetries)
+	if err != nil {
+		// Transport / ErrNotImplemented / unrecoverable: fall back to a
+		// text excerpt as OneLine with empty axes. Never fail ingest.
+		return &tree.SummaryAxes{OneLine: fallbackSummary(s.Title, body)}
+	}
+	if axes != nil {
+		// Successful parse — enforce the configured per-axis caps and
+		// normalise the one-line so older API consumers always see a
+		// populated summary.
+		capStrings(&axes.Topics, p.SummaryAxesMaxTopics)
+		capStrings(&axes.Entities, p.SummaryAxesMaxEntities)
+		capStrings(&axes.Numbers, p.SummaryAxesMaxNumbers)
+		if strings.TrimSpace(axes.OneLine) == "" {
+			axes.OneLine = fallbackSummary(s.Title, body)
+		}
+		return axes
+	}
+	// Parse failed but the LLM returned something — use the raw text as
+	// OneLine so a downstream retrieval engine still has signal. Axis
+	// lists stay empty.
+	one := strings.TrimSpace(rawText)
+	if one == "" {
+		one = fallbackSummary(s.Title, body)
+	}
+	return &tree.SummaryAxes{OneLine: one}
 }
 
 func fallbackSummary(title, body string) string {
