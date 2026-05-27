@@ -34,6 +34,17 @@ type Config struct {
 // the ingest pipeline (between summarize and StatusReady).
 type IngestConfig struct {
 	HyDE HyDEConfig `yaml:"hyde"`
+
+	// GlobalLLMConcurrency caps the total number of LLM calls in flight
+	// across the summarize and HyDE stages combined, which now run
+	// concurrently. Each stage still respects its own per-stage cap
+	// (summary_concurrency / hyde.concurrency), but neither can push the
+	// shared counter above this ceiling.
+	//
+	// 0 (or omitted) defaults to 12 — enough headroom for the default
+	// 4 + 4 per-stage caps while staying well below typical provider
+	// per-tenant concurrency limits.
+	GlobalLLMConcurrency int `yaml:"global_llm_concurrency"`
 }
 
 // HyDEConfig configures the HyDE candidate-question stage. For each
@@ -272,6 +283,7 @@ func Default() Config {
 			},
 		},
 		Ingest: IngestConfig{
+			GlobalLLMConcurrency: 12,
 			HyDE: HyDEConfig{
 				Enabled:      true,
 				NumQuestions: 5,
@@ -404,6 +416,11 @@ func applyEnvOverrides(c *Config) {
 			c.Ingest.HyDE.Concurrency = n
 		}
 	}
+	if v := os.Getenv("VLE_INGEST_GLOBAL_LLM_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.GlobalLLMConcurrency = n
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -481,6 +498,9 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.HyDE.Concurrency < 0 {
 		return fmt.Errorf("ingest.hyde.concurrency must be >= 0, got %d", c.Ingest.HyDE.Concurrency)
+	}
+	if c.Ingest.GlobalLLMConcurrency < 0 {
+		return fmt.Errorf("ingest.global_llm_concurrency must be >= 0, got %d", c.Ingest.GlobalLLMConcurrency)
 	}
 
 	return nil

@@ -99,6 +99,11 @@ engine:
       include_sibling_breadcrumbs: true
 
   ingest:
+    # The summarize and HyDE stages run concurrently. This caps the total
+    # number of LLM calls in flight across both stages combined.
+    # 0 disables the global cap; default is 12.
+    global_llm_concurrency: 12
+
     # HyDE candidate-question generation per leaf section. Folded into
     # the retrieval prompt at query time to widen recall on queries that
     # don't echo the section's exact wording.

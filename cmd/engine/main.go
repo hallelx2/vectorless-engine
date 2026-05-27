@@ -110,15 +110,16 @@ func run() error {
 	multiDoc := retrieval.NewMultiDoc(strategy, pool.LoadTree)
 
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		DB:               pool,
-		Storage:          store,
-		LLM:              llmClient,
-		Parsers:          ingest.DefaultRegistry(),
-		Logger:           logger,
-		HyDEEnabled:      cfg.Ingest.HyDE.Enabled,
-		HyDEModel:        cfg.Ingest.HyDE.Model,
-		HyDENumQuestions: cfg.Ingest.HyDE.NumQuestions,
-		HyDEConcurrency:  cfg.Ingest.HyDE.Concurrency,
+		DB:                   pool,
+		Storage:              store,
+		LLM:                  llmClient,
+		Parsers:              ingest.DefaultRegistry(),
+		Logger:               logger,
+		HyDEEnabled:          cfg.Ingest.HyDE.Enabled,
+		HyDEModel:            cfg.Ingest.HyDE.Model,
+		HyDENumQuestions:     cfg.Ingest.HyDE.NumQuestions,
+		HyDEConcurrency:      cfg.Ingest.HyDE.Concurrency,
+		GlobalLLMConcurrency: cfg.Ingest.GlobalLLMConcurrency,
 	})
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
