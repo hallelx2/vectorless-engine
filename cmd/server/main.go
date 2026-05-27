@@ -156,16 +156,20 @@ func run() error {
 
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		DB:                   pool,
-		Storage:              store,
-		LLM:                  llmClient,
-		Parsers:              ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Engine.Ingest.Tables)),
-		Logger:               logger,
-		HyDEEnabled:          cfg.Engine.Ingest.HyDE.Enabled,
-		HyDEModel:            cfg.Engine.Ingest.HyDE.Model,
-		HyDENumQuestions:     cfg.Engine.Ingest.HyDE.NumQuestions,
-		HyDEConcurrency:      cfg.Engine.Ingest.HyDE.Concurrency,
-		GlobalLLMConcurrency: cfg.Engine.Ingest.GlobalLLMConcurrency,
+		DB:                     pool,
+		Storage:                store,
+		LLM:                    llmClient,
+		Parsers:                ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Engine.Ingest.Tables)),
+		Logger:                 logger,
+		HyDEEnabled:            cfg.Engine.Ingest.HyDE.Enabled,
+		HyDEModel:              cfg.Engine.Ingest.HyDE.Model,
+		HyDENumQuestions:       cfg.Engine.Ingest.HyDE.NumQuestions,
+		HyDEConcurrency:        cfg.Engine.Ingest.HyDE.Concurrency,
+		SummaryAxesEnabled:     cfg.Engine.Ingest.SummaryAxes.Enabled,
+		SummaryAxesMaxTopics:   cfg.Engine.Ingest.SummaryAxes.MaxTopics,
+		SummaryAxesMaxEntities: cfg.Engine.Ingest.SummaryAxes.MaxEntities,
+		SummaryAxesMaxNumbers:  cfg.Engine.Ingest.SummaryAxes.MaxNumbers,
+		GlobalLLMConcurrency:   cfg.Engine.Ingest.GlobalLLMConcurrency,
 	})
 	if cfg.Engine.Ingest.Tables.Enabled {
 		logger.Info("ingest: pdf table extraction enabled",

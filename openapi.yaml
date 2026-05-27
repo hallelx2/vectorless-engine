@@ -458,6 +458,8 @@ components:
           type: string
         summary:
           type: string
+        summary_axes:
+          $ref: "#/components/schemas/SummaryAxes"
         children:
           type: array
           items:
@@ -482,6 +484,8 @@ components:
           type: string
         summary:
           type: string
+        summary_axes:
+          $ref: "#/components/schemas/SummaryAxes"
         token_count:
           type: integer
         page_start:
@@ -651,6 +655,8 @@ components:
           type: string
         summary:
           type: string
+        summary_axes:
+          $ref: "#/components/schemas/SummaryAxes"
         token_count:
           type: integer
         page_start:
@@ -694,6 +700,38 @@ components:
           type: integer
         text:
           type: string
+
+    SummaryAxes:
+      type: object
+      description: |
+        Phase 2.5 multi-axis structured summary. The summarizer
+        produces this object alongside the flat `summary` field;
+        `summary` continues to carry the one-line sentence (which is
+        the same string as `one_line` here) so older API consumers
+        keep working. Omitted on sections written before the Phase
+        2.5 schema migration; will arrive on every newly-ingested
+        section. Each list axis is also independently optional —
+        sections without proper-noun mentions or numeric values
+        leave the corresponding array empty.
+      properties:
+        topics:
+          type: array
+          items:
+            type: string
+          description: Lower-case, hyphenated topic keywords (e.g. `debt`, `long-term-obligations`).
+        entities:
+          type: array
+          items:
+            type: string
+          description: Proper-noun mentions extracted verbatim from the section (orgs, people, places, dates).
+        numbers:
+          type: array
+          items:
+            type: string
+          description: Standout numeric values with units as they appear (e.g. `$4.2B`, `2.8%`, `Q3 2024`).
+        one_line:
+          type: string
+          description: Human-readable sentence describing the section. Mirrors the flat `summary` field.
 
     AnswerRequest:
       type: object

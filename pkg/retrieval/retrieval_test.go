@@ -571,6 +571,125 @@ func TestChunkedTreeStampsTraceToken(t *testing.T) {
 	}
 }
 
+// buildTreeWithAxes returns a tree where sec_a carries a multi-axis
+// summary. Used to assert the retrieval prompt surfaces entities +
+// numbers on the section line.
+func buildTreeWithAxes() *tree.Tree {
+	root := &tree.Section{
+		ID: "sec_root", Title: "Atlas",
+		Children: []*tree.Section{
+			{
+				ID: "sec_a", ParentID: "sec_root", Title: "Long-Term Debt",
+				Summary: "issued debt securities, repayment schedules",
+				SummaryAxes: &tree.SummaryAxes{
+					Topics:   []string{"debt", "long-term-obligations"},
+					Entities: []string{"3M Company", "JPMorgan", "BofA", "Wells Fargo"},
+					Numbers:  []string{"$4.2B", "2034", "2.8%", "2027"},
+					OneLine:  "issued debt securities, repayment schedules",
+				},
+			},
+			{
+				ID: "sec_b", ParentID: "sec_root", Title: "Revenue",
+				Summary: "fiscal-year-over-year revenue",
+				// Empty axes pointer — axes block exists but has no
+				// entities/numbers. Tests the non-rendering branch.
+				SummaryAxes: &tree.SummaryAxes{OneLine: "fiscal-year-over-year revenue"},
+			},
+			{ID: "sec_c", ParentID: "sec_root", Title: "FAQ", Summary: "common questions"},
+		},
+	}
+	return &tree.Tree{DocumentID: "doc_x", Title: "Atlas", Root: root}
+}
+
+// TestSelectionPromptSurfacesAxes is the Phase 2.5 retrieval-prompt
+// contract: when a section carries a SummaryAxes, the outline line
+// must render entities and numbers (truncated to first 3 each) so the
+// retrieval model has direct surface-form access to proper-noun and
+// numeric anchors.
+func TestSelectionPromptSurfacesAxes(t *testing.T) {
+	tr := buildTreeWithAxes()
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_a"}}
+	s := retrieval.NewSinglePass(m)
+
+	_, err := s.Select(context.Background(), tr, "how much debt?",
+		retrieval.ContextBudget{MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	m.mu.Lock()
+	prompts := append([]string(nil), m.lastPrompts...)
+	m.mu.Unlock()
+	if len(prompts) == 0 {
+		t.Fatal("no prompts captured")
+	}
+	prompt := prompts[0]
+
+	// Entities + numbers appear with their "— entities: " / "— numbers: "
+	// prefixes on sec_a's line.
+	if !strings.Contains(prompt, "entities: ") {
+		t.Errorf("prompt missing entities prefix:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "numbers: ") {
+		t.Errorf("prompt missing numbers prefix:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "3M Company") {
+		t.Errorf("prompt missing first entity:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "$4.2B") {
+		t.Errorf("prompt missing first number:\n%s", prompt)
+	}
+	// Truncation: only first 3 entities / numbers are rendered. The
+	// 4th of each must NOT appear.
+	if strings.Contains(prompt, "Wells Fargo") {
+		t.Errorf("entities should be truncated to first 3, 4th leaked:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "2027") {
+		t.Errorf("numbers should be truncated to first 3, 4th leaked:\n%s", prompt)
+	}
+
+	// sec_b has an axes object but empty lists — entities/numbers
+	// labels must NOT appear on sec_b's line. We assert by checking
+	// that "Revenue — entities" does not appear (Revenue is sec_b's
+	// title).
+	if strings.Contains(prompt, "Revenue — entities") || strings.Contains(prompt, "Revenue — numbers") {
+		t.Errorf("sec_b has empty axis lists; should not render entities/numbers:\n%s", prompt)
+	}
+
+	// sec_c has no axes at all (nil pointer) — the rendering must
+	// skip cleanly. Same check on sec_c's title.
+	if strings.Contains(prompt, "FAQ — entities") || strings.Contains(prompt, "FAQ — numbers") {
+		t.Errorf("sec_c has no axes; should not render axes block:\n%s", prompt)
+	}
+}
+
+// TestSelectionPromptOmitsAxesForOldSections guards the
+// backwards-compatibility contract: sections written before Phase 2.5
+// have axes==nil, and the retrieval prompt must continue to render
+// exactly as it did before this PR. The pre-axes prompt shape is
+// `- [id] Title — summary` with no further suffixes; we assert by
+// making sure the entities/numbers labels are absent.
+func TestSelectionPromptOmitsAxesForOldSections(t *testing.T) {
+	tr := buildTree() // pre-Phase-2.5 tree, no SummaryAxes anywhere
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_b"}}
+	s := retrieval.NewSinglePass(m)
+
+	_, err := s.Select(context.Background(), tr, "q",
+		retrieval.ContextBudget{MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	m.mu.Lock()
+	prompts := append([]string(nil), m.lastPrompts...)
+	m.mu.Unlock()
+	if len(prompts) == 0 {
+		t.Fatal("no prompts captured")
+	}
+	prompt := prompts[0]
+	if strings.Contains(prompt, "entities: ") || strings.Contains(prompt, "numbers: ") {
+		t.Errorf("axes labels must not appear when no section has axes:\n%s", prompt)
+	}
+}
+
 // TestTraceTokenMatchesExternalComputation ties the strategy output to
 // the canonical ComputeTraceToken helper, so any drift between the
 // helper and the per-strategy plumbing is caught at test time.
