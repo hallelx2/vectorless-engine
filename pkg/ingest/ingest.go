@@ -676,13 +676,29 @@ func SourceKey(id tree.DocumentID, filename string) string {
 }
 
 // DefaultRegistry returns a parser.Registry preloaded with the parsers
-// the engine ships with. Callers may add more via Registry.Register.
+// the engine ships with, using the production defaults for each format
+// (including table-aware PDF extraction). Callers that need to override
+// PDF table behaviour from config should use RegistryFromTableOpts.
 func DefaultRegistry() *parser.Registry {
 	return parser.NewRegistry(
 		parser.NewMarkdown(),
 		parser.NewHTML(),
 		parser.NewDOCX(),
 		parser.NewPDF(),
+		parser.NewText(),
+	)
+}
+
+// RegistryFromTableOpts returns a parser.Registry where the PDF parser
+// is configured from the supplied TableOpts. Pass nil to disable table
+// extraction entirely; pass parser.DefaultTableOpts() (or a custom set)
+// to enable. All non-PDF parsers are constructed at their defaults.
+func RegistryFromTableOpts(opts *parser.TableOpts) *parser.Registry {
+	return parser.NewRegistry(
+		parser.NewMarkdown(),
+		parser.NewHTML(),
+		parser.NewDOCX(),
+		parser.NewPDFWithTables(opts),
 		parser.NewText(),
 	)
 }

@@ -35,6 +35,12 @@ type Config struct {
 type IngestConfig struct {
 	HyDE HyDEConfig `yaml:"hyde"`
 
+	// Tables configures pdftable's table-finding pass over PDF inputs.
+	// Enabled by default — tables are the single biggest retrieval-quality
+	// boost on FinanceBench-style documents because every numeric question
+	// hides in a balance sheet that text-only extraction collapses.
+	Tables TablesConfig `yaml:"tables"`
+
 	// GlobalLLMConcurrency caps the total number of LLM calls in flight
 	// across the summarize and HyDE stages combined, which now run
 	// concurrently. Each stage still respects its own per-stage cap
@@ -45,6 +51,48 @@ type IngestConfig struct {
 	// 4 + 4 per-stage caps while staying well below typical provider
 	// per-tenant concurrency limits.
 	GlobalLLMConcurrency int `yaml:"global_llm_concurrency"`
+}
+
+// TablesConfig configures the table-extraction stage of the PDF parser.
+// The stage runs pdftable's geometry-based finder over every page and
+// emits each detected table as its own Section with
+// Metadata["table"]="true", so downstream retrieval and the agentic
+// navigator can branch on whether a candidate is a numeric table or
+// prose.
+//
+// All knobs are forwarded to pdftable's TableSettings; defaults match
+// pdfplumber. See pdftable's docs for the full strategy surface.
+type TablesConfig struct {
+	// Enabled toggles the stage. Default: true. Flip to false to
+	// restore pre-integration text-only output; one config change is
+	// enough to roll back if a real-world PDF triggers a regression.
+	Enabled bool `yaml:"enabled"`
+
+	// VerticalStrategy picks the source of vertical column boundaries.
+	// Allowed values:
+	//   - "lines"        (default) edges from drawn lines/rects/curves
+	//   - "lines_strict" edges from drawn lines only
+	//   - "text"         edges inferred from word alignment (borderless
+	//                    tables — bank statements, narrative 10-Ks)
+	//   - "explicit"     caller-supplied coordinates (not yet wired
+	//                    through the engine config; reserved)
+	VerticalStrategy string `yaml:"vertical_strategy"`
+
+	// HorizontalStrategy picks the source of horizontal row boundaries.
+	// Same value set as VerticalStrategy; the two axes can mix
+	// independently (e.g. "lines" vertical + "text" horizontal).
+	HorizontalStrategy string `yaml:"horizontal_strategy"`
+
+	// MinTableRows drops candidate tables with fewer than this many
+	// rows. Default: 2. Trivial single-row matches are almost always
+	// false positives from layout artefacts (form-field grids, ruling
+	// hairlines on a single line of text).
+	MinTableRows int `yaml:"min_table_rows"`
+
+	// MinTableCols drops candidate tables with fewer than this many
+	// columns. Default: 2. Same rationale as MinTableRows — a single
+	// column is a vertical list, not a table.
+	MinTableCols int `yaml:"min_table_cols"`
 }
 
 // HyDEConfig configures the HyDE candidate-question stage. For each
@@ -419,6 +467,13 @@ func Default() Config {
 				NumQuestions: 5,
 				Concurrency:  4,
 			},
+			Tables: TablesConfig{
+				Enabled:            true,
+				VerticalStrategy:   "lines",
+				HorizontalStrategy: "lines",
+				MinTableRows:       2,
+				MinTableCols:       2,
+			},
 		},
 		Log: LogConfig{Level: "info", Format: "json"},
 	}
@@ -549,6 +604,31 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_GLOBAL_LLM_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Ingest.GlobalLLMConcurrency = n
+		}
+	}
+	// pdftable-driven table extraction.
+	if v := os.Getenv("VLE_INGEST_TABLES_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ingest.Tables.Enabled = true
+		case "0", "false", "no", "off":
+			c.Ingest.Tables.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY"); v != "" {
+		c.Ingest.Tables.VerticalStrategy = v
+	}
+	if v := os.Getenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY"); v != "" {
+		c.Ingest.Tables.HorizontalStrategy = v
+	}
+	if v := os.Getenv("VLE_INGEST_TABLES_MIN_ROWS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.Tables.MinTableRows = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_TABLES_MIN_COLS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.Tables.MinTableCols = n
 		}
 	}
 	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_ENABLED"); v != "" {
@@ -700,6 +780,25 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.GlobalLLMConcurrency < 0 {
 		return fmt.Errorf("ingest.global_llm_concurrency must be >= 0, got %d", c.Ingest.GlobalLLMConcurrency)
+	}
+
+	switch c.Ingest.Tables.VerticalStrategy {
+	case "", "lines", "lines_strict", "text", "explicit":
+	default:
+		return fmt.Errorf("ingest.tables.vertical_strategy must be one of lines|lines_strict|text|explicit, got %q",
+			c.Ingest.Tables.VerticalStrategy)
+	}
+	switch c.Ingest.Tables.HorizontalStrategy {
+	case "", "lines", "lines_strict", "text", "explicit":
+	default:
+		return fmt.Errorf("ingest.tables.horizontal_strategy must be one of lines|lines_strict|text|explicit, got %q",
+			c.Ingest.Tables.HorizontalStrategy)
+	}
+	if c.Ingest.Tables.MinTableRows < 0 {
+		return fmt.Errorf("ingest.tables.min_table_rows must be >= 0, got %d", c.Ingest.Tables.MinTableRows)
+	}
+	if c.Ingest.Tables.MinTableCols < 0 {
+		return fmt.Errorf("ingest.tables.min_table_cols must be >= 0, got %d", c.Ingest.Tables.MinTableCols)
 	}
 
 	if c.Retrieval.Planning.CacheSize < 0 {

@@ -33,6 +33,7 @@ import (
 
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
+	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -158,7 +159,7 @@ func run() error {
 		DB:                   pool,
 		Storage:              store,
 		LLM:                  llmClient,
-		Parsers:              ingest.DefaultRegistry(),
+		Parsers:              ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Engine.Ingest.Tables)),
 		Logger:               logger,
 		HyDEEnabled:          cfg.Engine.Ingest.HyDE.Enabled,
 		HyDEModel:            cfg.Engine.Ingest.HyDE.Model,
@@ -166,6 +167,16 @@ func run() error {
 		HyDEConcurrency:      cfg.Engine.Ingest.HyDE.Concurrency,
 		GlobalLLMConcurrency: cfg.Engine.Ingest.GlobalLLMConcurrency,
 	})
+	if cfg.Engine.Ingest.Tables.Enabled {
+		logger.Info("ingest: pdf table extraction enabled",
+			"vertical_strategy", cfg.Engine.Ingest.Tables.VerticalStrategy,
+			"horizontal_strategy", cfg.Engine.Ingest.Tables.HorizontalStrategy,
+			"min_rows", cfg.Engine.Ingest.Tables.MinTableRows,
+			"min_cols", cfg.Engine.Ingest.Tables.MinTableCols,
+		)
+	} else {
+		logger.Info("ingest: pdf table extraction disabled")
+	}
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
 	// ── Start subsystems ──────────────────────────────────────────
@@ -394,4 +405,21 @@ func newLogger(c enginecfg.LogConfig) *slog.Logger {
 		h = slog.NewJSONHandler(os.Stdout, opts)
 	}
 	return slog.New(h)
+}
+
+// tableOptsFromConfig translates the engine's TablesConfig (from the
+// embedded engine config block) into the parser-level TableOpts. Returns
+// nil when tables are disabled so the PDF parser short-circuits without
+// instantiating pdftable settings.
+func tableOptsFromConfig(c enginecfg.TablesConfig) *parser.TableOpts {
+	if !c.Enabled {
+		return nil
+	}
+	return &parser.TableOpts{
+		Enabled:            true,
+		VerticalStrategy:   c.VerticalStrategy,
+		HorizontalStrategy: c.HorizontalStrategy,
+		MinTableRows:       c.MinTableRows,
+		MinTableCols:       c.MinTableCols,
+	}
 }

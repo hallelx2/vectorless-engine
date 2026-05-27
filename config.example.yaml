@@ -200,6 +200,33 @@ ingest:
     num_questions: 5
     concurrency: 4
 
+  # Tables: pdftable-driven extraction. Every detected table on a PDF
+  # page becomes its own Section with `Metadata["table"]="true"`, content
+  # rendered as GitHub-flavoured Markdown. This is the single biggest
+  # retrieval-quality lever on documents where numeric answers live in
+  # balance sheets — text-only extraction collapses tables into a
+  # space-joined run that's effectively unsearchable.
+  #
+  # ENABLED BY DEFAULT. Flip to false if a pathological PDF surfaces a
+  # regression — table-extraction errors never break ingest (text-only
+  # output still ships), but the flag is the kill switch.
+  tables:
+    enabled: true
+    # Vertical / horizontal edge-detection strategy. One of:
+    #   lines        (default) — edges from drawn lines/rects/curves
+    #   lines_strict             edges from drawn lines only
+    #   text                     edges inferred from word alignment
+    #                            (best for borderless / narrative tables)
+    #   explicit                 caller-supplied coordinates (reserved)
+    # The two axes mix independently, so "lines" vertical + "text"
+    # horizontal works for half-ruled tables.
+    vertical_strategy: "lines"
+    horizontal_strategy: "lines"
+    # Drop candidate tables smaller than this. 2x2 is the floor — a
+    # single row or column is a list or a header, not a table.
+    min_table_rows: 2
+    min_table_cols: 2
+
 log:
   level: "info"            # debug | info | warn | error
   format: "json"           # json | console
