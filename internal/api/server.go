@@ -5,18 +5,23 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/hallelx2/llmgate"
 
+	"github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
@@ -44,6 +49,20 @@ type Deps struct {
 	// MultiDoc is the multi-document query dispatcher. If nil, the
 	// /v1/query/multi endpoint returns 501.
 	MultiDoc *retrieval.MultiDoc
+
+	// LLM is the shared llmgate client used by handlers that issue
+	// LLM calls outside the retrieval strategy (answer-span extraction,
+	// /v1/answer synthesis). Nil disables those handlers (the endpoints
+	// return 501).
+	LLM llmgate.Client
+
+	// LLMModel is the default model name. Per-request overrides win.
+	LLMModel string
+
+	// AnswerSpan / Answer hold the relevant config blocks. Default
+	// values (AnswerSpan disabled, Answer.MaxSections=5) are safe.
+	AnswerSpan config.AnswerSpanBlock
+	Answer     config.AnswerBlock
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -69,6 +88,7 @@ func Router(d Deps) http.Handler {
 		r.Get("/sections/{id}", d.handleGetSection)
 		r.Post("/query", d.handleQuery)
 		r.Post("/query/multi", d.handleQueryMulti)
+		r.Post("/answer", d.handleAnswer)
 	})
 
 	r.Post("/internal/jobs/{kind}", d.handleQueueWebhook)
@@ -410,7 +430,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		ids = ids[:body.MaxSections]
 	}
 
-	sections := make([]map[string]any, 0, len(ids))
+	enriched := make([]sectionWithContent, 0, len(ids))
 	for _, id := range ids {
 		sec := t.FindByID(id)
 		if sec == nil {
@@ -425,24 +445,20 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 				content = string(raw)
 			}
 		}
-		s := map[string]any{
-			"id":          sec.ID,
-			"parent_id":   sec.ParentID,
-			"title":       sec.Title,
-			"summary":     sec.Summary,
-			"token_count": sec.TokenCount,
-			"content":     content,
-		}
-		if sec.PageStart > 0 {
-			s["page_start"] = sec.PageStart
-		}
-		if sec.PageEnd > 0 {
-			s["page_end"] = sec.PageEnd
-		}
-		if len(sec.CandidateQuestions) > 0 {
-			s["candidate_questions"] = sec.CandidateQuestions
-		}
-		sections = append(sections, s)
+		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
+	}
+
+	// Optional: per-section answer-span extraction. Opt-in via config —
+	// one LLM call per returned section. Failures are non-fatal; the
+	// section is returned without a span.
+	if d.AnswerSpan.Enabled && d.LLM != nil {
+		extractor := d.spanExtractor(body.Model)
+		runSpansConcurrent(r.Context(), extractor, body.Query, enriched, d.AnswerSpan.MaxConcurrency, d.Logger)
+	}
+
+	sections := make([]map[string]any, 0, len(enriched))
+	for _, e := range enriched {
+		sections = append(sections, sectionWithContentToMap(e))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -453,6 +469,337 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
 	})
+}
+
+// sectionWithContent bundles a tree section with its loaded content
+// and an optional answer-span. Used by /v1/query and /v1/answer.
+type sectionWithContent struct {
+	sec     *tree.Section
+	content string
+	span    *retrieval.AnswerSpan
+}
+
+// sectionWithContentToMap renders the section as the API map shape.
+func sectionWithContentToMap(e sectionWithContent) map[string]any {
+	s := map[string]any{
+		"id":          e.sec.ID,
+		"parent_id":   e.sec.ParentID,
+		"title":       e.sec.Title,
+		"summary":     e.sec.Summary,
+		"token_count": e.sec.TokenCount,
+		"content":     e.content,
+	}
+	if e.sec.PageStart > 0 {
+		s["page_start"] = e.sec.PageStart
+	}
+	if e.sec.PageEnd > 0 {
+		s["page_end"] = e.sec.PageEnd
+	}
+	if len(e.sec.CandidateQuestions) > 0 {
+		s["candidate_questions"] = e.sec.CandidateQuestions
+	}
+	if e.span != nil {
+		s["answer_span"] = e.span
+	}
+	return s
+}
+
+// spanExtractor builds a SpanExtractor honouring the configured model
+// override, with a fall-through to the request's model then Deps default.
+func (d Deps) spanExtractor(requestModel string) *retrieval.SpanExtractor {
+	model := d.AnswerSpan.Model
+	if model == "" {
+		model = requestModel
+	}
+	if model == "" {
+		model = d.LLMModel
+	}
+	ext := retrieval.NewSpanExtractor(d.LLM, model)
+	if d.AnswerSpan.MaxQuoteLen > 0 {
+		ext.MaxQuoteLen = d.AnswerSpan.MaxQuoteLen
+	}
+	return ext
+}
+
+// runSpansConcurrent fans out span extraction across secs with a
+// max-concurrency semaphore. Each extraction's outcome is written back
+// into the matching slot's `span` field. Errors are logged and dropped
+// — span extraction is best-effort.
+func runSpansConcurrent(ctx context.Context, extractor *retrieval.SpanExtractor, query string, secs []sectionWithContent, maxConcurrency int, logger *slog.Logger) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 4
+	}
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	for i := range secs {
+		i := i
+		if strings.TrimSpace(secs[i].content) == "" {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			span, _, err := extractor.Extract(ctx, secs[i].content, query)
+			if err != nil {
+				if logger != nil {
+					logger.Warn("answer-span: extract failed", "section_id", secs[i].sec.ID, "err", err)
+				}
+				return
+			}
+			secs[i].span = span
+		}()
+	}
+	wg.Wait()
+}
+
+// handleAnswer runs retrieval + per-section answer-span extraction +
+// a synthesis LLM call, returning a quote-grounded answer plus
+// citations in a single round-trip. This is the most regulator-
+// defensible thing the engine can produce — every citation carries a
+// section ID, page range (when known), and the verbatim quote the
+// answer relies on.
+//
+// Body: { document_id, query, model?, max_tokens?, reserved_for_prompt?,
+// max_parallel_calls?, max_sections?, max_answer_tokens? }.
+// Response: { document_id, query, answer, citations:
+//
+//	[{section_id, title, page_start, page_end, quote}], strategy,
+//	model, usage, elapsed_ms }.
+func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	if d.LLM == nil {
+		writeErr(w, http.StatusNotImplemented, "answer endpoint requires an LLM client")
+		return
+	}
+	if d.Strategy == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no retrieval strategy configured")
+		return
+	}
+
+	var body struct {
+		DocumentID        tree.DocumentID `json:"document_id"`
+		Query             string          `json:"query"`
+		Model             string          `json:"model"`
+		MaxTokens         int             `json:"max_tokens"`
+		ReservedForPrompt int             `json:"reserved_for_prompt"`
+		MaxParallelCalls  int             `json:"max_parallel_calls"`
+		MaxSections       int             `json:"max_sections"`
+		MaxAnswerTokens   int             `json:"max_answer_tokens"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body.DocumentID == "" || body.Query == "" {
+		writeErr(w, http.StatusBadRequest, "document_id and query are required")
+		return
+	}
+
+	t, err := d.DB.LoadTree(r.Context(), body.DocumentID, standaloneOrgID, "")
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	budget := retrieval.ContextBudget{
+		ModelName:         body.Model,
+		MaxTokens:         body.MaxTokens,
+		ReservedForPrompt: body.ReservedForPrompt,
+		MaxParallelCalls:  body.MaxParallelCalls,
+	}
+	if budget.MaxTokens == 0 {
+		budget.MaxTokens = 100000
+	}
+	if budget.ReservedForPrompt == 0 {
+		budget.ReservedForPrompt = 4000
+	}
+	if budget.MaxParallelCalls == 0 {
+		budget.MaxParallelCalls = 8
+	}
+
+	started := time.Now()
+	totalUsage := retrieval.Usage{}
+
+	var ids []tree.SectionID
+	var retrievalUsage retrieval.Usage
+	if cs, ok := d.Strategy.(retrieval.CostStrategy); ok {
+		res, err := cs.SelectWithCost(r.Context(), t, body.Query, budget)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+			return
+		}
+		ids, retrievalUsage = res.SelectedIDs, res.Usage
+	} else {
+		picks, err := d.Strategy.Select(r.Context(), t, body.Query, budget)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+			return
+		}
+		ids = picks
+	}
+	totalUsage.Add(retrievalUsage)
+
+	maxSections := body.MaxSections
+	if maxSections <= 0 {
+		maxSections = d.Answer.MaxSections
+	}
+	if maxSections <= 0 {
+		maxSections = 5
+	}
+	if len(ids) > maxSections {
+		ids = ids[:maxSections]
+	}
+
+	// Load each section's content.
+	enriched := make([]sectionWithContent, 0, len(ids))
+	for _, id := range ids {
+		sec := t.FindByID(id)
+		if sec == nil {
+			continue
+		}
+		var content string
+		if sec.ContentRef != "" {
+			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
+			if err == nil {
+				raw, _ := io.ReadAll(rc)
+				rc.Close()
+				content = string(raw)
+			}
+		}
+		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
+	}
+
+	// Always extract spans for /v1/answer — they ground each citation.
+	spanExtractor := d.spanExtractor(body.Model)
+	runSpansConcurrent(r.Context(), spanExtractor, body.Query, enriched, d.AnswerSpan.MaxConcurrency, d.Logger)
+
+	// Synthesise. Feed only the spans (when available) + section
+	// titles into the prompt so the model stays grounded in the
+	// retrieved evidence.
+	synthModel := d.Answer.Model
+	if synthModel == "" {
+		synthModel = body.Model
+	}
+	if synthModel == "" {
+		synthModel = d.LLMModel
+	}
+	maxAnswerTokens := body.MaxAnswerTokens
+	if maxAnswerTokens <= 0 {
+		maxAnswerTokens = d.Answer.MaxAnswerTokens
+	}
+	if maxAnswerTokens <= 0 {
+		maxAnswerTokens = 1024
+	}
+
+	answerText, synthUsage, err := synthesiseAnswer(r.Context(), d.LLM, synthModel, body.Query, enriched, maxAnswerTokens)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "synthesis failed: "+err.Error())
+		return
+	}
+	totalUsage.Add(synthUsage)
+
+	citations := make([]map[string]any, 0, len(enriched))
+	for _, e := range enriched {
+		c := map[string]any{
+			"section_id": e.sec.ID,
+			"title":      e.sec.Title,
+		}
+		if e.sec.PageStart > 0 {
+			c["page_start"] = e.sec.PageStart
+		}
+		if e.sec.PageEnd > 0 {
+			c["page_end"] = e.sec.PageEnd
+		}
+		if e.span != nil && e.span.Text != "" {
+			c["quote"] = e.span.Text
+			if e.span.Start >= 0 && e.span.End > e.span.Start {
+				c["quote_start"] = e.span.Start
+				c["quote_end"] = e.span.End
+			}
+		}
+		citations = append(citations, c)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"document_id": body.DocumentID,
+		"query":       body.Query,
+		"answer":      answerText,
+		"citations":   citations,
+		"strategy":    d.Strategy.Name(),
+		"model":       synthModel,
+		"usage": map[string]any{
+			"input_tokens":  totalUsage.InputTokens,
+			"output_tokens": totalUsage.OutputTokens,
+			"total_tokens":  totalUsage.TotalTokens,
+			"cost_usd":      totalUsage.CostUSD,
+			"llm_calls":     totalUsage.LLMCalls,
+		},
+		"elapsed_ms": time.Since(started).Milliseconds(),
+	})
+}
+
+// synthesiseAnswer runs one LLM call producing the final answer from
+// retrieved sections + their extracted spans. The model is told to
+// cite by section ID.
+func synthesiseAnswer(ctx context.Context, client llmgate.Client, model, query string, secs []sectionWithContent, maxAnswerTokens int) (string, retrieval.Usage, error) {
+	var b strings.Builder
+	b.WriteString("You are answering a user's question using ONLY the evidence below.\n\n")
+	b.WriteString("User query:\n")
+	b.WriteString(query)
+	b.WriteString("\n\nRetrieved evidence (each block is a section of the document):\n")
+	for i, e := range secs {
+		fmt.Fprintf(&b, "\n[%d] section_id=%s, title=%q", i+1, e.sec.ID, e.sec.Title)
+		if e.sec.PageStart > 0 {
+			fmt.Fprintf(&b, ", pages=%d-%d", e.sec.PageStart, e.sec.PageEnd)
+		}
+		b.WriteString("\n")
+		if e.span != nil && e.span.Text != "" {
+			fmt.Fprintf(&b, "Most relevant quote: %q\n", e.span.Text)
+		}
+		// Always include some content so the model isn't blind when the
+		// span extractor returned nothing.
+		if e.content != "" {
+			snippet := e.content
+			if len(snippet) > 4000 {
+				snippet = snippet[:4000]
+			}
+			fmt.Fprintf(&b, "Section content:\n%s\n", snippet)
+		}
+	}
+	b.WriteString("\nWrite a concise answer to the user's query. ")
+	b.WriteString("If the evidence does not contain an answer, say so. ")
+	b.WriteString("Inline citations should reference the section_id values shown above. ")
+	b.WriteString("Output plain prose; no JSON.")
+
+	req := llmgate.Request{
+		Model: model,
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: "You synthesise grounded answers from retrieved document sections. Never invent facts; only cite what the evidence shows."},
+			{Role: llmgate.RoleUser, Content: b.String()},
+		},
+		MaxTokens:   maxAnswerTokens,
+		Temperature: 0,
+	}
+	resp, err := client.Complete(ctx, req)
+	if err != nil {
+		return "", retrieval.Usage{}, err
+	}
+	return strings.TrimSpace(resp.Content), retrieval.Usage{
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+		CostUSD:      resp.Usage.CostUSD,
+		LLMCalls:     1,
+	}, nil
 }
 
 // handleQueryMulti accepts { document_ids, query, model?, max_tokens?,

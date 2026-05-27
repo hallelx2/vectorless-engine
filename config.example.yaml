@@ -107,6 +107,28 @@ retrieval:
     # doesn't own, so the model knows what else exists in the document.
     include_sibling_breadcrumbs: true
 
+  # answer_span: when enabled, every section returned by /v1/query gets an
+  # extra `answer_span` field carrying the verbatim quote the model judged
+  # most relevant to the query, plus byte offsets back into the section's
+  # content. Costs one LLM call per returned section. Opt-in by default.
+  answer_span:
+    enabled: false
+    # Override the model used for span extraction; empty inherits the
+    # request's model. Keep this on a cheap/fast model — the call is
+    # short and runs once per returned section.
+    model: ""
+    max_concurrency: 4
+    max_quote_len: 400
+
+  # answer: /v1/answer endpoint configuration. The endpoint runs
+  # retrieval + per-section span extraction + a synthesis LLM call,
+  # returning {answer, citations:[{section_id, page_start, page_end, quote}]}.
+  answer:
+    # Override the synthesis-call model; empty inherits the request's model.
+    model: ""
+    max_sections: 5
+    max_answer_tokens: 1024
+
 ingest:
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the
