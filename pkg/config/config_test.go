@@ -46,8 +46,120 @@ func TestDefaultValues(t *testing.T) {
 	if !cfg.Retrieval.Planning.Decompose {
 		t.Error("retrieval.planning.decompose should default to true (when planning is enabled)")
 	}
+	if cfg.Retrieval.ReRank.Enabled {
+		t.Error("retrieval.rerank.enabled should default to false (opt-in)")
+	}
+	if cfg.Retrieval.ReRank.MaxContentChars != 2000 {
+		t.Errorf("retrieval.rerank.max_content_chars = %d, want 2000", cfg.Retrieval.ReRank.MaxContentChars)
+	}
+	if cfg.Retrieval.ReRank.TopK != 0 {
+		t.Errorf("retrieval.rerank.top_k = %d, want 0 (keep all)", cfg.Retrieval.ReRank.TopK)
+	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level = %q, want info", cfg.Log.Level)
+	}
+}
+
+func TestReRankEnvOverride(t *testing.T) {
+	// Not parallel — mutates env. Restore on exit.
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_RERANK_ENABLED")
+	prevModel := os.Getenv("VLE_RETRIEVAL_RERANK_MODEL")
+	prevMax := os.Getenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS")
+	prevTopK := os.Getenv("VLE_RETRIEVAL_RERANK_TOP_K")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", prevModel)
+		os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
+		os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "true")
+	os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", "gemini-2.0-flash")
+	os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "1500")
+	os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "3")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if !cfg.Retrieval.ReRank.Enabled {
+		t.Error("VLE_RETRIEVAL_RERANK_ENABLED=true should enable rerank")
+	}
+	if cfg.Retrieval.ReRank.Model != "gemini-2.0-flash" {
+		t.Errorf("rerank model = %q, want gemini-2.0-flash", cfg.Retrieval.ReRank.Model)
+	}
+	if cfg.Retrieval.ReRank.MaxContentChars != 1500 {
+		t.Errorf("rerank max_content_chars = %d, want 1500", cfg.Retrieval.ReRank.MaxContentChars)
+	}
+	if cfg.Retrieval.ReRank.TopK != 3 {
+		t.Errorf("rerank top_k = %d, want 3", cfg.Retrieval.ReRank.TopK)
+	}
+}
+
+func TestReRankEnvOverrideDisable(t *testing.T) {
+	// Toggle off via env: start from a config that defaults to false,
+	// then set =false explicitly; verify the path executes (not just
+	// that the default value is preserved).
+	prev := os.Getenv("VLE_RETRIEVAL_RERANK_ENABLED")
+	defer os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prev)
+
+	cfg := Default()
+	cfg.Retrieval.ReRank.Enabled = true // simulate a YAML-set true
+	os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "false")
+	applyEnvOverrides(&cfg)
+	if cfg.Retrieval.ReRank.Enabled {
+		t.Error("VLE_RETRIEVAL_RERANK_ENABLED=false should disable rerank even when YAML set it true")
+	}
+}
+
+func TestReRankEnvOverrideRejectsBad(t *testing.T) {
+	// Garbage env values should be rejected, not silently zero the field.
+	prevMax := os.Getenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS")
+	prevTopK := os.Getenv("VLE_RETRIEVAL_RERANK_TOP_K")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
+		os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "not-a-number")
+	os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "abc")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Retrieval.ReRank.MaxContentChars != 2000 {
+		t.Errorf("bad max_content_chars env should preserve default, got %d", cfg.Retrieval.ReRank.MaxContentChars)
+	}
+	if cfg.Retrieval.ReRank.TopK != 0 {
+		t.Errorf("bad top_k env should preserve default, got %d", cfg.Retrieval.ReRank.TopK)
+	}
+}
+
+func TestValidateReRankNegatives(t *testing.T) {
+	t.Parallel()
+
+	// Negative max_content_chars rejected.
+	cfg := Default()
+	cfg.Database.URL = "postgres://localhost/test"
+	cfg.Retrieval.ReRank.MaxContentChars = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative max_content_chars should fail validation")
+	}
+
+	// Negative top_k rejected.
+	cfg2 := Default()
+	cfg2.Database.URL = "postgres://localhost/test"
+	cfg2.Retrieval.ReRank.TopK = -1
+	if err := cfg2.Validate(); err == nil {
+		t.Error("negative top_k should fail validation")
+	}
+
+	// Zero on both is valid (TopK=0 means "keep all", MaxContentChars=0
+	// means "use default").
+	cfg3 := Default()
+	cfg3.Database.URL = "postgres://localhost/test"
+	cfg3.Retrieval.ReRank.MaxContentChars = 0
+	cfg3.Retrieval.ReRank.TopK = 0
+	if err := cfg3.Validate(); err != nil {
+		t.Errorf("zero rerank values should pass validation: %v", err)
 	}
 }
 
