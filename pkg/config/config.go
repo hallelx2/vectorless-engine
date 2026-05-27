@@ -204,6 +204,44 @@ type RetrievalConfig struct {
 	AnswerSpan  AnswerSpanBlock  `yaml:"answer_span"`
 	Answer      AnswerBlock      `yaml:"answer"`
 	Planning    PlanningBlock    `yaml:"planning"`
+	ReRank      ReRankBlock      `yaml:"rerank"`
+}
+
+// ReRankBlock configures the Phase 2.3 content-aware re-rank pass.
+//
+// When enabled, every /v1/query and /v1/answer request that returns
+// candidate sections runs one extra LLM call: the candidates' first
+// MaxContentChars chars of content are fed to the model with the
+// query, and the model returns a per-section relevance score
+// (0-100). Sections are reordered by score; if TopK > 0 the response
+// is truncated to the top K.
+//
+// The pass is opt-in. Per-request `enable_rerank` body field
+// overrides this block.
+//
+// Re-rank failures never drop sections — at worst the original
+// strategy order is preserved and the request returns unchanged from
+// the no-rerank path. See pkg/retrieval/rerank.go for the exact
+// degradation contract.
+type ReRankBlock struct {
+	// Enabled toggles re-rank at the server level. Default: false.
+	Enabled bool `yaml:"enabled"`
+
+	// Model overrides the re-rank LLM model. Empty means use the
+	// request's model (which itself falls back to the engine default).
+	// Point this at a small/fast model — the re-rank prompt is short
+	// and shouldn't burn the flagship model's budget.
+	Model string `yaml:"model"`
+
+	// MaxContentChars caps how many characters of each candidate's
+	// content are sent to the model. Default: 2000.
+	MaxContentChars int `yaml:"max_content_chars"`
+
+	// TopK caps the number of sections kept after re-ranking. 0 means
+	// keep all candidates (re-rank only reorders). Useful when the
+	// strategy is configured to return a wide candidate list and the
+	// re-rank pass picks the focused top-k for synthesis.
+	TopK int `yaml:"top_k"`
 }
 
 // PlanningBlock configures Phase 2.1 query planning + Phase 2.2 multi-hop
@@ -367,6 +405,11 @@ func Default() Config {
 				Enabled:   false,
 				CacheSize: 128,
 				Decompose: true,
+			},
+			ReRank: ReRankBlock{
+				Enabled:         false,
+				MaxContentChars: 2000,
+				TopK:            0,
 			},
 		},
 		Ingest: IngestConfig{
@@ -556,6 +599,27 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.Planning.Decompose = false
 		}
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_RERANK_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.ReRank.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.ReRank.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_RERANK_MODEL"); v != "" {
+		c.Retrieval.ReRank.Model = v
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.ReRank.MaxContentChars = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_RERANK_TOP_K"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Retrieval.ReRank.TopK = n
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -640,6 +704,13 @@ func (c Config) Validate() error {
 
 	if c.Retrieval.Planning.CacheSize < 0 {
 		return fmt.Errorf("retrieval.planning.cache_size must be >= 0, got %d", c.Retrieval.Planning.CacheSize)
+	}
+
+	if c.Retrieval.ReRank.MaxContentChars < 0 {
+		return fmt.Errorf("retrieval.rerank.max_content_chars must be >= 0, got %d", c.Retrieval.ReRank.MaxContentChars)
+	}
+	if c.Retrieval.ReRank.TopK < 0 {
+		return fmt.Errorf("retrieval.rerank.top_k must be >= 0, got %d", c.Retrieval.ReRank.TopK)
 	}
 
 	return nil
