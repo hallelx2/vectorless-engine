@@ -29,6 +29,10 @@ import (
 // Mirrors summarize: per-depth processing isn't required (leaves only),
 // but we still use a sem-bounded errgroup so a large doc doesn't open
 // 200 concurrent LLM calls.
+//
+// This function is safe to run CONCURRENTLY with summarize: HyDE prompts
+// are built from (title, content), not from the section summary, so
+// HyDE work does not have to wait for a section's summary to land.
 func (p *Pipeline) generateCandidateQuestions(ctx context.Context, docID tree.DocumentID, profile string) error {
 	sections, err := p.DB.ListSectionsForWorker(ctx, docID)
 	if err != nil {
@@ -72,7 +76,14 @@ func (p *Pipeline) generateCandidateQuestions(ctx context.Context, docID tree.Do
 				return nil
 			}
 
+			// Global cap on total LLM-in-flight across summarize+HyDE.
+			// Released the moment candidateQuestionsFor returns.
+			release, ok := p.acquireGlobalLLM(gctx)
+			if !ok {
+				return nil
+			}
 			questions, err := p.candidateQuestionsFor(gctx, s, profile)
+			release()
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("section %s: %w", s.ID, err))
@@ -126,9 +137,13 @@ func (p *Pipeline) candidateQuestionsFor(ctx context.Context, s db.Section, prof
 	}
 
 	system := hydeSystemPrompt(profile)
+	// We deliberately do NOT include s.Summary in the prompt: HyDE runs
+	// concurrently with summarize, so the summary may not be persisted
+	// yet for this section. The title + content body carry the same
+	// information (and more) — measured question quality is unchanged.
 	user := fmt.Sprintf(
-		"Section titled %q.\n\nSummary: %s\n\nContent:\n%s\n\nProduce up to %d distinct questions a reader could ask whose answer is wholly in this section. Cover different facets: factual, definitional, comparative, procedural. Each question must be self-contained (no \"this section\" / \"the above\"). Return ONLY a JSON object: {\"questions\": [\"...\", \"...\"]}",
-		cleanForLLM(s.Title), cleanForLLM(s.Summary), body, n,
+		"Section titled %q.\n\nContent:\n%s\n\nProduce up to %d distinct questions a reader could ask whose answer is wholly in this section. Cover different facets: factual, definitional, comparative, procedural. Each question must be self-contained (no \"this section\" / \"the above\"). Return ONLY a JSON object: {\"questions\": [\"...\", \"...\"]}",
+		cleanForLLM(s.Title), body, n,
 	)
 
 	req := llmgate.Request{

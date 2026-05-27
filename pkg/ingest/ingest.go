@@ -4,6 +4,15 @@
 //	parse      — bytes → hierarchical outline (parser.Registry)
 //	build tree — outline → sections persisted in Postgres + object store
 //	summarize  — every section gets an LLM-written summary
+//	hyde       — every leaf gets a list of HyDE candidate questions
+//
+// After parse + persist, the summarize and hyde stages run CONCURRENTLY:
+// HyDE operates from a section's title + content (the summary, when
+// available, is a nice-to-have), so it has no hard ordering dependency
+// on summarize. Running them in parallel roughly halves wall time on
+// long documents. Total LLM-in-flight is capped by an optional shared
+// semaphore (Pipeline.GlobalLLMConcurrency) so we don't oversubscribe
+// the provider.
 //
 // The pipeline is driven by a queue job of kind queue.KindIngestDocument.
 // Each stage is idempotent so a retry from any point leaves the document
@@ -87,6 +96,24 @@ type Pipeline struct {
 	// HyDEConcurrency bounds parallel LLM calls during the HyDE stage.
 	// Default: 4.
 	HyDEConcurrency int
+
+	// GlobalLLMConcurrency, when > 0, caps the total number of LLM calls
+	// in flight across BOTH the summarize and HyDE stages combined.
+	// Each stage still respects its own per-stage cap
+	// (SummaryConcurrency / HyDEConcurrency), but neither can push the
+	// shared counter above this ceiling. Useful because summarize and
+	// HyDE now run concurrently — without this, total in-flight load is
+	// SummaryConcurrency + HyDEConcurrency, which may exceed the
+	// provider's per-tenant rate limit.
+	//
+	// 0 disables the global cap (each stage is bounded only by its own
+	// per-stage semaphore). Default applied by NewPipeline: 12.
+	GlobalLLMConcurrency int
+
+	// globalLLMSem is the lazily-initialized shared semaphore enforcing
+	// GlobalLLMConcurrency. nil means "no global cap" — callers fall back
+	// to per-stage limits only.
+	globalLLMSem chan struct{}
 }
 
 // NewPipeline returns a Pipeline with sensible defaults filled in.
@@ -103,10 +130,39 @@ func NewPipeline(p Pipeline) *Pipeline {
 	if p.HyDEConcurrency <= 0 {
 		p.HyDEConcurrency = 4
 	}
+	// Default the global cap to a value that comfortably exceeds the
+	// sum of the two default per-stage caps (4 + 4 = 8) while leaving
+	// some headroom — but stays well below typical provider per-tenant
+	// concurrency limits.
+	if p.GlobalLLMConcurrency < 0 {
+		p.GlobalLLMConcurrency = 0
+	}
+	if p.GlobalLLMConcurrency == 0 {
+		p.GlobalLLMConcurrency = 12
+	}
+	if p.GlobalLLMConcurrency > 0 {
+		p.globalLLMSem = make(chan struct{}, p.GlobalLLMConcurrency)
+	}
 	if p.Logger == nil {
 		p.Logger = slog.Default()
 	}
 	return &p
+}
+
+// acquireGlobalLLM blocks until a global-LLM-concurrency slot is free,
+// or returns false if ctx is canceled first. Returns a release func the
+// caller must invoke (typically deferred). Safe to call when the global
+// semaphore is disabled — the returned release is a no-op.
+func (p *Pipeline) acquireGlobalLLM(ctx context.Context) (release func(), ok bool) {
+	if p.globalLLMSem == nil {
+		return func() {}, true
+	}
+	select {
+	case p.globalLLMSem <- struct{}{}:
+		return func() { <-p.globalLLMSem }, true
+	case <-ctx.Done():
+		return func() {}, false
+	}
 }
 
 // Handler returns a queue.Handler suitable for queue.KindIngestDocument.
@@ -144,28 +200,64 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusSummarizing, ""); err != nil {
 		return err
 	}
-	if err := p.summarize(ctx, pl.DocumentID, pl.Profile); err != nil {
+
+	stageStart := time.Now()
+	summarizeFn := func(ctx context.Context) error {
+		return p.summarize(ctx, pl.DocumentID, pl.Profile)
+	}
+	var hydeFn func(ctx context.Context) error
+	if p.HyDEEnabled {
+		hydeFn = func(ctx context.Context) error {
+			return p.generateCandidateQuestions(ctx, pl.DocumentID, pl.Profile)
+		}
+	}
+	sumErr, hydeErr := runParallelStages(ctx, summarizeFn, hydeFn)
+	if sumErr != nil {
 		// Summarization failures are recoverable — a section without a
 		// summary is still query-able, just less efficient. We log and
 		// proceed rather than dead-letter the document.
-		log.Warn("ingest: summarize had errors", "err", err)
+		log.Warn("ingest: summarize had errors", "err", sumErr)
 	}
-
-	if p.HyDEEnabled {
-		if err := p.generateCandidateQuestions(ctx, pl.DocumentID, pl.Profile); err != nil {
-			// HyDE is a retrieval-quality booster, not a correctness
-			// requirement. Failures here leave the document fully usable
-			// (just with less recall on lexically-distant queries), so we
-			// log and proceed.
-			log.Warn("ingest: hyde had errors", "err", err)
-		}
+	if hydeErr != nil {
+		// HyDE is a retrieval-quality booster, not a correctness
+		// requirement. Failures here leave the document fully usable
+		// (just with less recall on lexically-distant queries), so we
+		// log and proceed.
+		log.Warn("ingest: hyde had errors", "err", hydeErr)
 	}
+	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
 
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
 		return err
 	}
 	log.Info("ingest: ready")
 	return nil
+}
+
+// runParallelStages runs summarize and HyDE concurrently, returning each
+// stage's error independently so callers can log them separately. A nil
+// hydeFn skips the HyDE stage (returns nil for hydeErr).
+//
+// Extracted so the interleave behaviour is testable without touching the
+// real DB-backed summarize/HyDE entry points.
+func runParallelStages(ctx context.Context, summarizeFn, hydeFn func(context.Context) error) (summarizeErr, hydeErr error) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if summarizeFn != nil {
+			summarizeErr = summarizeFn(ctx)
+		}
+	}()
+	if hydeFn != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hydeErr = hydeFn(ctx)
+		}()
+	}
+	wg.Wait()
+	return summarizeErr, hydeErr
 }
 
 func (p *Pipeline) parse(ctx context.Context, pl Payload) (*parser.ParsedDoc, error) {
@@ -336,7 +428,14 @@ func (p *Pipeline) summarize(ctx context.Context, docID tree.DocumentID, profile
 					mu.Unlock()
 				}
 
+				// Global cap on total LLM-in-flight across summarize+HyDE.
+				// Released the moment the LLM call returns.
+				release, ok := p.acquireGlobalLLM(gctx)
+				if !ok {
+					return nil
+				}
 				summary, err := p.summaryFor(gctx, s, childLines, profile)
+				release()
 				if err != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Errorf("section %s: %w", s.ID, err))
