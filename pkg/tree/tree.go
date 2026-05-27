@@ -42,6 +42,16 @@ type Section struct {
 	Title   string `json:"title"`
 	Summary string `json:"summary,omitempty"`
 
+	// SummaryAxes is the structured, multi-axis summary written by the
+	// Phase 2.5 summarizer. Carries topics / entities / numbers / one_line.
+	// nil for sections written before multi-axis summaries shipped (the
+	// retrieval prompt simply skips the extra axes lines when nil).
+	//
+	// SummaryAxes.OneLine and the flat `Summary` field above are kept in
+	// sync at write time so older callers that only read `summary` keep
+	// working unchanged.
+	SummaryAxes *SummaryAxes `json:"summary_axes,omitempty"`
+
 	// ContentRef points to the full text of this section in storage.
 	// Only leaf sections have content; internal sections summarize their
 	// children.
@@ -68,6 +78,31 @@ type Section struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 
 	Children []*Section `json:"children,omitempty"`
+}
+
+// SummaryAxes is the multi-axis structured summary the Phase 2.5
+// summarizer produces. Each axis gives retrieval a different angle on
+// the section's content:
+//
+//   - Topics:   hyphenated keywords ("debt", "long-term-obligations")
+//     for coarse subject-matter matching.
+//   - Entities: proper nouns extracted verbatim (orgs, people, places,
+//     dates) so retrieval can match queries that mention them by name.
+//   - Numbers:  standout numeric values with the units as they appear
+//     in the section ("$4.2B", "2.8%") — preserves the surface form so
+//     a downstream model doesn't have to re-normalise.
+//   - OneLine:  the human-readable sentence describing the section.
+//     Persisted into the plain `summary` field on Section so older
+//     SDKs / API consumers that read `summary` continue to work.
+//
+// All axes are optional; a parse failure or content with no extractable
+// entities/numbers can leave individual fields empty without invalidating
+// the rest of the object.
+type SummaryAxes struct {
+	Topics   []string `json:"topics,omitempty"`
+	Entities []string `json:"entities,omitempty"`
+	Numbers  []string `json:"numbers,omitempty"`
+	OneLine  string   `json:"one_line,omitempty"`
 }
 
 // IsLeaf reports whether this section has no children.
@@ -128,6 +163,11 @@ type SectionView struct {
 	// can answer. Surfaced into the retrieval prompt to widen the model's
 	// lexical/semantic overlap with the user query.
 	CandidateQuestions []string `json:"candidate_questions,omitempty"`
+
+	// SummaryAxes mirrors Section.SummaryAxes so the retrieval prompt
+	// can surface topics / entities / numbers alongside the one-line
+	// summary. nil for pre-Phase-2.5 sections.
+	SummaryAxes *SummaryAxes `json:"summary_axes,omitempty"`
 }
 
 // BuildView renders the tree as a flat list of SectionViews in depth-first
@@ -152,6 +192,7 @@ func (t *Tree) BuildView() View {
 			PageStart:          s.PageStart,
 			PageEnd:            s.PageEnd,
 			CandidateQuestions: s.CandidateQuestions,
+			SummaryAxes:        s.SummaryAxes,
 		}
 		for _, c := range s.Children {
 			sv.Children = append(sv.Children, c.ID)

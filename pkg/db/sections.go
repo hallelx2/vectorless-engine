@@ -33,6 +33,13 @@ type Section struct {
 	// generated".
 	CandidateQuestions []string
 
+	// SummaryAxes is the Phase 2.5 multi-axis structured summary
+	// (topics / entities / numbers / one_line). Persisted as JSONB;
+	// nil means "not yet generated" — older sections written before
+	// 0005_sections_summary_axes carry NULL and are still query-able
+	// via the plain Summary field.
+	SummaryAxes *tree.SummaryAxes
+
 	Metadata map[string]string
 }
 
@@ -41,7 +48,7 @@ type Section struct {
 // scoped / worker / list variants.
 const sectionSelectColumns = `id, document_id, COALESCE(parent_id, ''), ordinal, depth,
                title, summary, content_ref, token_count, metadata,
-               page_start, page_end, candidate_questions`
+               page_start, page_end, candidate_questions, summary_axes`
 
 // scanSectionRow scans columns in the same order as sectionSelectColumns.
 // Used by every section-fetching method to keep parsing in lockstep with
@@ -50,17 +57,18 @@ func scanSectionRow(row interface {
 	Scan(dest ...any) error
 }) (Section, error) {
 	var s Section
-	var rawMeta, rawCandidates []byte
+	var rawMeta, rawCandidates, rawAxes []byte
 	var pageStart, pageEnd sql.NullInt64
 	if err := row.Scan(&s.ID, &s.DocumentID, &s.ParentID, &s.Ordinal, &s.Depth,
 		&s.Title, &s.Summary, &s.ContentRef, &s.TokenCount, &rawMeta,
-		&pageStart, &pageEnd, &rawCandidates); err != nil {
+		&pageStart, &pageEnd, &rawCandidates, &rawAxes); err != nil {
 		return s, err
 	}
 	s.Metadata = unmarshalMeta(rawMeta)
 	s.PageStart = scanNullableInt(pageStart)
 	s.PageEnd = scanNullableInt(pageEnd)
 	s.CandidateQuestions = unmarshalCandidateQuestions(rawCandidates)
+	s.SummaryAxes = unmarshalSummaryAxes(rawAxes)
 	return s, nil
 }
 
@@ -81,12 +89,16 @@ func (p *Pool) UpsertSection(ctx context.Context, s Section) error {
 	if err != nil {
 		return err
 	}
+	axes, err := marshalSummaryAxes(s.SummaryAxes)
+	if err != nil {
+		return err
+	}
 	_, err = p.Exec(ctx, `
         INSERT INTO sections
             (id, document_id, parent_id, ordinal, depth, title, summary,
              content_ref, token_count, metadata, page_start, page_end,
-             candidate_questions)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             candidate_questions, summary_axes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (id) DO UPDATE SET
             parent_id           = EXCLUDED.parent_id,
             ordinal             = EXCLUDED.ordinal,
@@ -99,10 +111,11 @@ func (p *Pool) UpsertSection(ctx context.Context, s Section) error {
             page_start          = EXCLUDED.page_start,
             page_end            = EXCLUDED.page_end,
             candidate_questions = EXCLUDED.candidate_questions,
+            summary_axes        = EXCLUDED.summary_axes,
             updated_at          = now()`,
 		string(s.ID), string(s.DocumentID), parent, s.Ordinal, s.Depth,
 		s.Title, s.Summary, s.ContentRef, s.TokenCount, meta,
-		pageStart, pageEnd, candidates,
+		pageStart, pageEnd, candidates, axes,
 	)
 	return mapErr(err)
 }
@@ -127,6 +140,22 @@ func (p *Pool) UpdateSectionCandidateQuestions(ctx context.Context, id tree.Sect
         UPDATE sections
         SET candidate_questions = $2, updated_at = now()
         WHERE id = $1`, string(id), candidates)
+	return mapErr(err)
+}
+
+// UpdateSectionSummaryAxes persists the Phase 2.5 multi-axis summary
+// blob for a section. Pass nil to clear (stores SQL NULL — the
+// "not yet generated" state). Mirrors UpdateSectionSummary so the two
+// fields can be patched independently as the pipeline progresses.
+func (p *Pool) UpdateSectionSummaryAxes(ctx context.Context, id tree.SectionID, axes *tree.SummaryAxes) error {
+	raw, err := marshalSummaryAxes(axes)
+	if err != nil {
+		return err
+	}
+	_, err = p.Exec(ctx, `
+        UPDATE sections
+        SET summary_axes = $2, updated_at = now()
+        WHERE id = $1`, string(id), raw)
 	return mapErr(err)
 }
 
@@ -164,6 +193,36 @@ func unmarshalCandidateQuestions(raw []byte) []string {
 		return nil
 	}
 	return out
+}
+
+// marshalSummaryAxes encodes a SummaryAxes pointer as JSONB. nil → SQL
+// NULL (the "not yet generated" state). A non-nil pointer is always
+// stored as the object form, even when every axis is empty, so callers
+// can distinguish "we generated axes and got nothing" from "we haven't
+// tried yet". Mirrors marshalCandidateQuestions.
+func marshalSummaryAxes(a *tree.SummaryAxes) (any, error) {
+	if a == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		return nil, fmt.Errorf("marshal summary_axes: %w", err)
+	}
+	return b, nil
+}
+
+// unmarshalSummaryAxes decodes a JSONB summary_axes blob. NULL /
+// zero-length → nil. Garbled bytes degrade to nil rather than panic so
+// a stray bad row can't take down listing endpoints.
+func unmarshalSummaryAxes(raw []byte) *tree.SummaryAxes {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out tree.SummaryAxes
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return &out
 }
 
 // scanNullableInt unwraps a sql.NullInt64 into a plain int (0 = NULL).
@@ -208,7 +267,7 @@ func (p *Pool) GetSection(ctx context.Context, id tree.SectionID, orgID, storeID
 	q := `
         SELECT s.id, s.document_id, COALESCE(s.parent_id, ''), s.ordinal, s.depth,
                s.title, s.summary, s.content_ref, s.token_count, s.metadata,
-               s.page_start, s.page_end, s.candidate_questions
+               s.page_start, s.page_end, s.candidate_questions, s.summary_axes
         FROM sections s
         JOIN documents d ON d.id = s.document_id
         WHERE s.id = $1 AND d.org_id = $2`
@@ -249,7 +308,7 @@ func (p *Pool) ListSections(ctx context.Context, docID tree.DocumentID, orgID, s
 	q := `
         SELECT s.id, s.document_id, COALESCE(s.parent_id, ''), s.ordinal, s.depth,
                s.title, s.summary, s.content_ref, s.token_count, s.metadata,
-               s.page_start, s.page_end, s.candidate_questions
+               s.page_start, s.page_end, s.candidate_questions, s.summary_axes
         FROM sections s
         JOIN documents d ON d.id = s.document_id
         WHERE s.document_id = $1 AND d.org_id = $2`
@@ -344,6 +403,7 @@ func buildTree(doc *Document, rows []Section) *tree.Tree {
 			Ordinal:            r.Ordinal,
 			Title:              r.Title,
 			Summary:            r.Summary,
+			SummaryAxes:        r.SummaryAxes,
 			ContentRef:         r.ContentRef,
 			TokenCount:         r.TokenCount,
 			PageStart:          r.PageStart,
