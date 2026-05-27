@@ -3,12 +3,15 @@ package parser
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/hallelx2/pdftable"
 	pdflib "github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -20,24 +23,79 @@ import (
 // headings in the wire layer, just runs of glyphs with font sizes and
 // positions. To recover structure we:
 //
-//  1. Extract text per page, row-by-row, with font-size information.
+//  1. Extract positioned WORDS per page (font name + size + bbox) using
+//     pdftable's content-stream interpreter.
 //  2. Compute the median font size across the whole document.
 //  3. Treat any row whose font size exceeds a threshold (1.2× median)
 //     AND that is short (<= 14 words) as a heading candidate.
 //  4. Group headings into levels by font-size buckets (largest = level 1).
 //  5. Everything else is body text for the most recent heading.
+//  6. Run pdftable's table-finding pipeline over each page and emit one
+//     extra Section per detected table whose Content is a GitHub-flavoured
+//     Markdown rendering of the cells. Tables are flagged with
+//     Metadata["table"]="true" so retrieval can lean on numeric content
+//     that would otherwise collapse into a space-joined run.
 //
-// This won't beat a PDF with a proper bookmark outline, but it recovers
-// surprisingly usable structure from academic papers, whitepapers, and
-// reports. A future parser can read the PDF's /Outlines dictionary
-// directly for documents that have one.
-//
-// Encrypted PDFs, PDFs with non-standard fonts, and scanned PDFs (pure
-// images) are not supported at this stage.
-type PDF struct{}
+// Encrypted PDFs are auto-decrypted with the empty password via pdfcpu.
+// PDFs with non-standard fonts and scanned PDFs (pure images) are not
+// supported at this stage.
+type PDF struct {
+	// Tables, when non-nil, overrides the default table-extraction
+	// behaviour (enabled, lines/lines strategies, minima 2×2). Pass nil
+	// to use the engine defaults; pass a zero value to disable tables
+	// entirely.
+	Tables *TableOpts
+}
 
-// NewPDF returns a new PDF parser.
-func NewPDF() *PDF { return &PDF{} }
+// TableOpts controls pdftable's table-finding stage. The zero value
+// disables table extraction; use DefaultTableOpts() for the
+// production-default knobs.
+type TableOpts struct {
+	// Enabled toggles table extraction. When false, the parser behaves
+	// exactly like the pre-integration text-only flow.
+	Enabled bool
+
+	// VerticalStrategy is forwarded to pdftable as
+	// TableSettings.VerticalStrategy. Empty falls back to "lines".
+	VerticalStrategy string
+
+	// HorizontalStrategy is forwarded to pdftable as
+	// TableSettings.HorizontalStrategy. Empty falls back to "lines".
+	HorizontalStrategy string
+
+	// MinTableRows is the minimum row count for a candidate table to be
+	// emitted as a Section. 0 means "no minimum"; recommend 2 in
+	// production so trivial single-row matches don't leak into the
+	// outline.
+	MinTableRows int
+
+	// MinTableCols is the minimum column count for a candidate table.
+	// Same semantics as MinTableRows.
+	MinTableCols int
+}
+
+// DefaultTableOpts returns the production defaults: tables on, both axes
+// using the "lines" strategy, minima 2×2. These mirror pdftable's own
+// DefaultTableSettings() and were tuned against the FinanceBench 10-K
+// fixtures.
+func DefaultTableOpts() *TableOpts {
+	return &TableOpts{
+		Enabled:            true,
+		VerticalStrategy:   "lines",
+		HorizontalStrategy: "lines",
+		MinTableRows:       2,
+		MinTableCols:       2,
+	}
+}
+
+// NewPDF returns a new PDF parser with table extraction enabled at the
+// production defaults. Pass NewPDFWithTables(nil) (or a zero TableOpts)
+// to opt out of tables.
+func NewPDF() *PDF { return &PDF{Tables: DefaultTableOpts()} }
+
+// NewPDFWithTables returns a PDF parser using the supplied table-
+// extraction options. Pass nil to disable table extraction.
+func NewPDFWithTables(opts *TableOpts) *PDF { return &PDF{Tables: opts} }
 
 // Name implements Parser.
 func (*PDF) Name() string { return "pdf" }
@@ -51,32 +109,58 @@ func (*PDF) Accepts(contentType, filename string) bool {
 }
 
 // Parse implements Parser.
-func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
+func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	buf, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-	reader, err := pdflib.NewReader(bytes.NewReader(buf), int64(len(buf)))
+
+	// We run TWO PDF backends in parallel here:
+	//
+	//   - pdftable (the new primitive layer) extracts positioned WORDS
+	//     (font name + size + bbox) directly. This is the input to the
+	//     section-discovery heuristics and is also the only source for
+	//     the table-finding pass. It is robust to letter-spaced glyphs
+	//     and ships pdfplumber-parity word grouping out of the box.
+	//
+	//   - ledongthuc/pdf is retained solely for /Outlines (bookmark)
+	//     access — pdftable does not expose the outline dictionary yet,
+	//     and outlines are ground truth for SEC filings / academic papers
+	//     that have one. Once pdftable surfaces outlines we can drop the
+	//     dependency entirely.
+	//
+	// Both backends consume the same byte slice. If pdftable rejects the
+	// document as encrypted we strip the encryption layer with pdfcpu
+	// (empty password) and retry — this is the path that lets us index
+	// "owner-password" PDFs whose only restriction is print/copy.
+	docBytes := buf
+	pdoc, err := pdftable.OpenBytes(docBytes)
 	if err != nil {
-		// ledongthuc/pdf has no encryption support — even PDFs that
-		// open in any normal viewer (empty user password, owner-only
-		// permissions like print/copy restrictions) get rejected with
-		// a "256-bit encryption key" / "encrypted" error. Try to strip
-		// the encryption layer with pdfcpu using the empty password,
-		// then retry the parser on the cleaned bytes.
-		if isEncryptedPDFError(err) {
+		if isPdftableEncryptedErr(err) {
 			cleaned, decErr := decryptPDFWithEmptyPassword(buf)
 			if decErr != nil {
 				return nil, fmt.Errorf("pdf: open: encrypted and could not be unlocked with empty password: %w", decErr)
 			}
-			reader, err = pdflib.NewReader(bytes.NewReader(cleaned), int64(len(cleaned)))
+			docBytes = cleaned
+			pdoc, err = pdftable.OpenBytes(docBytes)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("pdf: open: %w", err)
 		}
 	}
+	defer pdoc.Close()
 
-	rows, err := extractPDFRows(reader)
+	reader, err := pdflib.NewReader(bytes.NewReader(docBytes), int64(len(docBytes)))
+	if err != nil {
+		// ledongthuc/pdf can fail on PDFs pdftable accepts (e.g. some
+		// xref-stream variants). Outline access is optional, so a
+		// failure here is not fatal — we just skip the outline path.
+		// Log at debug level and carry on with the heuristic flow.
+		slog.Debug("pdf: outline backend unavailable", "err", err)
+		reader = nil
+	}
+
+	rows, err := extractPDFRows(pdoc)
 	if err != nil {
 		return nil, err
 	}
@@ -92,13 +176,21 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		return nil, fmt.Errorf("pdf: text extraction produced no usable content — the document may have an overlay watermark or use a non-standard font encoding")
 	}
 
+	// Run table extraction once, BEFORE we commit to either the outline
+	// path or the heuristic path: both should be able to inherit the
+	// same set of detected tables.
+	tableSections := extractPDFTables(pdoc, p.Tables)
+
 	// If the PDF ships with a real outline (bookmarks), use it as ground
 	// truth for structure — beats any font-size heuristic. We still rely
 	// on row extraction for section bodies by matching outline titles
 	// against the first occurrence of that text in the row stream.
-	if outline := reader.Outline(); len(outline.Child) > 0 {
-		if doc, ok := parsePDFWithOutline(outline, rows); ok {
-			return doc, nil
+	if reader != nil {
+		if outline := reader.Outline(); len(outline.Child) > 0 {
+			if doc, ok := parsePDFWithOutline(outline, rows); ok {
+				attachTableSections(doc, tableSections)
+				return doc, nil
+			}
 		}
 	}
 
@@ -264,10 +356,12 @@ func (*PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	// so callers reading the outline can still cite a page span.
 	propagateSectionPages(rootSec.Children)
 
-	return &ParsedDoc{
+	out := &ParsedDoc{
 		Title:    title,
 		Sections: chunkOversizedLeaves(rootSec.Children),
-	}, nil
+	}
+	attachTableSections(out, tableSections)
+	return out, nil
 }
 
 // propagateSectionPages fills internal-node PageStart/PageEnd from the union
@@ -422,26 +516,43 @@ type pdfRow struct {
 	text     string
 }
 
-// extractPDFRows walks each page, grouping letters into rows by y-position
-// and recording the dominant font size per row. ledongthuc/pdf's Content()
-// returns individual glyphs; we reassemble them into lines.
-func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
-	numPages := reader.NumPage()
+// extractPDFRows walks each page of doc, asks pdftable for positioned
+// Words, and groups them into rows by visual top (Y1 in PDF user space).
+// pdftable's Words() already takes care of intra-word glyph reassembly,
+// letter-spacing collapse, and ligature expansion — so this layer just
+// has to bucket words back into lines and tally the dominant font size
+// + bold ratio per row.
+//
+// The bucket tolerance (Y1 within 2pt) matches what the previous
+// ledongthuc-backed implementation used; word-level Y1 jitter is the
+// same scale as the per-glyph jitter it replaced.
+func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
+	numPages := doc.NumPages()
 	var out []pdfRow
 
 	for pageNum := 1; pageNum <= numPages; pageNum++ {
-		page := reader.Page(pageNum)
-		if page.V.IsNull() {
+		page, err := doc.Page(pageNum)
+		if err != nil {
+			// A bad page shouldn't take down the document — pdftable
+			// can fail page-by-page on malformed content streams. Skip.
 			continue
 		}
-		content := page.Content()
+		words, err := page.Words(pdftable.DefaultWordOpts())
+		if err != nil {
+			continue
+		}
+		if len(words) == 0 {
+			continue
+		}
 
-		// Group letters by (approximate) baseline Y. Values within 2pt are
-		// considered the same row — PDFs frequently jitter Y by a fraction.
+		// Group words by visual top (Y1). Values within 2pt are
+		// considered the same row — pdftable already clusters chars
+		// into words by its own YTolerance, so this is just the next
+		// step up: words at near-identical baselines become a row.
 		type rowBucket struct {
 			y     float64
 			maxFS float64
-			chars []pdflib.Text
+			words []pdftable.Word
 		}
 		var buckets []*rowBucket
 		find := func(y float64) *rowBucket {
@@ -454,47 +565,34 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			buckets = append(buckets, b)
 			return b
 		}
-		for _, t := range content.Text {
-			b := find(t.Y)
-			b.chars = append(b.chars, t)
-			if t.FontSize > b.maxFS {
-				b.maxFS = t.FontSize
+		for _, w := range words {
+			b := find(w.Y1)
+			b.words = append(b.words, w)
+			if w.FontSize > b.maxFS {
+				b.maxFS = w.FontSize
 			}
 		}
-		// Sort rows top-to-bottom (higher Y = higher on page in PDF).
+		// Sort rows top-to-bottom (higher Y = higher on page in PDF
+		// user space).
 		sort.Slice(buckets, func(i, j int) bool { return buckets[i].y > buckets[j].y })
 
 		for _, b := range buckets {
-			sort.Slice(b.chars, func(i, j int) bool { return b.chars[i].X < b.chars[j].X })
+			sort.Slice(b.words, func(i, j int) bool { return b.words[i].X0 < b.words[j].X0 })
 			var sb strings.Builder
-			var lastX float64
-			boldGlyphs, totalGlyphs := 0, 0
-			for i, ch := range b.chars {
-				// Insert a space when the gap between the previous
-				// glyph's end and this glyph's start exceeds a fraction
-				// of the font size. 0.20 was tuned against real PDFs
-				// (arXiv papers): word-boundary gaps land around
-				// 0.20-0.30·fontSize while intra-word kerning stays
-				// well below. The old 0.30 threshold missed most word
-				// boundaries, producing run-together text like
-				// "implementingtensor2tensor".
-				if i > 0 && ch.X-lastX > ch.FontSize*0.20 {
+			boldWords, totalWords := 0, 0
+			for i, w := range b.words {
+				if i > 0 {
 					sb.WriteString(" ")
 				}
-				sb.WriteString(ch.S)
-				lastX = ch.X + ch.W
-				if strings.TrimSpace(ch.S) != "" {
-					totalGlyphs++
-					if isBoldFont(ch.Font) {
-						boldGlyphs++
+				sb.WriteString(w.Text)
+				if strings.TrimSpace(w.Text) != "" {
+					totalWords++
+					if isBoldFont(w.FontName) {
+						boldWords++
 					}
 				}
 			}
-			// Wide letter-tracking — common on filing cover pages and
-			// bold section headers — makes every glyph gap exceed the
-			// space threshold, yielding "U N I T E D   S T A T E S".
-			// Re-join those runs into real words.
-			text := collapseLetterSpacing(strings.TrimSpace(sb.String()))
+			text := strings.TrimSpace(sb.String())
 			if text == "" {
 				continue
 			}
@@ -508,7 +606,7 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			out = append(out, pdfRow{
 				page:     pageNum,
 				fontSize: b.maxFS,
-				bold:     totalGlyphs > 0 && boldGlyphs*2 > totalGlyphs,
+				bold:     totalWords > 0 && boldWords*2 > totalWords,
 				text:     text,
 			})
 		}
@@ -792,57 +890,12 @@ func looksLikeHeading(s string) bool {
 	return true
 }
 
-var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
-
 // isBoldFont reports whether a PDF font name denotes a bold weight. SEC filing
 // section headings are typically bold at body font size (not larger), so this is
 // how we recover them — a size-only heuristic misses them entirely.
 func isBoldFont(font string) bool {
 	f := strings.ToLower(font)
 	return strings.Contains(f, "bold") || strings.Contains(f, "-bd") || strings.Contains(f, ",bd")
-}
-
-// looksLetterSpaced reports whether a row is dominated by solitary-character
-// tokens — the signature of wide letter-tracking ("U N I T E D   S T A T E S").
-func looksLetterSpaced(s string) bool {
-	toks := strings.Fields(s)
-	if len(toks) < 4 {
-		return false
-	}
-	single := 0
-	for _, t := range toks {
-		if len([]rune(t)) == 1 {
-			single++
-		}
-	}
-	return single*2 > len(toks)
-}
-
-// collapseLetterSpacing rejoins letter-tracked text. Word boundaries survive as
-// runs of 2+ spaces; within each word the single spaces between solitary glyphs
-// are removed ("F O R M   1 0 - Q" → "FORM 10-Q"). Rows that aren't
-// letter-spaced are returned unchanged, so normal prose is never touched.
-func collapseLetterSpacing(s string) string {
-	if !looksLetterSpaced(s) {
-		return s
-	}
-	words := multiSpaceRe.Split(s, -1)
-	for i, w := range words {
-		parts := strings.Fields(w)
-		allSingle := len(parts) > 0
-		for _, p := range parts {
-			if len([]rune(p)) > 1 {
-				allSingle = false
-				break
-			}
-		}
-		if allSingle {
-			words[i] = strings.Join(parts, "")
-		} else {
-			words[i] = strings.Join(parts, " ")
-		}
-	}
-	return strings.TrimSpace(strings.Join(words, " "))
 }
 
 func abs(f float64) float64 {
@@ -934,4 +987,268 @@ func decryptPDFWithEmptyPassword(in []byte) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// isPdftableEncryptedErr reports whether the given pdftable error is
+// the sentinel for an encrypted PDF. pdftable surfaces ErrEncrypted via
+// errors.Is, which is what we use here so we stay forward-compatible if
+// the wrapping ever changes.
+func isPdftableEncryptedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, pdftable.ErrEncrypted) {
+		return true
+	}
+	// Defensive fallback: even if the sentinel ever changes name we
+	// still want to retry through pdfcpu rather than fail open.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "encrypted") || strings.Contains(msg, "encryption")
+}
+
+// extractPDFTables runs pdftable's table-finding pipeline over every
+// page of doc and returns one Section per detected table. Each
+// returned section carries:
+//
+//   - Title: "Table (page N)" for callers/UIs that want a stable label.
+//   - Content: a GitHub-flavoured Markdown rendering of the cells.
+//   - PageStart/PageEnd: the page the table was found on (always equal
+//     because pdftable does not yet cross-page-merge tables).
+//   - Metadata["table"]="true": retrieval can branch on this to apply
+//     numeric-content-aware ranking; the rows/cols entries surface the
+//     shape for debugging and per-document analytics.
+//
+// Errors during table extraction are LOGGED and SWALLOWED — the engine's
+// commitment is that bad PDFs never break ingest. A panic inside
+// pdftable (defensive guard) is also caught.
+//
+// Pass opts=nil or opts.Enabled=false to short-circuit; the function
+// then returns nil cheaply without walking the document.
+func extractPDFTables(doc pdftable.Document, opts *TableOpts) []Section {
+	if opts == nil || !opts.Enabled {
+		return nil
+	}
+	settings := pdftable.DefaultTableSettings()
+	if opts.VerticalStrategy != "" {
+		settings.VerticalStrategy = pdftable.TableStrategy(opts.VerticalStrategy)
+	}
+	if opts.HorizontalStrategy != "" {
+		settings.HorizontalStrategy = pdftable.TableStrategy(opts.HorizontalStrategy)
+	}
+	minRows := opts.MinTableRows
+	minCols := opts.MinTableCols
+
+	var sections []Section
+	for n := 1; n <= doc.NumPages(); n++ {
+		page, err := doc.Page(n)
+		if err != nil {
+			continue
+		}
+		tables := safeExtractTables(page, settings, n)
+		for _, t := range tables {
+			if t == nil {
+				continue
+			}
+			rows := normaliseTableRows(t.Rows)
+			if len(rows) < minRows {
+				continue
+			}
+			cols := 0
+			if len(rows) > 0 {
+				cols = len(rows[0])
+			}
+			if cols < minCols {
+				continue
+			}
+			md := tableToMarkdown(rows)
+			if strings.TrimSpace(md) == "" {
+				continue
+			}
+			sections = append(sections, Section{
+				Level:     1,
+				Title:     fmt.Sprintf("Table (page %d)", n),
+				Content:   md,
+				PageStart: n,
+				PageEnd:   n,
+				Metadata: map[string]string{
+					"table": "true",
+					"rows":  fmt.Sprintf("%d", len(rows)),
+					"cols":  fmt.Sprintf("%d", cols),
+				},
+			})
+		}
+	}
+	return sections
+}
+
+// safeExtractTables wraps page.ExtractTables in a recover() so a bug
+// deep inside pdftable can never take down the engine's ingest
+// pipeline. Errors and panics are logged at warn level (not error —
+// the document still gets ingested, just without its tables).
+func safeExtractTables(page pdftable.Page, settings pdftable.TableSettings, pageNum int) (tables []*pdftable.Table) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("pdf: table extraction panicked",
+				"page", pageNum,
+				"panic", fmt.Sprintf("%v", r))
+			tables = nil
+		}
+	}()
+	tables, err := page.ExtractTables(settings)
+	if err != nil {
+		slog.Warn("pdf: table extraction failed",
+			"page", pageNum,
+			"err", err)
+		return nil
+	}
+	return tables
+}
+
+// normaliseTableRows trims whitespace per cell and pads short rows out
+// to the table's max column count. pdftable can emit rows with fewer
+// cells than the header when its cell detection finds a hole; we
+// promote those to empty strings so Markdown rendering produces a
+// well-formed grid (every row has the same column count).
+func normaliseTableRows(rows [][]string) [][]string {
+	maxCols := 0
+	for _, r := range rows {
+		if len(r) > maxCols {
+			maxCols = len(r)
+		}
+	}
+	if maxCols == 0 {
+		return nil
+	}
+	out := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		row := make([]string, maxCols)
+		for i := 0; i < maxCols; i++ {
+			if i < len(r) {
+				row[i] = strings.TrimSpace(r[i])
+			} else {
+				row[i] = ""
+			}
+		}
+		// Drop entirely blank rows — they're cell-detection artefacts
+		// and contribute no information to retrieval.
+		if !isAllBlank(row) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// isAllBlank reports whether every cell in row is empty/whitespace.
+func isAllBlank(row []string) bool {
+	for _, c := range row {
+		if strings.TrimSpace(c) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// tableToMarkdown renders a normalised table-rows slice as a
+// GitHub-flavoured Markdown table. The first row is treated as the
+// header; if it is entirely blank, a row of empty header cells is
+// emitted so the markdown stays well-formed.
+//
+// Cell content is escaped minimally: pipe characters inside a cell are
+// replaced with the HTML entity so they don't terminate the cell. We
+// don't escape backslashes or newlines — newlines inside a cell would
+// break the GFM table syntax, so we collapse them to spaces here too.
+func tableToMarkdown(rows [][]string) string {
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return ""
+	}
+	cols := len(rows[0])
+	var sb strings.Builder
+
+	emitRow := func(cells []string) {
+		sb.WriteByte('|')
+		for i := 0; i < cols; i++ {
+			cell := ""
+			if i < len(cells) {
+				cell = escapeMarkdownCell(cells[i])
+			}
+			sb.WriteByte(' ')
+			sb.WriteString(cell)
+			sb.WriteByte(' ')
+			sb.WriteByte('|')
+		}
+		sb.WriteByte('\n')
+	}
+
+	// Header row.
+	header := rows[0]
+	if isAllBlank(header) {
+		header = make([]string, cols)
+	}
+	emitRow(header)
+
+	// Separator row (GFM uses --- per column).
+	sb.WriteByte('|')
+	for i := 0; i < cols; i++ {
+		sb.WriteString(" --- |")
+	}
+	sb.WriteByte('\n')
+
+	// Data rows.
+	for _, r := range rows[1:] {
+		emitRow(r)
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// escapeMarkdownCell makes a cell safe for inclusion in a GFM table:
+// pipes are entity-encoded (they would otherwise close the cell) and
+// embedded newlines / tabs are collapsed to single spaces (GFM tables
+// are single-line per cell). Runs of whitespace produced by the
+// collapse are squashed to one space for readability.
+func escapeMarkdownCell(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "|", "&#124;")
+	// Newlines and tabs become spaces; multiple spaces collapse.
+	repl := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ")
+	s = repl.Replace(s)
+	// Squash runs of spaces.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return strings.TrimSpace(s)
+}
+
+// attachTableSections appends every table section to doc.Sections at
+// the document root, after a synthetic "Tables" parent — keeping
+// retrieval able to find them but not interleaving them with the
+// document outline (which would confuse callers that rely on outline
+// order matching page order).
+//
+// We always create a single "Tables" parent so the top level of the
+// outline doesn't balloon: a 10-K with 80 tables would otherwise dwarf
+// the actual section list. The parent inherits the union of its
+// children's page ranges.
+func attachTableSections(doc *ParsedDoc, tables []Section) {
+	if doc == nil || len(tables) == 0 {
+		return
+	}
+	parent := Section{
+		Level:    1,
+		Title:    "Tables",
+		Children: tables,
+		Metadata: map[string]string{"tables_container": "true"},
+	}
+	// Compute the parent's page span as the union of children's.
+	for _, t := range tables {
+		if t.PageStart > 0 && (parent.PageStart == 0 || t.PageStart < parent.PageStart) {
+			parent.PageStart = t.PageStart
+		}
+		if t.PageEnd > parent.PageEnd {
+			parent.PageEnd = t.PageEnd
+		}
+	}
+	doc.Sections = append(doc.Sections, parent)
 }

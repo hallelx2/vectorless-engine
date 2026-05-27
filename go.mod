@@ -13,6 +13,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
 	github.com/hallelx2/llmgate v0.2.0
+	github.com/hallelx2/pdftable v0.3.0
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728

@@ -27,6 +27,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
+	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -171,7 +172,7 @@ func run() error {
 		DB:                   pool,
 		Storage:              store,
 		LLM:                  llmClient,
-		Parsers:              ingest.DefaultRegistry(),
+		Parsers:              ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Ingest.Tables)),
 		Logger:               logger,
 		HyDEEnabled:          cfg.Ingest.HyDE.Enabled,
 		HyDEModel:            cfg.Ingest.HyDE.Model,
@@ -179,6 +180,16 @@ func run() error {
 		HyDEConcurrency:      cfg.Ingest.HyDE.Concurrency,
 		GlobalLLMConcurrency: cfg.Ingest.GlobalLLMConcurrency,
 	})
+	if cfg.Ingest.Tables.Enabled {
+		logger.Info("ingest: pdf table extraction enabled",
+			"vertical_strategy", cfg.Ingest.Tables.VerticalStrategy,
+			"horizontal_strategy", cfg.Ingest.Tables.HorizontalStrategy,
+			"min_rows", cfg.Ingest.Tables.MinTableRows,
+			"min_cols", cfg.Ingest.Tables.MinTableCols,
+		)
+	} else {
+		logger.Info("ingest: pdf table extraction disabled")
+	}
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
 	deps := api.Deps{
@@ -404,4 +415,20 @@ func newLogger(c config.LogConfig) *slog.Logger {
 		h = slog.NewJSONHandler(os.Stdout, opts)
 	}
 	return slog.New(h)
+}
+
+// tableOptsFromConfig translates the YAML/env Tables block into the
+// parser-level TableOpts struct. Returns nil when tables are disabled so
+// the PDF parser short-circuits without instantiating pdftable settings.
+func tableOptsFromConfig(c config.TablesConfig) *parser.TableOpts {
+	if !c.Enabled {
+		return nil
+	}
+	return &parser.TableOpts{
+		Enabled:            true,
+		VerticalStrategy:   c.VerticalStrategy,
+		HorizontalStrategy: c.HorizontalStrategy,
+		MinTableRows:       c.MinTableRows,
+		MinTableCols:       c.MinTableCols,
+	}
 }
