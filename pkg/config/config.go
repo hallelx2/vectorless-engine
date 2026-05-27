@@ -253,6 +253,31 @@ type RetrievalConfig struct {
 	Answer      AnswerBlock      `yaml:"answer"`
 	Planning    PlanningBlock    `yaml:"planning"`
 	ReRank      ReRankBlock      `yaml:"rerank"`
+	Replay      ReplayBlock      `yaml:"replay"`
+}
+
+// ReplayBlock configures the Phase 3.1 replay-trace store.
+//
+// When enabled, every /v1/query and /v1/answer response is stamped
+// with a deterministic trace_token and the response body is stored
+// in an in-memory LRU. Callers can POST /v1/replay with the token
+// (plus the original query + document_id) to retrieve the byte-
+// identical response.
+//
+// The store is opt-out — replay is a moat versus stateless vector
+// RAG and should ship on by default. Disable to free the memory
+// budget when audit/replay isn't part of the operator's flow.
+type ReplayBlock struct {
+	// Enabled turns the replay store on. Default: true.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxEntries bounds the in-memory LRU. Default: 1024.
+	MaxEntries int `yaml:"max_entries"`
+
+	// TTLSeconds is how long a replay entry remains valid. Default:
+	// 86400 (24h). Long-running audit flows may want to bump this;
+	// short-TTL deployments save memory.
+	TTLSeconds int `yaml:"ttl_seconds"`
 }
 
 // ReRankBlock configures the Phase 2.3 content-aware re-rank pass.
@@ -458,6 +483,11 @@ func Default() Config {
 				Enabled:         false,
 				MaxContentChars: 2000,
 				TopK:            0,
+			},
+			Replay: ReplayBlock{
+				Enabled:    true,
+				MaxEntries: 1024,
+				TTLSeconds: 86400,
 			},
 		},
 		Ingest: IngestConfig{
@@ -700,6 +730,24 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.ReRank.TopK = n
 		}
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_REPLAY_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.Replay.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.Replay.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.Replay.MaxEntries = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.Replay.TTLSeconds = n
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -810,6 +858,13 @@ func (c Config) Validate() error {
 	}
 	if c.Retrieval.ReRank.TopK < 0 {
 		return fmt.Errorf("retrieval.rerank.top_k must be >= 0, got %d", c.Retrieval.ReRank.TopK)
+	}
+
+	if c.Retrieval.Replay.MaxEntries < 0 {
+		return fmt.Errorf("retrieval.replay.max_entries must be >= 0, got %d", c.Retrieval.Replay.MaxEntries)
+	}
+	if c.Retrieval.Replay.TTLSeconds < 0 {
+		return fmt.Errorf("retrieval.replay.ttl_seconds must be >= 0, got %d", c.Retrieval.Replay.TTLSeconds)
 	}
 
 	return nil

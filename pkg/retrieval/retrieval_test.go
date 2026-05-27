@@ -316,3 +316,75 @@ func TestDefaultSplitterFastPath(t *testing.T) {
 		t.Errorf("breadcrumb missing doc title: %q", slices[0].Breadcrumb)
 	}
 }
+
+// TestSinglePassStampsTraceToken verifies that SelectWithCost
+// populates a 64-char hex TraceToken on the returned Result.
+func TestSinglePassStampsTraceToken(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_b"}}
+	s := retrieval.NewSinglePass(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: "claude-sonnet-4-5", MaxTokens: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.TraceToken) != 64 {
+		t.Fatalf("trace_token must be 64 chars, got %d (%q)", len(res.TraceToken), res.TraceToken)
+	}
+	for _, r := range res.TraceToken {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			t.Fatalf("trace_token must be lowercase hex, got %q", res.TraceToken)
+		}
+	}
+
+	// Same inputs → same token.
+	res2, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: "claude-sonnet-4-5", MaxTokens: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TraceToken != res.TraceToken {
+		t.Errorf("same inputs must produce same trace_token: %q vs %q",
+			res.TraceToken, res2.TraceToken)
+	}
+}
+
+// TestChunkedTreeStampsTraceToken verifies that the chunked-tree
+// strategy populates the trace token on its returned Result.
+func TestChunkedTreeStampsTraceToken(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_a", "sec_b"}}
+	s := retrieval.NewChunkedTree(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{
+		ModelName: "claude-sonnet-4-5", MaxTokens: 100000, MaxParallelCalls: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.TraceToken) != 64 {
+		t.Fatalf("chunked-tree trace_token must be 64 chars, got %d", len(res.TraceToken))
+	}
+}
+
+// TestTraceTokenMatchesExternalComputation ties the strategy output to
+// the canonical ComputeTraceToken helper, so any drift between the
+// helper and the per-strategy plumbing is caught at test time.
+func TestTraceTokenMatchesExternalComputation(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{pickIfPresent: []tree.SectionID{"sec_a"}}
+	s := retrieval.NewSinglePass(m)
+	model := "claude-sonnet-4-5"
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: model, MaxTokens: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := retrieval.ComputeTraceToken(tr.DocumentID, "1", model, res.SelectedIDs)
+	if res.TraceToken != want {
+		t.Errorf("strategy trace_token %q does not match ComputeTraceToken %q",
+			res.TraceToken, want)
+	}
+}

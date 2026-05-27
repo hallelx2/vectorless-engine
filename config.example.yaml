@@ -182,6 +182,28 @@ retrieval:
     # re-rank pass to do the final selection.
     top_k: 0
 
+  # replay: Phase 3.1 reproducibility store. Every /v1/query and
+  # /v1/answer response carries a deterministic `trace_token`; the
+  # response body is stored in an in-memory LRU under that token so
+  # POST /v1/replay can return the byte-identical response on demand.
+  #
+  # OPT-OUT. Default enabled — replay is a moat versus stateless
+  # vector RAG and should ship on by default. Disable to free the
+  # memory budget when audit/replay isn't part of the operator's
+  # flow. When disabled the response `trace_token` field is empty
+  # and /v1/replay returns 501.
+  #
+  # The store is in-memory and not durable across process restarts.
+  # Phase 3.2 will swap this for a persistent store + per-document
+  # versioning behind the same interface.
+  replay:
+    enabled: true
+    # LRU capacity. Older entries are evicted under memory pressure.
+    max_entries: 1024
+    # How long an entry remains valid. 86400 = 24 hours. Long
+    # audit flows may bump this; tight memory budgets shrink it.
+    ttl_seconds: 86400
+
 ingest:
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the

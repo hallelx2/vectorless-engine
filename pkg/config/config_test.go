@@ -55,8 +55,107 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Retrieval.ReRank.TopK != 0 {
 		t.Errorf("retrieval.rerank.top_k = %d, want 0 (keep all)", cfg.Retrieval.ReRank.TopK)
 	}
+	if !cfg.Retrieval.Replay.Enabled {
+		t.Error("retrieval.replay.enabled should default to true (opt-out)")
+	}
+	if cfg.Retrieval.Replay.MaxEntries != 1024 {
+		t.Errorf("retrieval.replay.max_entries = %d, want 1024", cfg.Retrieval.Replay.MaxEntries)
+	}
+	if cfg.Retrieval.Replay.TTLSeconds != 86400 {
+		t.Errorf("retrieval.replay.ttl_seconds = %d, want 86400 (24h)", cfg.Retrieval.Replay.TTLSeconds)
+	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level = %q, want info", cfg.Log.Level)
+	}
+}
+
+func TestReplayEnvOverride(t *testing.T) {
+	// Not parallel — mutates env. Restore on exit.
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_REPLAY_ENABLED")
+	prevMax := os.Getenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES")
+	prevTTL := os.Getenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
+		os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "false")
+	os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "256")
+	os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "3600")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if cfg.Retrieval.Replay.Enabled {
+		t.Error("VLE_RETRIEVAL_REPLAY_ENABLED=false should disable replay")
+	}
+	if cfg.Retrieval.Replay.MaxEntries != 256 {
+		t.Errorf("replay max_entries = %d, want 256", cfg.Retrieval.Replay.MaxEntries)
+	}
+	if cfg.Retrieval.Replay.TTLSeconds != 3600 {
+		t.Errorf("replay ttl_seconds = %d, want 3600", cfg.Retrieval.Replay.TTLSeconds)
+	}
+}
+
+func TestReplayEnvOverrideEnable(t *testing.T) {
+	// Toggle on via env from an explicitly-disabled starting state.
+	prev := os.Getenv("VLE_RETRIEVAL_REPLAY_ENABLED")
+	defer os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prev)
+
+	cfg := Default()
+	cfg.Retrieval.Replay.Enabled = false
+	os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "true")
+	applyEnvOverrides(&cfg)
+	if !cfg.Retrieval.Replay.Enabled {
+		t.Error("VLE_RETRIEVAL_REPLAY_ENABLED=true should enable replay even when disabled in YAML")
+	}
+}
+
+func TestReplayEnvOverrideRejectsBad(t *testing.T) {
+	prevMax := os.Getenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES")
+	prevTTL := os.Getenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
+		os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "not-a-number")
+	os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "wat")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Retrieval.Replay.MaxEntries != 1024 {
+		t.Errorf("bad max_entries env should preserve default, got %d", cfg.Retrieval.Replay.MaxEntries)
+	}
+	if cfg.Retrieval.Replay.TTLSeconds != 86400 {
+		t.Errorf("bad ttl_seconds env should preserve default, got %d", cfg.Retrieval.Replay.TTLSeconds)
+	}
+}
+
+func TestValidateReplayNegatives(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.URL = "postgres://localhost/test"
+	cfg.Retrieval.Replay.MaxEntries = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative replay max_entries should fail validation")
+	}
+
+	cfg2 := Default()
+	cfg2.Database.URL = "postgres://localhost/test"
+	cfg2.Retrieval.Replay.TTLSeconds = -1
+	if err := cfg2.Validate(); err == nil {
+		t.Error("negative replay ttl_seconds should fail validation")
+	}
+
+	cfg3 := Default()
+	cfg3.Database.URL = "postgres://localhost/test"
+	cfg3.Retrieval.Replay.MaxEntries = 0
+	cfg3.Retrieval.Replay.TTLSeconds = 0
+	if err := cfg3.Validate(); err != nil {
+		t.Errorf("zero replay values should pass validation (use defaults at runtime): %v", err)
 	}
 }
 
