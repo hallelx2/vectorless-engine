@@ -73,6 +73,55 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level = %q, want info", cfg.Log.Level)
 	}
+	if !cfg.Ingest.TOC.Enabled {
+		t.Error("ingest.toc.enabled should default to true (opt-out)")
+	}
+	if cfg.Ingest.TOC.Concurrency != 4 {
+		t.Errorf("ingest.toc.concurrency = %d, want 4", cfg.Ingest.TOC.Concurrency)
+	}
+	if cfg.Ingest.TOC.TOCCheckPages != 20 {
+		t.Errorf("ingest.toc.toc_check_pages = %d, want 20", cfg.Ingest.TOC.TOCCheckPages)
+	}
+}
+
+func TestTOCEnvOverride(t *testing.T) {
+	// Mutates env — restore on exit. Not parallel.
+	keys := []string{
+		"VLE_INGEST_TOC_ENABLED",
+		"VLE_INGEST_TOC_MODEL",
+		"VLE_INGEST_TOC_CONCURRENCY",
+		"VLE_INGEST_TOC_TOC_CHECK_PAGES",
+	}
+	prev := make(map[string]string, len(keys))
+	for _, k := range keys {
+		prev[k] = os.Getenv(k)
+	}
+	defer func() {
+		for k, v := range prev {
+			os.Setenv(k, v)
+		}
+	}()
+
+	os.Setenv("VLE_INGEST_TOC_ENABLED", "false")
+	os.Setenv("VLE_INGEST_TOC_MODEL", "gemini-2.5-pro")
+	os.Setenv("VLE_INGEST_TOC_CONCURRENCY", "12")
+	os.Setenv("VLE_INGEST_TOC_TOC_CHECK_PAGES", "30")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if cfg.Ingest.TOC.Enabled {
+		t.Error("VLE_INGEST_TOC_ENABLED=false should disable the stage")
+	}
+	if cfg.Ingest.TOC.Model != "gemini-2.5-pro" {
+		t.Errorf("VLE_INGEST_TOC_MODEL not applied, got %q", cfg.Ingest.TOC.Model)
+	}
+	if cfg.Ingest.TOC.Concurrency != 12 {
+		t.Errorf("VLE_INGEST_TOC_CONCURRENCY=12 not applied, got %d", cfg.Ingest.TOC.Concurrency)
+	}
+	if cfg.Ingest.TOC.TOCCheckPages != 30 {
+		t.Errorf("VLE_INGEST_TOC_TOC_CHECK_PAGES=30 not applied, got %d", cfg.Ingest.TOC.TOCCheckPages)
+	}
 }
 
 func TestAbstainEnvOverride(t *testing.T) {

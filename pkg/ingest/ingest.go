@@ -134,6 +134,29 @@ type Pipeline struct {
 	// per-stage semaphore). Default applied by NewPipeline: 12.
 	GlobalLLMConcurrency int
 
+	// TOCEnabled toggles the LLM-built table-of-contents stage. The
+	// stage runs after summarize+HyDE on PDF inputs and persists the
+	// resulting tree on documents.toc_tree (JSONB). Failures are
+	// non-fatal — they leave the column NULL.
+	//
+	// Defaulted to true by config wiring; left as the Go zero value
+	// (false) when Pipeline is constructed directly, so unit tests
+	// with no LLM can opt out by simply not setting it.
+	TOCEnabled bool
+
+	// TOCModel overrides the LLM model used by the TOC builder.
+	// Empty inherits SummaryModel (which itself falls back to the
+	// client default).
+	TOCModel string
+
+	// TOCConcurrency caps parallel LLM calls during the TOC
+	// verification phase. Default: 4.
+	TOCConcurrency int
+
+	// TOCCheckPages bounds the leading prefix the detector scans
+	// for a table of contents. Default: 20.
+	TOCCheckPages int
+
 	// globalLLMSem is the lazily-initialized shared semaphore enforcing
 	// GlobalLLMConcurrency. nil means "no global cap" — callers fall back
 	// to per-stage limits only.
@@ -167,6 +190,12 @@ func NewPipeline(p Pipeline) *Pipeline {
 	}
 	if p.HyDEConcurrency <= 0 {
 		p.HyDEConcurrency = 4
+	}
+	if p.TOCConcurrency <= 0 {
+		p.TOCConcurrency = 4
+	}
+	if p.TOCCheckPages <= 0 {
+		p.TOCCheckPages = 20
 	}
 	// Default the global cap to a value that comfortably exceeds the
 	// sum of the two default per-stage caps (4 + 4 = 8) while leaving
@@ -265,11 +294,129 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	}
 	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
 
+	// LLM-built TOC tree (PageIndex-style). PDF-only because it
+	// relies on the parser's PageStart/PageEnd attribution to
+	// reconstruct per-page text. Non-fatal: a builder failure
+	// leaves documents.toc_tree NULL and the document remains
+	// fully retrievable via the sections tree above.
+	if p.TOCEnabled && pl.ContentType == "application/pdf" {
+		if err := p.runTOCBuilder(ctx, pl.DocumentID, parsed, log); err != nil {
+			log.Warn("ingest: toc-builder failed; falling back to NULL toc_tree", "err", err)
+		}
+	}
+
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
 		return err
 	}
 	log.Info("ingest: ready")
 	return nil
+}
+
+// runTOCBuilder assembles per-page text from the parsed PDF, runs
+// the LLM-driven TOC builder over it, and persists the result.
+// Returns an error only on a transport-level builder failure or a
+// JSON-marshal blip; the caller logs and continues either way.
+//
+// A nil-result (no usable nodes) is treated as success and writes
+// SQL NULL to documents.toc_tree (which is the column's default,
+// so this is also the no-op).
+func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, parsed *parser.ParsedDoc, log *slog.Logger) error {
+	pages := assemblePagesFromSections(parsed.Sections)
+	if len(pages) == 0 {
+		log.Info("ingest: toc-builder skipped; no per-page text available")
+		return nil
+	}
+	model := p.TOCModel
+	if model == "" {
+		model = p.SummaryModel
+	}
+	builder := &TOCBuilder{
+		LLM:           p.LLM,
+		Model:         model,
+		Concurrency:   p.TOCConcurrency,
+		TOCCheckPages: p.TOCCheckPages,
+	}
+	nodes, usage, err := builder.Build(ctx, pages)
+	if err != nil {
+		return err
+	}
+	log.Info("ingest: toc-builder done",
+		"top_level_nodes", len(nodes),
+		"llm_calls", usage.LLMCalls,
+		"input_tokens", usage.InputTokens,
+		"output_tokens", usage.OutputTokens,
+	)
+	if len(nodes) == 0 {
+		return nil
+	}
+	treeJSON, err := json.Marshal(nodes)
+	if err != nil {
+		return fmt.Errorf("marshal toc tree: %w", err)
+	}
+	if err := p.DB.UpdateDocumentTOCTree(ctx, docID, treeJSON); err != nil {
+		return fmt.Errorf("persist toc tree: %w", err)
+	}
+	return nil
+}
+
+// assemblePagesFromSections groups the parsed sections' text by
+// their PageStart, producing PageText entries the TOC builder can
+// reason over. Sections that span multiple pages collapse onto
+// their starting page — perfect page reconstruction would need
+// raw glyph-level coordinates the parser doesn't currently
+// surface, but the title-on-claimed-page heuristic still works
+// because section starts (where the LLM looks for titles) live
+// on PageStart.
+//
+// Sections with PageStart == 0 are skipped (the parser couldn't
+// place them) so the builder never sees ambiguous page numbers.
+func assemblePagesFromSections(secs []parser.Section) []PageText {
+	pageText := map[int]*strings.Builder{}
+	pages := []int{}
+	var walk func([]parser.Section)
+	walk = func(ss []parser.Section) {
+		for _, s := range ss {
+			if s.PageStart > 0 {
+				b, ok := pageText[s.PageStart]
+				if !ok {
+					b = &strings.Builder{}
+					pageText[s.PageStart] = b
+					pages = append(pages, s.PageStart)
+				}
+				if title := strings.TrimSpace(s.Title); title != "" {
+					if b.Len() > 0 {
+						b.WriteByte('\n')
+					}
+					b.WriteString(title)
+					b.WriteByte('\n')
+				}
+				if body := strings.TrimSpace(s.Content); body != "" {
+					b.WriteString(body)
+					b.WriteByte('\n')
+				}
+			}
+			walk(s.Children)
+		}
+	}
+	walk(secs)
+	// Sort the page-number index in place.
+	sortIntsAscending(pages)
+	out := make([]PageText, 0, len(pages))
+	for _, p := range pages {
+		out = append(out, PageText{PageNumber: p, Text: pageText[p].String()})
+	}
+	return out
+}
+
+// sortIntsAscending sorts a slice of ints in place. Insertion sort
+// is fine here — pages slice is typically a few hundred items
+// at most.
+func sortIntsAscending(xs []int) {
+	for i := 1; i < len(xs); i++ {
+		for j := i; j > 0 && xs[j-1] > xs[j]; j-- {
+			xs[j-1], xs[j] = xs[j], xs[j-1]
+		}
+	}
 }
 
 // runParallelStages runs summarize and HyDE concurrently, returning each

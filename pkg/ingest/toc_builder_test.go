@@ -9,6 +9,7 @@ import (
 
 	"github.com/hallelx2/llmgate"
 
+	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
@@ -370,5 +371,96 @@ func TestBuildEmptyPages(t *testing.T) {
 	}
 	if usage.LLMCalls != 0 {
 		t.Errorf("empty input should make no LLM calls, got %d", usage.LLMCalls)
+	}
+}
+
+// TestAssemblePagesFromSections covers the bridge between the
+// parser's section-tree output and the TOC builder's per-page
+// input. Sections sharing a starting page collapse into one
+// PageText entry; sections with PageStart==0 are skipped so the
+// builder never sees ambiguous page numbers.
+func TestAssemblePagesFromSections(t *testing.T) {
+	secs := []parser.Section{
+		{
+			Level:     1,
+			Title:     "Business",
+			Content:   "We do business.",
+			PageStart: 3,
+			PageEnd:   8,
+			Children: []parser.Section{
+				{Level: 2, Title: "Overview", Content: "An overview.", PageStart: 3, PageEnd: 4},
+			},
+		},
+		{Level: 1, Title: "Risk Factors", Content: "Risks here.", PageStart: 10, PageEnd: 12},
+		{Level: 1, Title: "No-page section", Content: "Skipped.", PageStart: 0},
+	}
+	pages := assemblePagesFromSections(secs)
+	if len(pages) != 2 {
+		t.Fatalf("want 2 distinct pages (3 + 10), got %d: %+v", len(pages), pages)
+	}
+	if pages[0].PageNumber != 3 || pages[1].PageNumber != 10 {
+		t.Errorf("pages out of order or wrong: %+v", pages)
+	}
+	if !strings.Contains(pages[0].Text, "Business") || !strings.Contains(pages[0].Text, "Overview") {
+		t.Errorf("page 3 missing expected titles: %q", pages[0].Text)
+	}
+	if !strings.Contains(pages[1].Text, "Risk Factors") {
+		t.Errorf("page 10 missing Risk Factors title: %q", pages[1].Text)
+	}
+	if strings.Contains(pages[0].Text, "Skipped.") || strings.Contains(pages[1].Text, "Skipped.") {
+		t.Errorf("PageStart=0 section should be skipped; got %+v", pages)
+	}
+}
+
+// TestSynthetic10KFourTopLevelNodes drives a tiny but realistic
+// 10-K-flavoured fixture and asserts the builder lands four
+// top-level nodes (Business / Risk Factors / MD&A / Financial
+// Statements). The fixture matches the example used in the PR
+// reporting section.
+func TestSynthetic10KFourTopLevelNodes(t *testing.T) {
+	llm := &scriptedLLM{}
+	llm.route = func(prompt string) string {
+		if strings.Contains(prompt, "table of contents provided in the given text") {
+			if strings.Contains(prompt, "TABLE OF CONTENTS") {
+				return `{"toc_detected":"yes"}`
+			}
+			return `{"toc_detected":"no"}`
+		}
+		if strings.Contains(prompt, "hierarchical tree structure") {
+			return `{"nodes":[
+				{"structure":"1","title":"Item 1. Business","physical_index":"<physical_index_5>"},
+				{"structure":"2","title":"Item 1A. Risk Factors","physical_index":"<physical_index_15>"},
+				{"structure":"3","title":"Item 7. MD&A","physical_index":"<physical_index_40>"},
+				{"structure":"4","title":"Item 8. Financial Statements","physical_index":"<physical_index_60>"}
+			]}`
+		}
+		if strings.Contains(prompt, "section starts at the beginning") {
+			return `{"start_begin":"yes"}`
+		}
+		return `{"toc_detected":"no"}`
+	}
+
+	pages := []PageText{
+		{PageNumber: 1, Text: "Cover Page\nForm 10-K\n"},
+		{PageNumber: 2, Text: "TABLE OF CONTENTS\nItem 1. Business ... 5\nItem 1A. Risk Factors ... 15\nItem 7. MD&A ... 40\nItem 8. Financial Statements ... 60"},
+		{PageNumber: 5, Text: "Item 1. Business\nWe operate ..."},
+		{PageNumber: 15, Text: "Item 1A. Risk Factors\nRisks include ..."},
+		{PageNumber: 40, Text: "Item 7. MD&A\nDiscussion of operations."},
+		{PageNumber: 60, Text: "Item 8. Financial Statements\nBalance sheet ..."},
+	}
+
+	b := &TOCBuilder{LLM: llm, TOCCheckPages: 10, Concurrency: 4}
+	nodes, _, err := b.Build(context.Background(), pages)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(nodes) != 4 {
+		t.Fatalf("synthetic 10-K should yield 4 top-level nodes, got %d: %+v", len(nodes), nodes)
+	}
+	wantTitles := []string{"Item 1. Business", "Item 1A. Risk Factors", "Item 7. MD&A", "Item 8. Financial Statements"}
+	for i, want := range wantTitles {
+		if nodes[i].Title != want {
+			t.Errorf("nodes[%d].Title = %q, want %q", i, nodes[i].Title, want)
+		}
 	}
 }
