@@ -71,8 +71,9 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 
 	sem := make(chan struct{}, maxPar)
 	type sliceResult struct {
-		ids   []tree.SectionID
-		usage Usage
+		ids         []tree.SectionID
+		confidences map[tree.SectionID]float64
+		usage       Usage
 	}
 	results := make([]sliceResult, len(slices))
 
@@ -89,12 +90,12 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 				return gctx.Err()
 			}
 
-			ids, usage, err := c.reasonOverSliceWithCost(gctx, sl, query, budget)
+			ids, confidences, usage, err := c.reasonOverSliceWithCost(gctx, sl, query, budget)
 			if err != nil {
 				return err
 			}
 			mu.Lock()
-			results[i] = sliceResult{ids: ids, usage: usage}
+			results[i] = sliceResult{ids: ids, confidences: confidences, usage: usage}
 			mu.Unlock()
 			return nil
 		})
@@ -107,14 +108,30 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 	// Merge IDs and aggregate costs.
 	allIDs := make([][]tree.SectionID, len(results))
 	var totalUsage Usage
+	// Union the per-slice confidence maps. When two slices both score
+	// the same ID (rare but possible if the splitter overlaps), we
+	// keep the higher confidence — the more confident slice has
+	// better signal about that section.
+	var mergedConfidences map[tree.SectionID]float64
 	for i, r := range results {
 		allIDs[i] = r.ids
 		totalUsage.Add(r.usage)
+		if len(r.confidences) > 0 {
+			if mergedConfidences == nil {
+				mergedConfidences = make(map[tree.SectionID]float64, len(r.confidences))
+			}
+			for id, conf := range r.confidences {
+				if existing, ok := mergedConfidences[id]; !ok || conf > existing {
+					mergedConfidences[id] = conf
+				}
+			}
+		}
 	}
 
 	selected := c.Merge.Merge(allIDs)
 	return &Result{
 		SelectedIDs: selected,
+		Confidences: filterConfidences(mergedConfidences, selected),
 		Usage:       totalUsage,
 		HopsTaken:   1,
 		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, selected),
@@ -125,12 +142,14 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 // model picked, filtered against sl.Sections so a model can never fabricate
 // an ID that lives in a different slice.
 func (c *ChunkedTree) reasonOverSlice(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, error) {
-	ids, _, err := c.reasonOverSliceWithCost(ctx, sl, query, budget)
+	ids, _, _, err := c.reasonOverSliceWithCost(ctx, sl, query, budget)
 	return ids, err
 }
 
-// reasonOverSliceWithCost is like reasonOverSlice but also returns usage.
-func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, Usage, error) {
+// reasonOverSliceWithCost is like reasonOverSlice but also returns the
+// per-pick confidence map (nil when the model returned the legacy
+// response shape) and the usage spent on the call.
+func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, query string, budget ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, Usage, error) {
 	prompt := BuildSelectionPrompt(sl.Breadcrumb, sl.Sections, sl.SiblingSummaries, query)
 
 	req := llmgate.Request{
@@ -145,11 +164,12 @@ func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, que
 		JSONSchema:  []byte(selectionJSONSchema),
 	}
 
-	ids, usage, err := runSelectionWithRetry(ctx, c.LLM, req, defaultSelectionRetries)
+	ids, confidences, usage, err := runSelectionWithRetry(ctx, c.LLM, req, defaultSelectionRetries)
 	if err != nil {
-		return nil, usage, err
+		return nil, nil, usage, err
 	}
-	return FilterKnownIDs(ids, sl.Sections), usage, nil
+	filtered := FilterKnownIDs(ids, sl.Sections)
+	return filtered, filterConfidences(confidences, filtered), usage, nil
 }
 
 // MergePolicy determines how per-slice ID lists are combined into a single

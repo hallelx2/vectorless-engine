@@ -64,8 +64,123 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Retrieval.Replay.TTLSeconds != 86400 {
 		t.Errorf("retrieval.replay.ttl_seconds = %d, want 86400 (24h)", cfg.Retrieval.Replay.TTLSeconds)
 	}
+	if !cfg.Retrieval.Abstain.Enabled {
+		t.Error("retrieval.abstain.enabled should default to true (opt-out)")
+	}
+	if cfg.Retrieval.Abstain.Below != 0.4 {
+		t.Errorf("retrieval.abstain.below = %v, want 0.4", cfg.Retrieval.Abstain.Below)
+	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level = %q, want info", cfg.Log.Level)
+	}
+}
+
+func TestAbstainEnvOverride(t *testing.T) {
+	// Mutates env — restore on exit. Not parallel.
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_ABSTAIN_ENABLED")
+	prevBelow := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prevBelow)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "false")
+	os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", "0.6")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if cfg.Retrieval.Abstain.Enabled {
+		t.Error("VLE_RETRIEVAL_ABSTAIN_ENABLED=false should disable abstention")
+	}
+	if cfg.Retrieval.Abstain.Below != 0.6 {
+		t.Errorf("VLE_RETRIEVAL_ABSTAIN_BELOW=0.6 not applied, got %v", cfg.Retrieval.Abstain.Below)
+	}
+}
+
+func TestAbstainEnvOverrideEnable(t *testing.T) {
+	// Toggle on via env from an explicitly-disabled starting state.
+	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_ENABLED")
+	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prev)
+
+	cfg := Default()
+	cfg.Retrieval.Abstain.Enabled = false
+	os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "true")
+	applyEnvOverrides(&cfg)
+	if !cfg.Retrieval.Abstain.Enabled {
+		t.Error("VLE_RETRIEVAL_ABSTAIN_ENABLED=true should enable abstention even when previously disabled")
+	}
+}
+
+// TestAbstainEnvOverrideRejectsBad asserts a garbage float and an
+// out-of-range value both preserve the default rather than silently
+// zeroing or accepting a value that would break the abstention check
+// (Below must be in [0,1]).
+func TestAbstainEnvOverrideRejectsBad(t *testing.T) {
+	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
+	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev)
+
+	cases := []string{"not-a-float", "1.5", "-0.1", "abc"}
+	for _, v := range cases {
+		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", v)
+		cfg := Default()
+		applyEnvOverrides(&cfg)
+		if cfg.Retrieval.Abstain.Below != 0.4 {
+			t.Errorf("bad ABSTAIN_BELOW=%q should preserve default 0.4, got %v",
+				v, cfg.Retrieval.Abstain.Below)
+		}
+	}
+}
+
+// TestAbstainEnvOverrideParsesEdgeCases covers 0.0 and 1.0 (the
+// inclusive bounds) and the canonical 0.4 default — these must all
+// be accepted.
+func TestAbstainEnvOverrideParsesEdgeCases(t *testing.T) {
+	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
+	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev)
+
+	cases := map[string]float64{
+		"0":   0.0,
+		"0.0": 0.0,
+		"1":   1.0,
+		"1.0": 1.0,
+		"0.5": 0.5,
+	}
+	for raw, want := range cases {
+		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", raw)
+		cfg := Default()
+		applyEnvOverrides(&cfg)
+		if cfg.Retrieval.Abstain.Below != want {
+			t.Errorf("ABSTAIN_BELOW=%q: got %v want %v", raw, cfg.Retrieval.Abstain.Below, want)
+		}
+	}
+}
+
+// TestValidateAbstainOutOfRange asserts Validate rejects out-of-range
+// Below values. The env-override path silently drops them, but a YAML
+// file or explicit struct edit can still land a bad value here.
+func TestValidateAbstainOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.URL = "postgres://localhost/test"
+	cfg.Retrieval.Abstain.Below = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Error("abstain.below=1.5 should fail validation")
+	}
+
+	cfg2 := Default()
+	cfg2.Database.URL = "postgres://localhost/test"
+	cfg2.Retrieval.Abstain.Below = -0.1
+	if err := cfg2.Validate(); err == nil {
+		t.Error("abstain.below=-0.1 should fail validation")
+	}
+
+	cfg3 := Default()
+	cfg3.Database.URL = "postgres://localhost/test"
+	cfg3.Retrieval.Abstain.Below = 0.0
+	if err := cfg3.Validate(); err != nil {
+		t.Errorf("abstain.below=0.0 should pass validation, got %v", err)
 	}
 }
 

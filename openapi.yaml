@@ -551,6 +551,19 @@ components:
             original order — re-rank never drops sections. Overrides
             the server's `retrieval.rerank.enabled` setting for this
             request only.
+        enable_abstain:
+          type: boolean
+          description: |
+            Opt this request into the Phase 2.4 confidence-driven
+            abstention check. When the selection LLM returns per-pick
+            confidence scores and every score falls below
+            `retrieval.abstain.below`, the response is an abstention
+            (sections empty, abstained=true) rather than evidence the
+            engine itself is not confident is relevant. Abstention
+            requires explicit confidence signal — legacy-shape LLM
+            responses (no confidence) never trigger abstention.
+            Overrides the server's `retrieval.abstain.enabled`
+            setting for this request only.
 
     QueryResponse:
       type: object
@@ -568,6 +581,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/QuerySection"
+          description: |
+            Empty when `abstained=true`. The engine refused to surface
+            sections it isn't confident answer the query.
         plan:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
@@ -581,7 +597,48 @@ components:
             Pass this token to /v1/replay along with the original
             `query` and `document_id` to retrieve the byte-identical
             response. Empty when the server has
-            `retrieval.replay.enabled=false`.
+            `retrieval.replay.enabled=false`, and omitted on
+            abstention responses (which have no retrieval result to
+            replay).
+        confidences:
+          type: object
+          additionalProperties:
+            type: number
+          description: |
+            Per-section confidence scores in [0.0, 1.0] returned by the
+            selection LLM, keyed by section_id. Only present when the
+            model returned the new-shape response with explicit
+            confidence values. Useful for downstream evaluators that
+            want to surface the engine's certainty alongside the
+            evidence.
+        abstained:
+          type: boolean
+          description: |
+            True when the engine refused to ground an answer in the
+            retrieved evidence because every candidate section scored
+            below `min_confidence_threshold`. When true, `sections`
+            is empty and `candidate_confidences` carries the actual
+            scores so the caller can decide whether to relax the
+            threshold and retry.
+        abstention_reason:
+          type: string
+          description: |
+            Human-readable explanation when `abstained=true`. Stable
+            string suitable for surfacing verbatim to end users.
+        min_confidence_threshold:
+          type: number
+          description: |
+            The `retrieval.abstain.below` value the engine compared
+            confidences against. Present only on abstention responses.
+        candidate_confidences:
+          type: object
+          additionalProperties:
+            type: number
+          description: |
+            Per-section confidence scores the selection LLM returned
+            for every candidate it considered, NOT just the final
+            picks. Surfaced only on abstention responses so callers
+            can see exactly why the engine refused.
 
     QuerySection:
       type: object
@@ -675,6 +732,15 @@ components:
             When the pass runs, the synthesis prompt sees the
             re-ranked top-k (capped by `retrieval.rerank.top_k`), and
             each citation in the response carries a `score` field.
+        enable_abstain:
+          type: boolean
+          description: |
+            Opt this request into the Phase 2.4 confidence-driven
+            abstention check. See QueryRequest.enable_abstain for
+            full semantics. When abstention fires on /v1/answer the
+            synthesis call is skipped entirely; the response carries
+            a canonical refusal in `answer`, an empty `citations`
+            array, and `abstained=true`.
 
     AnswerResponse:
       type: object
@@ -685,11 +751,17 @@ components:
           type: string
         answer:
           type: string
-          description: Natural-language answer grounded in the cited sections.
+          description: |
+            Natural-language answer grounded in the cited sections.
+            When `abstained=true` this is the canonical refusal
+            ("I cannot answer this question from the supplied
+            document.") rather than synthesised prose.
         citations:
           type: array
           items:
             $ref: "#/components/schemas/AnswerCitation"
+          description: |
+            Empty array when `abstained=true`.
         strategy:
           type: string
         model:
@@ -702,6 +774,10 @@ components:
             total_tokens: {type: integer}
             cost_usd: {type: number}
             llm_calls: {type: integer}
+          description: |
+            On abstention this carries the planning + retrieval
+            tokens but no synthesis tokens — the engine skipped
+            the synthesis LLM call entirely.
         plan:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
@@ -715,7 +791,44 @@ components:
             system prompt version). Pass to /v1/replay with the
             original `query` and `document_id` to fetch the
             byte-identical response. Empty when the server has
-            `retrieval.replay.enabled=false`.
+            `retrieval.replay.enabled=false`, and omitted on
+            abstention responses (which have no synthesis result to
+            replay).
+        confidences:
+          type: object
+          additionalProperties:
+            type: number
+          description: |
+            Per-section confidence scores in [0.0, 1.0] returned by
+            the selection LLM, keyed by section_id. Only present
+            when the model returned the new-shape response with
+            explicit confidence values.
+        abstained:
+          type: boolean
+          description: |
+            True when the engine refused to synthesise an answer
+            because every candidate section scored below
+            `min_confidence_threshold`. The synthesis LLM call is
+            skipped entirely; `answer` is the canonical refusal and
+            `citations` is empty.
+        abstention_reason:
+          type: string
+          description: |
+            Human-readable explanation when `abstained=true`.
+        min_confidence_threshold:
+          type: number
+          description: |
+            The `retrieval.abstain.below` value the engine compared
+            confidences against. Present only on abstention responses.
+        candidate_confidences:
+          type: object
+          additionalProperties:
+            type: number
+          description: |
+            Per-section confidence scores the selection LLM returned
+            for every candidate it considered. Surfaced only on
+            abstention responses so callers can see exactly why the
+            engine refused to synthesise.
 
     Plan:
       type: object

@@ -181,9 +181,12 @@ func TestParseSelection(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := retrieval.ParseSelection(c.in)
+			got, confidences, err := retrieval.ParseSelection(c.in)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if confidences != nil {
+				t.Errorf("legacy-shape input must not populate confidences, got %v", confidences)
 			}
 			if len(got) != len(c.want) {
 				t.Fatalf("len: got %v want %v", got, c.want)
@@ -194,6 +197,109 @@ func TestParseSelection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParseSelectionNewShape exercises the Phase 2.4 picks shape:
+// each pick carries an id + confidence, the parser returns both the
+// id list and a confidence map.
+func TestParseSelectionNewShape(t *testing.T) {
+	raw := `{"picks":[{"id":"sec_a","confidence":0.82},{"id":"sec_b","confidence":0.31}],"reasoning":"x"}`
+	ids, confidences, err := retrieval.ParseSelection(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "sec_a" || ids[1] != "sec_b" {
+		t.Fatalf("ids: got %v want [sec_a sec_b]", ids)
+	}
+	if confidences == nil {
+		t.Fatal("confidences must be populated for new-shape response")
+	}
+	if got := confidences["sec_a"]; got != 0.82 {
+		t.Errorf("sec_a confidence = %v, want 0.82", got)
+	}
+	if got := confidences["sec_b"]; got != 0.31 {
+		t.Errorf("sec_b confidence = %v, want 0.31", got)
+	}
+}
+
+// TestParseSelectionMixedShape covers a partially-populated new-shape
+// response: some picks have confidence, others don't. The confidence
+// map only surfaces IDs whose confidence was actually present —
+// missing entries are NOT defaulted to 0 (which would force
+// abstention) or to 1 (which would suppress it).
+func TestParseSelectionMixedShape(t *testing.T) {
+	raw := `{"picks":[{"id":"sec_a","confidence":0.9},{"id":"sec_b"},{"id":"sec_c","confidence":0.4}]}`
+	ids, confidences, err := retrieval.ParseSelection(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("ids: got %v, want 3 picks", ids)
+	}
+	if _, present := confidences["sec_a"]; !present {
+		t.Error("sec_a should have confidence")
+	}
+	if _, present := confidences["sec_b"]; present {
+		t.Error("sec_b should NOT have confidence (model omitted it)")
+	}
+	if _, present := confidences["sec_c"]; !present {
+		t.Error("sec_c should have confidence")
+	}
+	if confidences["sec_a"] != 0.9 || confidences["sec_c"] != 0.4 {
+		t.Errorf("confidences = %v", confidences)
+	}
+}
+
+// TestParseSelectionClampsConfidence asserts confidences outside
+// [0.0, 1.0] are clamped — defence-in-depth against a model that
+// returns 1.5 or -0.2 despite the prompt's range.
+func TestParseSelectionClampsConfidence(t *testing.T) {
+	raw := `{"picks":[{"id":"sec_a","confidence":1.7},{"id":"sec_b","confidence":-0.3}]}`
+	_, confidences, err := retrieval.ParseSelection(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if confidences["sec_a"] != 1.0 {
+		t.Errorf("sec_a clamped: want 1.0, got %v", confidences["sec_a"])
+	}
+	if confidences["sec_b"] != 0.0 {
+		t.Errorf("sec_b clamped: want 0.0, got %v", confidences["sec_b"])
+	}
+}
+
+// TestParseSelectionPicksDedup ensures duplicate IDs in `picks` are
+// deduplicated (first-seen wins) so the strategy doesn't double-count
+// a section the model accidentally listed twice.
+func TestParseSelectionPicksDedup(t *testing.T) {
+	raw := `{"picks":[{"id":"sec_a","confidence":0.7},{"id":"sec_a","confidence":0.2}]}`
+	ids, confidences, err := retrieval.ParseSelection(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "sec_a" {
+		t.Fatalf("ids: got %v want [sec_a]", ids)
+	}
+	if confidences["sec_a"] != 0.7 {
+		t.Errorf("first-seen confidence should win: got %v want 0.7", confidences["sec_a"])
+	}
+}
+
+// TestParseSelectionNewShapeNoConfidences covers a new-shape response
+// where the model returned `picks` but stamped no confidence values
+// at all — must be treated as legacy (nil confidences) so the API
+// layer does NOT abstain on a confidence signal that isn't there.
+func TestParseSelectionNewShapeNoConfidences(t *testing.T) {
+	raw := `{"picks":[{"id":"sec_a"},{"id":"sec_b"}]}`
+	ids, confidences, err := retrieval.ParseSelection(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("ids: got %v, want 2", ids)
+	}
+	if confidences != nil {
+		t.Errorf("missing confidences must surface as nil map, got %v", confidences)
 	}
 }
 
@@ -314,6 +420,103 @@ func TestDefaultSplitterFastPath(t *testing.T) {
 	}
 	if !strings.Contains(slices[0].Breadcrumb, "Atlas") {
 		t.Errorf("breadcrumb missing doc title: %q", slices[0].Breadcrumb)
+	}
+}
+
+// TestSinglePassReturnsConfidences asserts that a new-shape LLM
+// response with confidence scores surfaces a populated Confidences
+// map on the strategy's Result. The strategy itself never abstains —
+// even when every confidence is below the typical 0.4 threshold the
+// IDs still come back and the API layer decides what to do.
+func TestSinglePassReturnsConfidences(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{reply: `{"picks":[{"id":"sec_a","confidence":0.78},{"id":"sec_b","confidence":0.12}],"reasoning":"x"}`}
+	s := retrieval.NewSinglePass(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: "model", MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(res.SelectedIDs) != 2 {
+		t.Fatalf("want 2 IDs, got %v", res.SelectedIDs)
+	}
+	if res.Confidences == nil {
+		t.Fatal("Confidences should be populated for new-shape response")
+	}
+	if got := res.Confidences["sec_a"]; got != 0.78 {
+		t.Errorf("sec_a confidence = %v, want 0.78", got)
+	}
+	if got := res.Confidences["sec_b"]; got != 0.12 {
+		t.Errorf("sec_b confidence = %v, want 0.12", got)
+	}
+}
+
+// TestSinglePassAllLowConfidencesStillReturnsIDs is the abstention
+// smoke contract from the spec: the strategy itself never abstains.
+// Even when every confidence is below 0.4 the IDs come back. The
+// API layer is the only place that may convert "all low" into an
+// abstention.
+func TestSinglePassAllLowConfidencesStillReturnsIDs(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{reply: `{"picks":[{"id":"sec_a","confidence":0.1},{"id":"sec_b","confidence":0.2}]}`}
+	s := retrieval.NewSinglePass(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: "model", MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(res.SelectedIDs) != 2 {
+		t.Fatalf("strategy must return IDs even with low confidences, got %v", res.SelectedIDs)
+	}
+	if len(res.Confidences) != 2 {
+		t.Errorf("Confidences should mirror SelectedIDs, got %v", res.Confidences)
+	}
+}
+
+// TestSinglePassLegacyShapeNoConfidences confirms that the legacy
+// response shape continues to work after the new-shape refactor.
+// Critically, Confidences stays nil so the API layer does not abstain.
+func TestSinglePassLegacyShapeNoConfidences(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{reply: `{"selected_section_ids":["sec_a","sec_b"],"reasoning":"x"}`}
+	s := retrieval.NewSinglePass(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q",
+		retrieval.ContextBudget{ModelName: "model", MaxTokens: 1000})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(res.SelectedIDs) != 2 {
+		t.Fatalf("legacy response shape must still work, got %v", res.SelectedIDs)
+	}
+	if res.Confidences != nil {
+		t.Errorf("legacy response must NOT populate Confidences, got %v", res.Confidences)
+	}
+}
+
+// TestChunkedTreeMergesConfidences verifies the chunked-tree strategy
+// surfaces confidences in the merged Result. Because the test tree
+// is small enough to fit in one slice, this is effectively a single
+// slice union — but the field still has to round-trip through the
+// per-slice plumbing.
+func TestChunkedTreeMergesConfidences(t *testing.T) {
+	tr := buildTree()
+	m := &mockLLM{reply: `{"picks":[{"id":"sec_a","confidence":0.6},{"id":"sec_c","confidence":0.9}]}`}
+	s := retrieval.NewChunkedTree(m)
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{
+		ModelName: "model", MaxTokens: 100000, MaxParallelCalls: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Confidences) != 2 {
+		t.Fatalf("Confidences should carry both picks, got %v", res.Confidences)
+	}
+	if res.Confidences["sec_a"] != 0.6 || res.Confidences["sec_c"] != 0.9 {
+		t.Errorf("confidences = %v", res.Confidences)
 	}
 }
 

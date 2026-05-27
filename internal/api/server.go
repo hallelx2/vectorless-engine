@@ -91,6 +91,13 @@ type Deps struct {
 	// /v1/replay (the endpoint returns 501) and skips the per-
 	// response store write.
 	Replay retrieval.ReplayStore
+
+	// Abstain carries the server-side abstention config. The
+	// body-level `enable_abstain` field on /v1/query and /v1/answer
+	// overrides Abstain.Enabled. When abstention fires, the response
+	// carries abstained=true and an empty sections / citations list
+	// rather than risk hallucinating an answer from weak evidence.
+	Abstain config.AbstainBlock
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -398,14 +405,19 @@ func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 
 // handleQuery accepts { document_id, query, model?, max_tokens?,
 // reserved_for_prompt?, max_parallel_calls?, max_sections?,
-// enable_planning? } and runs the configured retrieval.Strategy against
-// the document's tree.
+// enable_planning?, enable_rerank?, enable_abstain? } and runs the
+// configured retrieval.Strategy against the document's tree.
 //
 // When `enable_planning` is true (or `retrieval.planning.enabled` is on
 // at config level) the request first issues a planning LLM call. The
 // resulting Plan is surfaced in the response under "plan". If the plan
 // is multi-hop and decomposition is enabled, retrieval fans out one
 // strategy call per sub-question and unions the results.
+//
+// When the selection LLM returns per-pick confidence scores and every
+// pick falls below `retrieval.abstain.below`, the response is an
+// abstention: sections is empty and abstained=true. Per-request
+// `enable_abstain` overrides the server-side flag for one request.
 func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DocumentID        tree.DocumentID `json:"document_id"`
@@ -423,6 +435,10 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		// content-aware re-rank pass. Pointer for the same reason as
 		// EnablePlanning. Overrides retrieval.rerank.enabled.
 		EnableReRank *bool `json:"enable_rerank"`
+		// EnableAbstain opts this request into the Phase 2.4
+		// confidence-driven abstention check. Pointer for the same
+		// reason as EnablePlanning. Overrides retrieval.abstain.enabled.
+		EnableAbstain *bool `json:"enable_abstain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -466,12 +482,24 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	plan, _ := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
-	ids, err := d.runSelection(r.Context(), t, plan, body.Query, budget)
+	ids, confidences, err := d.runSelection(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
 		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
 		return
 	}
+
+	// Phase 2.4 abstention: if every confident pick is below the
+	// configured threshold, refuse to ground an answer in evidence
+	// the model itself is not confident is relevant. The check fires
+	// only when explicit confidence signal is present — legacy-shape
+	// responses (no confidences) always fall through to the normal
+	// path so older models keep working.
+	if d.abstentionEnabled(body.EnableAbstain) && shouldAbstain(confidences, d.Abstain.Below) {
+		d.respondAbstained(w, body.DocumentID, body.Query, confidences, plan)
+		return
+	}
+
 	if body.MaxSections > 0 && len(ids) > body.MaxSections {
 		ids = ids[:body.MaxSections]
 	}
@@ -538,6 +566,12 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if plan != nil {
 		resp["plan"] = plan
+	}
+	// Surface the confidence map on the response when present. Only the
+	// finalIDs survive truncation, so trim accordingly. Empty map →
+	// omit so the field stays absent when no signal was available.
+	if filtered := filterConfidencesToIDs(confidences, finalIDs); len(filtered) > 0 {
+		resp["confidences"] = stringKeyedConfidences(filtered)
 	}
 
 	raw, err := marshalJSONForReplay(resp)
@@ -692,6 +726,11 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		// pass. Synthesis then sees the re-ranked top-k. Overrides
 		// retrieval.rerank.enabled.
 		EnableReRank *bool `json:"enable_rerank"`
+		// EnableAbstain opts this request into the Phase 2.4
+		// confidence-driven abstention check. When all picks fall
+		// below the threshold, /v1/answer skips synthesis entirely
+		// and returns a refusal answer with no citations.
+		EnableAbstain *bool `json:"enable_abstain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -734,12 +773,21 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	plan, planUsage := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
 	totalUsage.Add(planUsage)
 
-	ids, retrievalUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
+	ids, confidences, retrievalUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
 		return
 	}
 	totalUsage.Add(retrievalUsage)
+
+	// Phase 2.4 abstention: skip synthesis entirely when every confident
+	// pick falls below the threshold. The response answers with a
+	// regulator-friendly refusal rather than a hallucinated synthesis
+	// of weak evidence.
+	if d.abstentionEnabled(body.EnableAbstain) && shouldAbstain(confidences, d.Abstain.Below) {
+		d.respondAbstainedAnswer(w, body.DocumentID, body.Query, confidences, plan, totalUsage, started)
+		return
+	}
 
 	maxSections := body.MaxSections
 	if maxSections <= 0 {
@@ -862,6 +910,9 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	if plan != nil {
 		resp["plan"] = plan
+	}
+	if filtered := filterConfidencesToIDs(confidences, finalIDs); len(filtered) > 0 {
+		resp["confidences"] = stringKeyedConfidences(filtered)
 	}
 
 	raw, err := marshalJSONForReplay(resp)
@@ -1191,38 +1242,45 @@ func (d Deps) runPlanner(ctx context.Context, query string, bodyOverride *bool) 
 
 // runSelection picks section IDs for the query, optionally going
 // through the Decomposer when the plan is multi-hop AND planning-level
-// decomposition is enabled. Returns the same []SectionID Strategy.Select
-// would.
-func (d Deps) runSelection(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, error) {
-	if d.shouldDecompose(plan) {
-		ids, _, err := retrieval.NewDecomposer(d.Strategy).DecomposedSelect(ctx, t, plan, query, budget)
-		return ids, err
-	}
-	return d.Strategy.Select(ctx, t, query, budget)
+// decomposition is enabled. Returns the selected IDs plus the per-pick
+// confidence map (nil when the selection LLM returned the legacy
+// shape with no confidence signal).
+func (d Deps) runSelection(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, error) {
+	ids, confidences, _, err := d.runSelectionFull(ctx, t, plan, query, budget)
+	return ids, confidences, err
 }
 
 // runSelectionWithUsage is the cost-tracking variant used by /v1/answer.
-// Returns the selected IDs plus the Usage accumulated during selection
-// (across all sub-questions for multi-hop plans).
-func (d Deps) runSelectionWithUsage(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, retrieval.Usage, error) {
+// Returns the selected IDs, per-pick confidences (nil when no signal),
+// and the Usage accumulated during selection (across all sub-questions
+// for multi-hop plans).
+func (d Deps) runSelectionWithUsage(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, retrieval.Usage, error) {
+	return d.runSelectionFull(ctx, t, plan, query, budget)
+}
+
+// runSelectionFull is the shared workhorse behind runSelection /
+// runSelectionWithUsage. It routes through the Decomposer when the
+// plan is multi-hop AND decomposition is enabled, and surfaces
+// confidences for the Phase 2.4 abstention check.
+func (d Deps) runSelectionFull(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, retrieval.Usage, error) {
 	if d.shouldDecompose(plan) {
-		return retrieval.NewDecomposer(d.Strategy).DecomposedSelect(ctx, t, plan, query, budget)
+		return retrieval.NewDecomposer(d.Strategy).DecomposedSelectWithConfidences(ctx, t, plan, query, budget)
 	}
 	if cs, ok := d.Strategy.(retrieval.CostStrategy); ok {
 		res, err := cs.SelectWithCost(ctx, t, query, budget)
 		if err != nil {
-			return nil, retrieval.Usage{}, err
+			return nil, nil, retrieval.Usage{}, err
 		}
 		if res == nil {
-			return nil, retrieval.Usage{}, nil
+			return nil, nil, retrieval.Usage{}, nil
 		}
-		return res.SelectedIDs, res.Usage, nil
+		return res.SelectedIDs, res.Confidences, res.Usage, nil
 	}
 	ids, err := d.Strategy.Select(ctx, t, query, budget)
 	if err != nil {
-		return nil, retrieval.Usage{}, err
+		return nil, nil, retrieval.Usage{}, err
 	}
-	return ids, retrieval.Usage{}, nil
+	return ids, nil, retrieval.Usage{}, nil
 }
 
 // shouldDecompose returns true when the plan is multi-hop AND
@@ -1377,6 +1435,148 @@ func writePlanHints(b *strings.Builder, plan *retrieval.Plan) {
 			fmt.Fprintf(b, "\n  - %s", q)
 		}
 	}
+}
+
+// --- abstention helpers ---
+
+// abstentionEnabled reports whether the request should run the
+// confidence-driven abstention check. The per-request body field (when
+// present) wins over the server-side config; a nil body field falls
+// back to the config. When neither is enabled, abstention is skipped
+// regardless of the confidence signal.
+func (d Deps) abstentionEnabled(bodyOverride *bool) bool {
+	if bodyOverride != nil {
+		return *bodyOverride
+	}
+	return d.Abstain.Enabled
+}
+
+// shouldAbstain returns true when confidences carry an explicit
+// signal AND every entry is strictly below threshold.
+//
+// The "all picks below" semantics (vs "any pick below") is
+// deliberate: if even one section scored above, the engine has
+// enough evidence to surface it. Abstention is reserved for the case
+// where every candidate is weak.
+//
+// nil / empty confidences never trigger abstention — abstention
+// requires explicit confidence signal from the selection LLM. A
+// legacy-shape response carries nil confidences and falls through
+// to the normal path.
+func shouldAbstain(confidences map[tree.SectionID]float64, threshold float64) bool {
+	if len(confidences) == 0 {
+		return false
+	}
+	for _, c := range confidences {
+		if c >= threshold {
+			return false
+		}
+	}
+	return true
+}
+
+// stringKeyedConfidences converts the typed confidence map into a
+// JSON-friendly {string: float} so encoding/json emits an object
+// with section_id keys rather than relying on a tree.SectionID
+// MarshalText shim. Returns nil when src is empty so the field
+// stays absent on the wire.
+func stringKeyedConfidences(src map[tree.SectionID]float64) map[string]float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(src))
+	for id, c := range src {
+		out[string(id)] = c
+	}
+	return out
+}
+
+// filterConfidencesToIDs keeps only the entries whose IDs appear in
+// keep, preserving the "no signal" semantics: a nil input returns
+// nil, an empty filtered result also returns nil so callers can do
+// a single len()-check before serialising.
+func filterConfidencesToIDs(src map[tree.SectionID]float64, keep []tree.SectionID) map[tree.SectionID]float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[tree.SectionID]float64, len(keep))
+	for _, id := range keep {
+		if v, ok := src[id]; ok {
+			out[id] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// abstentionReason is the human-readable message attached to every
+// abstention response. Kept as a single constant so callers don't
+// drift on wording and analytics can group by exact string.
+const abstentionReason = "no candidate section scored above the confidence threshold"
+
+// abstentionAnswerText is the canonical refusal used by /v1/answer
+// when abstention fires. The text is regulator-friendly: it admits
+// the engine could not answer rather than guessing, and does so in a
+// language clients can surface verbatim.
+const abstentionAnswerText = "I cannot answer this question from the supplied document."
+
+// respondAbstained writes the abstention shape for /v1/query. The
+// response includes the threshold and the candidate_confidences map
+// the model returned so callers (and downstream evaluators) can see
+// exactly why the engine refused.
+//
+// trace_token is intentionally empty on abstention: we don't store
+// the response in the replay log because there's no meaningful
+// retrieval result to reproduce. Callers replaying an abstention
+// will simply re-run /v1/query.
+func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, query string, confidences map[tree.SectionID]float64, plan *retrieval.Plan) {
+	resp := map[string]any{
+		"document_id":              docID,
+		"query":                    query,
+		"strategy":                 d.Strategy.Name(),
+		"sections":                 []any{},
+		"abstained":                true,
+		"abstention_reason":        abstentionReason,
+		"min_confidence_threshold": d.Abstain.Below,
+		"candidate_confidences":    stringKeyedConfidences(confidences),
+	}
+	if plan != nil {
+		resp["plan"] = plan
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// respondAbstainedAnswer writes the abstention shape for /v1/answer.
+// The answer text is the canonical refusal; citations is empty;
+// usage carries the LLM tokens spent up to the abstention point
+// (planning + retrieval, no synthesis) so the caller's billing
+// stays accurate.
+func (d Deps) respondAbstainedAnswer(w http.ResponseWriter, docID tree.DocumentID, query string, confidences map[tree.SectionID]float64, plan *retrieval.Plan, usage retrieval.Usage, started time.Time) {
+	resp := map[string]any{
+		"document_id": docID,
+		"query":       query,
+		"answer":      abstentionAnswerText,
+		"citations":   []any{},
+		"strategy":    d.Strategy.Name(),
+		"usage": map[string]any{
+			"input_tokens":  usage.InputTokens,
+			"output_tokens": usage.OutputTokens,
+			"total_tokens":  usage.TotalTokens,
+			"cost_usd":      usage.CostUSD,
+			"llm_calls":     usage.LLMCalls,
+		},
+		"elapsed_ms":               time.Since(started).Milliseconds(),
+		"abstained":                true,
+		"abstention_reason":        abstentionReason,
+		"min_confidence_threshold": d.Abstain.Below,
+		"candidate_confidences":    stringKeyedConfidences(confidences),
+	}
+	if plan != nil {
+		resp["plan"] = plan
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- helpers ---

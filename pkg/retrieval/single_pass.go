@@ -60,19 +60,42 @@ func (s *SinglePass) SelectWithCost(ctx context.Context, t *tree.Tree, query str
 		JSONSchema:  []byte(selectionJSONSchema),
 	}
 
-	ids, usage, err := runSelectionWithRetry(ctx, s.LLM, req, defaultSelectionRetries)
+	ids, confidences, usage, err := runSelectionWithRetry(ctx, s.LLM, req, defaultSelectionRetries)
 	if err != nil {
 		return nil, fmt.Errorf("single-pass llm call: %w", err)
 	}
 
 	selected := FilterKnownIDs(ids, view.Sections)
+	filteredConfidences := filterConfidences(confidences, selected)
 	return &Result{
 		SelectedIDs: selected,
+		Confidences: filteredConfidences,
 		ModelUsed:   model,
 		Usage:       usage,
 		HopsTaken:   1,
 		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, model, selected),
 	}, nil
+}
+
+// filterConfidences keeps only entries whose key appears in keep, so a
+// strategy never surfaces a confidence for an ID it didn't ultimately
+// select (post-filter / post-merge). Returns nil when src is nil or
+// empty after filtering — preserving the "no confidence signal"
+// distinction the API layer relies on for abstention.
+func filterConfidences(src map[tree.SectionID]float64, keep []tree.SectionID) map[tree.SectionID]float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[tree.SectionID]float64, len(keep))
+	for _, id := range keep {
+		if v, ok := src[id]; ok {
+			out[id] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // traceDocVersionV1 is the placeholder document version used by every
@@ -88,11 +111,13 @@ const defaultSelectionRetries = 2
 
 // runSelectionWithRetry runs a selection LLM call and parses the response,
 // retrying up to maxRetries additional times if the model returns something
-// that doesn't parse as JSON. Returns the parsed IDs and the cumulative usage
-// across all attempts. An error is returned only on a transport/LLM failure —
-// final parse failure degrades gracefully to an empty selection (logged) so a
-// single LLM-formatting blip doesn't 500 the entire query.
-func runSelectionWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int) ([]tree.SectionID, Usage, error) {
+// that doesn't parse as JSON. Returns the parsed IDs, per-ID confidences
+// (nil when the model returned the legacy shape without confidence), and
+// the cumulative usage across all attempts. An error is returned only on a
+// transport/LLM failure — final parse failure degrades gracefully to an
+// empty selection (logged) so a single LLM-formatting blip doesn't 500
+// the entire query.
+func runSelectionWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int) ([]tree.SectionID, map[tree.SectionID]float64, Usage, error) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -114,7 +139,7 @@ func runSelectionWithRetry(ctx context.Context, client llmgate.Client, baseReq l
 		}
 		resp, err := client.Complete(ctx, req)
 		if err != nil {
-			return nil, totalUsage, err
+			return nil, nil, totalUsage, err
 		}
 		totalUsage.Add(Usage{
 			InputTokens:  resp.Usage.InputTokens,
@@ -123,14 +148,14 @@ func runSelectionWithRetry(ctx context.Context, client llmgate.Client, baseReq l
 			CostUSD:      resp.Usage.CostUSD,
 			LLMCalls:     1,
 		})
-		ids, parseErr := ParseSelection(resp.Content)
+		ids, confidences, parseErr := ParseSelection(resp.Content)
 		if parseErr == nil {
-			return ids, totalUsage, nil
+			return ids, confidences, totalUsage, nil
 		}
 		lastParseErr = parseErr
 	}
 	log.Printf("retrieval: selection parse failed after %d attempts (%v); returning empty selection", maxRetries+1, lastParseErr)
-	return nil, totalUsage, nil
+	return nil, nil, totalUsage, nil
 }
 
 // --- shared prompt scaffolding ---
@@ -141,15 +166,36 @@ Rules:
 - Prefer leaf sections. Include a parent only if the parent's own body is directly relevant.
 - Include as few sections as possible. Quality over quantity.
 - Only return IDs present in the provided outline. Do not invent IDs.
-- If nothing is relevant, return an empty list.`
+- If nothing is relevant, return an empty list.
+- Attach a confidence score in [0.0, 1.0] to every pick reflecting how
+  likely that section's body answers the query. Use the full range —
+  do NOT score every pick at 1.0. 0.0 means "no signal", 1.0 means
+  "near-certain". If you cannot reason about confidence at all, omit
+  the picks array and return the legacy selected_section_ids form
+  instead; the engine accepts both shapes.`
 
+// selectionJSONSchema is intentionally permissive: it accepts EITHER the
+// legacy { selected_section_ids: [...] } shape OR the new
+// { picks: [{id, confidence}] } shape so older / weaker models that
+// can't reason about confidence still work. ParseSelection accepts
+// both and returns confidences when present.
 const selectionJSONSchema = `{
   "type": "object",
   "properties": {
+    "picks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["id"]
+      }
+    },
     "selected_section_ids": {"type": "array", "items": {"type": "string"}},
     "reasoning": {"type": "string"}
-  },
-  "required": ["selected_section_ids"]
+  }
 }`
 
 // BuildSelectionPrompt renders the user-side prompt for a selection call.
@@ -174,7 +220,11 @@ func BuildSelectionPrompt(breadcrumb string, sections []tree.SectionView, siblin
 	}
 	b.WriteString("\nUser query:\n")
 	b.WriteString(query)
-	b.WriteString("\n\nReturn a JSON object with fields `selected_section_ids` (array of strings) and `reasoning` (string).")
+	b.WriteString("\n\nReturn a JSON object. Preferred shape:\n")
+	b.WriteString(`  {"picks": [{"id": "sec_x", "confidence": 0.82}, ...], "reasoning": "..."}` + "\n")
+	b.WriteString("confidence is a float in [0.0, 1.0] reflecting how likely the section's body answers the query. Use the full range; do not score every pick at 1.0.\n")
+	b.WriteString("Fallback shape (use ONLY if you cannot reason about confidence):\n")
+	b.WriteString(`  {"selected_section_ids": ["sec_x", ...], "reasoning": "..."}`)
 	return b.String()
 }
 
@@ -229,18 +279,50 @@ func firstCandidateQuestion(qs []string) string {
 	return ""
 }
 
-// selectionPayload is the expected JSON-mode shape.
-type selectionPayload struct {
-	SelectedSectionIDs []string `json:"selected_section_ids"`
-	Reasoning          string   `json:"reasoning"`
+// selectionPick is one entry in the new-shape selection response. The
+// `Confidence` field is a pointer so we can distinguish "model
+// returned 0.0" from "model omitted the field" — the latter means
+// "no signal for this pick" and skips the abstention check.
+type selectionPick struct {
+	ID         string   `json:"id"`
+	Confidence *float64 `json:"confidence,omitempty"`
 }
 
-// ParseSelection extracts the section-ID list from an LLM JSON response.
-// Tolerates code-fence wrappers and leading/trailing prose.
-func ParseSelection(raw string) ([]tree.SectionID, error) {
+// selectionPayload accepts both response shapes:
+//
+//   - New shape (preferred): {"picks": [{"id": "...", "confidence": 0.8}], ...}
+//   - Legacy shape: {"selected_section_ids": ["..."], ...}
+//
+// When `Picks` is non-empty it wins; otherwise `SelectedSectionIDs`
+// is used. This keeps backward compatibility with older models that
+// can't reason about confidence (or with the legacy schema enforced
+// by some provider integrations).
+type selectionPayload struct {
+	Picks              []selectionPick `json:"picks"`
+	SelectedSectionIDs []string        `json:"selected_section_ids"`
+	Reasoning          string          `json:"reasoning"`
+}
+
+// ParseSelection extracts the section-ID list and (when present) per-ID
+// confidence scores from an LLM JSON response. Tolerates code-fence
+// wrappers and leading/trailing prose.
+//
+// Returns:
+//
+//   - ids:         the section IDs the model picked, in the order the
+//                  model returned them.
+//   - confidences: map[id]float64 of per-pick confidences in [0.0, 1.0],
+//                  populated only when the model returned the new-shape
+//                  `picks` array. Returns nil (not an empty map) when
+//                  the response was the legacy shape OR when every pick
+//                  omitted its confidence — the distinction matters for
+//                  abstention, which fires only when confidence signal
+//                  is explicitly present.
+//   - err:         non-nil only when the JSON cannot be decoded at all.
+func ParseSelection(raw string) ([]tree.SectionID, map[tree.SectionID]float64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Strip ```json ... ``` fences if present.
 	if strings.HasPrefix(raw, "```") {
@@ -260,8 +342,51 @@ func ParseSelection(raw string) ([]tree.SectionID, error) {
 
 	var p selectionPayload
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return nil, fmt.Errorf("unmarshal selection: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal selection: %w", err)
 	}
+
+	// New shape wins. Even a single populated `picks` entry means the
+	// model attempted to follow the confidence protocol, so we honour
+	// it. Mixed responses (some picks with confidence, some without)
+	// surface only the present confidences — the missing ones are
+	// silently dropped from the confidence map, NOT defaulted to 0.
+	if len(p.Picks) > 0 {
+		ids := make([]tree.SectionID, 0, len(p.Picks))
+		confidences := make(map[tree.SectionID]float64, len(p.Picks))
+		seen := make(map[tree.SectionID]struct{}, len(p.Picks))
+		for _, pk := range p.Picks {
+			id := strings.TrimSpace(pk.ID)
+			if id == "" {
+				continue
+			}
+			sid := tree.SectionID(id)
+			if _, dup := seen[sid]; dup {
+				continue
+			}
+			seen[sid] = struct{}{}
+			ids = append(ids, sid)
+			if pk.Confidence != nil {
+				c := *pk.Confidence
+				// Clamp into [0, 1]. The model is instructed to stay
+				// in range; clamping is a defence-in-depth so a
+				// runaway value never poisons the abstention check.
+				if c < 0 {
+					c = 0
+				} else if c > 1 {
+					c = 1
+				}
+				confidences[sid] = c
+			}
+		}
+		if len(confidences) == 0 {
+			// New-shape response but no confidences populated → treat
+			// as legacy for abstention purposes.
+			confidences = nil
+		}
+		return ids, confidences, nil
+	}
+
+	// Legacy shape.
 	out := make([]tree.SectionID, 0, len(p.SelectedSectionIDs))
 	for _, id := range p.SelectedSectionIDs {
 		id = strings.TrimSpace(id)
@@ -269,7 +394,7 @@ func ParseSelection(raw string) ([]tree.SectionID, error) {
 			out = append(out, tree.SectionID(id))
 		}
 	}
-	return out, nil
+	return out, nil, nil
 }
 
 // FilterKnownIDs drops any IDs not present in the supplied section views and

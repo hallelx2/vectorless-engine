@@ -254,6 +254,42 @@ type RetrievalConfig struct {
 	Planning    PlanningBlock    `yaml:"planning"`
 	ReRank      ReRankBlock      `yaml:"rerank"`
 	Replay      ReplayBlock      `yaml:"replay"`
+	Abstain     AbstainBlock     `yaml:"abstain"`
+}
+
+// AbstainBlock configures the Phase 2.4 abstention behaviour.
+//
+// When the selection LLM returns per-pick confidence scores and every
+// confidence is below Below, the API layer (handleQuery /
+// handleAnswer) replaces the normal response with an abstention:
+// sections is empty and abstained=true. This refuses to ground an
+// answer in evidence the model itself isn't confident is relevant,
+// converting a likely hallucination into an honest "I don't know".
+//
+// Abstention fires only when explicit confidence signal is present.
+// Legacy-shape responses (no confidences) always fall through to the
+// normal path — the engine never abstains on the absence of signal.
+//
+// Per-request override: callers may set `enable_abstain` on the
+// /v1/query or /v1/answer body to opt out of abstention for one
+// request without restarting the server. When this block has
+// Enabled=false, no request abstains regardless of the per-request
+// flag.
+type AbstainBlock struct {
+	// Enabled toggles abstention at the server level. Default: true
+	// (opt-out).
+	Enabled bool `yaml:"enabled"`
+
+	// Below is the confidence threshold. Picks with confidence
+	// strictly less than Below are "not confident"; when ALL picks
+	// fall below this threshold the response is an abstention.
+	// Default: 0.4.
+	//
+	// The "all" semantics (vs "any") is deliberate: if even one
+	// section scored above the threshold, the engine has enough
+	// signal to surface it as evidence. Abstention is reserved for
+	// the case where every candidate is weak.
+	Below float64 `yaml:"below"`
 }
 
 // ReplayBlock configures the Phase 3.1 replay-trace store.
@@ -488,6 +524,10 @@ func Default() Config {
 				Enabled:    true,
 				MaxEntries: 1024,
 				TTLSeconds: 86400,
+			},
+			Abstain: AbstainBlock{
+				Enabled: true,
+				Below:   0.4,
 			},
 		},
 		Ingest: IngestConfig{
@@ -748,6 +788,19 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.Replay.TTLSeconds = n
 		}
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_ABSTAIN_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.Abstain.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.Abstain.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW"); v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f >= 0 && f <= 1 {
+			c.Retrieval.Abstain.Below = f
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -865,6 +918,10 @@ func (c Config) Validate() error {
 	}
 	if c.Retrieval.Replay.TTLSeconds < 0 {
 		return fmt.Errorf("retrieval.replay.ttl_seconds must be >= 0, got %d", c.Retrieval.Replay.TTLSeconds)
+	}
+
+	if c.Retrieval.Abstain.Below < 0 || c.Retrieval.Abstain.Below > 1 {
+		return fmt.Errorf("retrieval.abstain.below must be in [0.0, 1.0], got %v", c.Retrieval.Abstain.Below)
 	}
 
 	return nil

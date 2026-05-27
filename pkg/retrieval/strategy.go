@@ -61,9 +61,20 @@ func (b ContextBudget) Available() int {
 // reasoning trace and cost accounting when the strategy supports it.
 type Result struct {
 	SelectedIDs []tree.SectionID `json:"selected_ids"`
-	Reasoning   string           `json:"reasoning,omitempty"`
-	ModelUsed   string           `json:"model_used,omitempty"`
-	Usage       Usage            `json:"usage"`
+
+	// Confidences carries per-pick relevance confidence in [0.0, 1.0]
+	// when the selection LLM returned the new-shape response with
+	// explicit confidence scores. Keys are restricted to IDs present in
+	// SelectedIDs (post-filter / post-merge). Nil when no confidence
+	// signal was present — either the legacy response shape was used or
+	// the model did not populate any confidence value. The API layer's
+	// abstention check fires only when this map is non-empty (see
+	// internal/api.handleQuery / handleAnswer).
+	Confidences map[tree.SectionID]float64 `json:"confidences,omitempty"`
+
+	Reasoning string `json:"reasoning,omitempty"`
+	ModelUsed string `json:"model_used,omitempty"`
+	Usage     Usage  `json:"usage"`
 
 	// HopsTaken is the number of LLM turns the strategy issued to reach the
 	// final selection. Single-shot strategies set this to 1; iterative

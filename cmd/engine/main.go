@@ -209,6 +209,7 @@ func run() error {
 		ReRanker:   reRanker,
 		ReRank:     cfg.Retrieval.ReRank,
 		Replay:     replayStore,
+		Abstain:    cfg.Retrieval.Abstain,
 	}
 
 	srv := &http.Server{

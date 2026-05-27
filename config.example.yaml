@@ -182,6 +182,34 @@ retrieval:
     # re-rank pass to do the final selection.
     top_k: 0
 
+  # abstain: Phase 2.4 abstention. When the selection LLM returns
+  # per-pick confidence scores (the new picks shape) and every
+  # confidence falls below `below`, /v1/query and /v1/answer skip the
+  # normal path and return an abstention response instead:
+  #   {abstained: true, abstention_reason: "...", sections: [],
+  #    min_confidence_threshold: 0.4, candidate_confidences: {...}}
+  # For /v1/answer the synthesis call is skipped entirely; the answer
+  # is the honest "I cannot answer this question from the supplied
+  # document." This trades a likely hallucination for a clear refusal
+  # when the engine's own confidence is weak.
+  #
+  # OPT-OUT. Default enabled. Per-request `enable_abstain` body field
+  # overrides this block. When the selection LLM returns the legacy
+  # shape (no confidence scores) the engine never abstains regardless
+  # of this setting — abstention requires explicit confidence signal.
+  #
+  # The check is "all picks below threshold". If any pick scored
+  # above, the engine surfaces that section as evidence — abstention
+  # is reserved for the case where every candidate is weak.
+  abstain:
+    enabled: true
+    # Confidence threshold in [0.0, 1.0]. Picks with confidence
+    # strictly less than this are "not confident"; when ALL picks
+    # fall below, the response is an abstention. 0.4 is the default
+    # — high enough to filter weak matches, low enough not to
+    # suppress legitimate partial answers.
+    below: 0.4
+
   # replay: Phase 3.1 reproducibility store. Every /v1/query and
   # /v1/answer response carries a deterministic `trace_token`; the
   # response body is stored in an in-memory LRU under that token so
