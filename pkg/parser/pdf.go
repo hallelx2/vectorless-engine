@@ -152,15 +152,17 @@ func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 
 	reader, err := pdflib.NewReader(bytes.NewReader(docBytes), int64(len(docBytes)))
 	if err != nil {
-		// ledongthuc/pdf can fail on PDFs pdftable accepts (e.g. some
-		// xref-stream variants). Outline access is optional, so a
-		// failure here is not fatal — we just skip the outline path.
-		// Log at debug level and carry on with the heuristic flow.
-		slog.Debug("pdf: outline backend unavailable", "err", err)
-		reader = nil
+		// ledongthuc/pdf failed on a PDF pdftable accepted (some
+		// xref-stream variants are pdftable-only). Without ledongthuc
+		// we lose both outline access AND the primitive layer the
+		// row extractor uses — so we bail with a clear message rather
+		// than emit garbled text from pdftable.Words() (its word
+		// grouping concatenates words on standard-14 fonts without
+		// AFM metrics; see v0.4.x followup).
+		return nil, fmt.Errorf("pdf: open: ledongthuc/pdf backend rejected the document: %w", err)
 	}
 
-	rows, err := extractPDFRows(pdoc)
+	rows, err := extractPDFRows(reader)
 	if err != nil {
 		return nil, err
 	}
@@ -526,33 +528,37 @@ type pdfRow struct {
 // The bucket tolerance (Y1 within 2pt) matches what the previous
 // ledongthuc-backed implementation used; word-level Y1 jitter is the
 // same scale as the per-glyph jitter it replaced.
-func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
-	numPages := doc.NumPages()
+// extractPDFRows walks each page, grouping glyphs into rows by Y-position
+// and recording the dominant font size + bold ratio per row.
+//
+// We use ledongthuc/pdf's Content() as the primitive source rather than
+// pdftable.Words() because pdftable v0.3.0's word grouping silently
+// concatenates adjacent words on the standard-14 fonts SEC filings use
+// (no bundled AFM widths → glyph X-advance estimated wrong → word
+// X-gaps collapse → "Currentmarketablesecurities"). The X-gap-into-spaces
+// heuristic below is robust to that because we never trust pdftable's
+// word boundaries — we re-derive them from raw glyph X positions.
+//
+// Once pdftable bundles standard-14 AFM metrics (v0.4.x goal) we can
+// swap back to its Words() output.
+func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
+	numPages := reader.NumPage()
 	var out []pdfRow
 
 	for pageNum := 1; pageNum <= numPages; pageNum++ {
-		page, err := doc.Page(pageNum)
-		if err != nil {
-			// A bad page shouldn't take down the document — pdftable
-			// can fail page-by-page on malformed content streams. Skip.
+		page := reader.Page(pageNum)
+		if page.V.IsNull() {
 			continue
 		}
-		words, err := page.Words(pdftable.DefaultWordOpts())
-		if err != nil {
-			continue
-		}
-		if len(words) == 0 {
-			continue
-		}
+		content := page.Content()
 
-		// Group words by visual top (Y1). Values within 2pt are
-		// considered the same row — pdftable already clusters chars
-		// into words by its own YTolerance, so this is just the next
-		// step up: words at near-identical baselines become a row.
+		// Group letters by (approximate) baseline Y. Values within 2pt
+		// are considered the same row — PDFs frequently jitter Y by a
+		// fraction.
 		type rowBucket struct {
 			y     float64
 			maxFS float64
-			words []pdftable.Word
+			chars []pdflib.Text
 		}
 		var buckets []*rowBucket
 		find := func(y float64) *rowBucket {
@@ -565,53 +571,113 @@ func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
 			buckets = append(buckets, b)
 			return b
 		}
-		for _, w := range words {
-			b := find(w.Y1)
-			b.words = append(b.words, w)
-			if w.FontSize > b.maxFS {
-				b.maxFS = w.FontSize
+		for _, t := range content.Text {
+			b := find(t.Y)
+			b.chars = append(b.chars, t)
+			if t.FontSize > b.maxFS {
+				b.maxFS = t.FontSize
 			}
 		}
-		// Sort rows top-to-bottom (higher Y = higher on page in PDF
-		// user space).
 		sort.Slice(buckets, func(i, j int) bool { return buckets[i].y > buckets[j].y })
 
 		for _, b := range buckets {
-			sort.Slice(b.words, func(i, j int) bool { return b.words[i].X0 < b.words[j].X0 })
+			sort.Slice(b.chars, func(i, j int) bool { return b.chars[i].X < b.chars[j].X })
 			var sb strings.Builder
-			boldWords, totalWords := 0, 0
-			for i, w := range b.words {
-				if i > 0 {
+			var lastX float64
+			boldGlyphs, totalGlyphs := 0, 0
+			for i, ch := range b.chars {
+				// Insert a space when the gap between the previous
+				// glyph's end and this glyph's start exceeds 0.20 of
+				// the font size. Tuned against real PDFs (arXiv +
+				// SEC 10-Ks): word-boundary gaps land around
+				// 0.20-0.30·fontSize; intra-word kerning stays well
+				// below 0.10.
+				if i > 0 && ch.X-lastX > ch.FontSize*0.20 {
 					sb.WriteString(" ")
 				}
-				sb.WriteString(w.Text)
-				if strings.TrimSpace(w.Text) != "" {
-					totalWords++
-					if isBoldFont(w.FontName) {
-						boldWords++
+				sb.WriteString(ch.S)
+				lastX = ch.X + ch.W
+				if strings.TrimSpace(ch.S) != "" {
+					totalGlyphs++
+					if isBoldFont(ch.Font) {
+						boldGlyphs++
 					}
 				}
 			}
-			text := strings.TrimSpace(sb.String())
+			// Wide letter-tracking — common on filing cover pages and
+			// bold section headers — makes every glyph gap exceed the
+			// space threshold, yielding "U N I T E D   S T A T E S".
+			// Re-join those runs into real words.
+			text := collapseLetterSpacing(strings.TrimSpace(sb.String()))
 			if text == "" {
 				continue
 			}
-			// Drop publisher/preprint boilerplate (e.g. the rotated
-			// arXiv license stamp in the left margin). Left in, it
-			// pollutes the structure with junk top-level "headings"
-			// and the document title.
 			if isBoilerplateLine(text) {
 				continue
 			}
 			out = append(out, pdfRow{
 				page:     pageNum,
 				fontSize: b.maxFS,
-				bold:     totalWords > 0 && boldWords*2 > totalWords,
+				bold:     totalGlyphs > 0 && boldGlyphs*2 > totalGlyphs,
 				text:     text,
 			})
 		}
 	}
 	return out, nil
+}
+
+// multiSpaceRe matches two or more consecutive whitespace characters.
+var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
+
+// looksLetterSpaced reports whether s appears to have been rendered with
+// wide letter-tracking — a chain of single characters separated by
+// spaces ("U N I T E D"). Used to detect cover-page / heading rows that
+// the glyph-spacing heuristic over-split.
+func looksLetterSpaced(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 5 {
+		return false
+	}
+	parts := strings.Fields(s)
+	if len(parts) < 4 {
+		return false
+	}
+	singles := 0
+	for _, p := range parts {
+		if len(p) <= 1 {
+			singles++
+		}
+	}
+	// At least half of the parts must be single characters for us to
+	// call the run letter-spaced.
+	return singles*2 >= len(parts)
+}
+
+// collapseLetterSpacing rejoins runs of single-character "words"
+// (the artifact of wide letter-tracking) into real words. Multi-space
+// gaps between letter-spaced groups become regular word boundaries.
+func collapseLetterSpacing(s string) string {
+	if !looksLetterSpaced(s) {
+		return s
+	}
+	// Split on runs of 2+ spaces to identify word groups, then collapse
+	// each group's single-character chain.
+	groups := multiSpaceRe.Split(s, -1)
+	for i, g := range groups {
+		parts := strings.Fields(g)
+		// If every part is a single character, glue them.
+		allSingles := true
+		for _, p := range parts {
+			if len(p) > 1 {
+				allSingles = false
+				break
+			}
+		}
+		if allSingles {
+			groups[i] = strings.Join(parts, "")
+		}
+	}
+	return strings.Join(groups, " ")
 }
 
 // buildHeadingLevelMap returns a map from rounded-font-size → heading level
