@@ -151,6 +151,22 @@ func run() error {
 		}
 	}
 
+	// Replay store: Phase 3.1. On by default; operators opt out via
+	// retrieval.replay.enabled=false (or VLE_RETRIEVAL_REPLAY_ENABLED=false).
+	// In-memory only — Phase 3.2 will swap this for a durable store
+	// behind the same retrieval.ReplayStore interface.
+	var replayStore retrieval.ReplayStore
+	if cfg.Retrieval.Replay.Enabled {
+		replayStore = retrieval.NewLRUReplayStore(retrieval.LRUReplayConfig{
+			MaxEntries: cfg.Retrieval.Replay.MaxEntries,
+			TTL:        time.Duration(cfg.Retrieval.Replay.TTLSeconds) * time.Second,
+		})
+		logger.Info("retrieval: replay store enabled",
+			"max_entries", cfg.Retrieval.Replay.MaxEntries,
+			"ttl_seconds", cfg.Retrieval.Replay.TTLSeconds,
+		)
+	}
+
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                   pool,
 		Storage:              store,
@@ -181,6 +197,7 @@ func run() error {
 		Planning:   cfg.Retrieval.Planning,
 		ReRanker:   reRanker,
 		ReRank:     cfg.Retrieval.ReRank,
+		Replay:     replayStore,
 	}
 
 	srv := &http.Server{
