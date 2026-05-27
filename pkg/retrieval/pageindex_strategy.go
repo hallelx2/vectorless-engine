@@ -77,6 +77,36 @@ type PageIndexStrategy struct {
 	// for every turn. Useful for routing the navigation loop to a
 	// cheaper or faster model than the rest of the engine.
 	ModelOverride string
+
+	// OnEvent, when non-nil, is invoked synchronously once per
+	// tool call so callers (e.g. the /v1/answer/pageindex SSE
+	// handler) can stream the navigation in real time. The hook
+	// runs inside the loop, after the tool result is computed but
+	// before the next LLM hop. Implementations MUST be cheap and
+	// MUST NOT block; a blocked hook stalls retrieval.
+	OnEvent func(PageIndexEvent)
+}
+
+// PageIndexEvent is a single observable step in the strategy's
+// navigation loop. Consumers convert these to whatever wire format
+// they need (SSE, gRPC stream, console log).
+//
+// Type carries the tool tag (get_document_structure / get_pages /
+// done). For get_pages, StartPage/EndPage/CharCount/SectionIDs are
+// populated; for done, Answer + CitedPages are populated. The Hop
+// field is the 1-indexed turn number so consumers can interleave
+// hops from concurrent requests.
+type PageIndexEvent struct {
+	Hop        int              `json:"hop"`
+	Type       string           `json:"type"`
+	Reasoning  string           `json:"reasoning,omitempty"`
+	StartPage  int              `json:"start_page,omitempty"`
+	EndPage    int              `json:"end_page,omitempty"`
+	CharCount  int              `json:"char_count,omitempty"`
+	SectionIDs []tree.SectionID `json:"section_ids,omitempty"`
+	Answer     string           `json:"answer,omitempty"`
+	CitedPages [][2]int         `json:"cited_pages,omitempty"`
+	Note       string           `json:"note,omitempty"`
 }
 
 // defaultPageIndexMaxHops bounds the loop. Eight turns is enough for
@@ -252,7 +282,13 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 			finalReasoning = strings.TrimSpace(action.Reasoning)
 			citedRanges = normaliseRanges(action.CitedPages, maxPage)
 			selectedIDs := sectionsOverlapping(sections, citedRanges)
-			_ = finalReasoning // the answer-string is what callers consume
+			s.emit(PageIndexEvent{
+				Hop:        hopsTaken,
+				Type:       pageActionDone,
+				Reasoning:  finalReasoning,
+				Answer:     finalAnswer,
+				CitedPages: action.CitedPages,
+			})
 			return &Result{
 				SelectedIDs: selectedIDs,
 				Reasoning:   finalAnswer, // /v1/answer/pageindex reads this
@@ -269,6 +305,12 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Role:    llmgate.RoleUser,
 				Content: wrapPageObservation("get_document_structure", obs),
 			})
+			s.emit(PageIndexEvent{
+				Hop:       hopsTaken,
+				Type:      pageActionStructure,
+				Reasoning: action.Reasoning,
+				CharCount: len(obs),
+			})
 
 		case pageActionGetPages:
 			start, end, ok := clampRange(action.StartPage, action.EndPage, maxPage)
@@ -278,6 +320,14 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 					Content: wrapPageObservation("get_pages",
 						fmt.Sprintf("invalid range start=%d end=%d (document has %d pages). Pages are 1-indexed inclusive.",
 							action.StartPage, action.EndPage, maxPage)),
+				})
+				s.emit(PageIndexEvent{
+					Hop:       hopsTaken,
+					Type:      pageActionGetPages,
+					Reasoning: action.Reasoning,
+					StartPage: action.StartPage,
+					EndPage:   action.EndPage,
+					Note:      "invalid range",
 				})
 				continue
 			}
@@ -293,12 +343,26 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Content: wrapPageObservation("get_pages",
 					fmt.Sprintf("pages %d-%d (%d sections, %d chars):\n%s", start, end, len(sectionIDs), len(text), text)),
 			})
+			s.emit(PageIndexEvent{
+				Hop:        hopsTaken,
+				Type:       pageActionGetPages,
+				Reasoning:  action.Reasoning,
+				StartPage:  start,
+				EndPage:    end,
+				CharCount:  len(text),
+				SectionIDs: sectionIDs,
+			})
 
 		default:
 			msgs = append(msgs, llmgate.Message{
 				Role: llmgate.RoleUser,
 				Content: wrapPageObservation(action.Action,
 					fmt.Sprintf("unsupported tool %q. Use one of: get_document_structure, get_pages, done.", action.Action)),
+			})
+			s.emit(PageIndexEvent{
+				Hop:  hopsTaken,
+				Type: action.Action,
+				Note: "unsupported tool",
 			})
 		}
 	}
@@ -322,6 +386,16 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 		PagesRead:   pagesRead,
 		TraceToken:  computePageIndexTraceToken(t.DocumentID, model, citedRanges),
 	}, nil
+}
+
+// emit dispatches one event to the registered OnEvent hook, if any.
+// Hooks run synchronously inside the navigation loop and MUST be
+// cheap; callers that need to do I/O should buffer first and write
+// outside the strategy's critical path.
+func (s *PageIndexStrategy) emit(ev PageIndexEvent) {
+	if s.OnEvent != nil {
+		s.OnEvent(ev)
+	}
 }
 
 // initialUserPrompt is the very first user turn. It explains the

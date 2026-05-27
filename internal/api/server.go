@@ -98,6 +98,28 @@ type Deps struct {
 	// carries abstained=true and an empty sections / citations list
 	// rather than risk hallucinating an answer from weak evidence.
 	Abstain config.AbstainBlock
+
+	// PageIndexStrategy is the dedicated page-based agentic strategy
+	// instance used by /v1/answer/pageindex. Wired in main.go from
+	// the same storage backend the rest of the engine uses, even
+	// when the selection strategy chosen by retrieval.strategy is
+	// something else. Nil disables the endpoint (returns 501) along
+	// with PageIndex.Enabled=false.
+	PageIndexStrategy *retrieval.PageIndexStrategy
+
+	// PageIndex carries the server-side config for the page-based
+	// answer endpoint. The body-level fields max_hops /
+	// max_pages_per_fetch on /v1/answer/pageindex override
+	// PageIndex.MaxHops / PageIndex.PageContentLimit per request.
+	PageIndex config.PageIndexBlock
+
+	// PageIndexTreeLoader is a test seam that overrides how the
+	// /v1/answer/pageindex handler resolves the document tree.
+	// Nil routes through d.DB.LoadTree (the production path).
+	// Tests set this to a deterministic in-memory function so the
+	// handler can run end-to-end via httptest without a real
+	// Postgres backend.
+	PageIndexTreeLoader func(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error)
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -124,6 +146,7 @@ func Router(d Deps) http.Handler {
 		r.Post("/query", d.handleQuery)
 		r.Post("/query/multi", d.handleQueryMulti)
 		r.Post("/answer", d.handleAnswer)
+		r.Post("/answer/pageindex", d.handleAnswerPageIndex)
 		r.Post("/replay", d.handleReplay)
 	})
 

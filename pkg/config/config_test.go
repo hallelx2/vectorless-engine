@@ -525,7 +525,7 @@ func TestValidateLLMDrivers(t *testing.T) {
 
 func TestValidateRetrievalStrategy(t *testing.T) {
 	t.Parallel()
-	for _, s := range []string{"single-pass", "chunked-tree"} {
+	for _, s := range []string{"single-pass", "chunked-tree", "agentic", "pageindex"} {
 		cfg := Default()
 		cfg.Database.URL = "postgres://localhost/test"
 		cfg.Retrieval.Strategy = s
@@ -539,6 +539,126 @@ func TestValidateRetrievalStrategy(t *testing.T) {
 	cfg.Retrieval.Strategy = "beam-search"
 	if err := cfg.Validate(); err == nil {
 		t.Error("unknown strategy should fail")
+	}
+}
+
+// TestPageIndexDefaults locks in the PageIndex block's defaults so
+// a regression on shipping values is loud. Endpoint enabled by
+// default, 8 hops, 16K char limit.
+func TestPageIndexDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if !cfg.Retrieval.PageIndex.Enabled {
+		t.Error("retrieval.pageindex.enabled should default to true (opt-out)")
+	}
+	if cfg.Retrieval.PageIndex.MaxHops != 8 {
+		t.Errorf("max_hops = %d, want 8", cfg.Retrieval.PageIndex.MaxHops)
+	}
+	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
+		t.Errorf("page_content_limit = %d, want 16000", cfg.Retrieval.PageIndex.PageContentLimit)
+	}
+	if cfg.Retrieval.PageIndex.Model != "" {
+		t.Errorf("model default should be empty (inherit), got %q", cfg.Retrieval.PageIndex.Model)
+	}
+}
+
+// TestPageIndexEnvOverride exercises every env knob the PageIndex
+// block exposes.
+func TestPageIndexEnvOverride(t *testing.T) {
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED")
+	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
+	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
+	prevModel := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", prevModel)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", "false")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "12")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "32000")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", "gemini-2.0-flash")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if cfg.Retrieval.PageIndex.Enabled {
+		t.Error("VLE_RETRIEVAL_PAGEINDEX_ENABLED=false should disable")
+	}
+	if cfg.Retrieval.PageIndex.MaxHops != 12 {
+		t.Errorf("max_hops = %d, want 12", cfg.Retrieval.PageIndex.MaxHops)
+	}
+	if cfg.Retrieval.PageIndex.PageContentLimit != 32000 {
+		t.Errorf("page_content_limit = %d, want 32000", cfg.Retrieval.PageIndex.PageContentLimit)
+	}
+	if cfg.Retrieval.PageIndex.Model != "gemini-2.0-flash" {
+		t.Errorf("model = %q, want gemini-2.0-flash", cfg.Retrieval.PageIndex.Model)
+	}
+}
+
+// TestPageIndexEnvOverrideEnable: toggle on from an explicitly
+// disabled state.
+func TestPageIndexEnvOverrideEnable(t *testing.T) {
+	prev := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED")
+	defer os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", prev)
+
+	cfg := Default()
+	cfg.Retrieval.PageIndex.Enabled = false
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", "true")
+	applyEnvOverrides(&cfg)
+	if !cfg.Retrieval.PageIndex.Enabled {
+		t.Error("VLE_RETRIEVAL_PAGEINDEX_ENABLED=true should enable from disabled")
+	}
+}
+
+// TestPageIndexEnvOverrideRejectsBad: garbled numerics preserve the
+// default rather than silently zeroing the cap.
+func TestPageIndexEnvOverrideRejectsBad(t *testing.T) {
+	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
+	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "abc")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "not-a-number")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Retrieval.PageIndex.MaxHops != 8 {
+		t.Errorf("garbage max_hops env should preserve default 8, got %d", cfg.Retrieval.PageIndex.MaxHops)
+	}
+	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
+		t.Errorf("garbage page_content_limit env should preserve default, got %d", cfg.Retrieval.PageIndex.PageContentLimit)
+	}
+}
+
+// TestValidatePageIndexNegatives: negatives rejected by Validate.
+func TestValidatePageIndexNegatives(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Database.URL = "postgres://localhost/test"
+	cfg.Retrieval.PageIndex.MaxHops = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative max_hops should fail validation")
+	}
+
+	cfg2 := Default()
+	cfg2.Database.URL = "postgres://localhost/test"
+	cfg2.Retrieval.PageIndex.PageContentLimit = -1
+	if err := cfg2.Validate(); err == nil {
+		t.Error("negative page_content_limit should fail validation")
+	}
+
+	cfg3 := Default()
+	cfg3.Database.URL = "postgres://localhost/test"
+	cfg3.Retrieval.PageIndex.MaxHops = 0
+	cfg3.Retrieval.PageIndex.PageContentLimit = 0
+	if err := cfg3.Validate(); err != nil {
+		t.Errorf("zero values should pass (defaults applied at runtime): %v", err)
 	}
 }
 
