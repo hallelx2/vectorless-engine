@@ -89,6 +89,27 @@ type Result struct {
 	// regardless of reasoning path. Empty when the strategy did not
 	// populate it (e.g. tests, fallback paths).
 	TraceToken string `json:"trace_token,omitempty"`
+
+	// PagesRead records the page ranges the strategy actually fetched
+	// during navigation. Page-based strategies (e.g. pageindex)
+	// populate this; section-by-section strategies leave it nil.
+	// Useful for the API layer's reasoning-trace surfaces and for
+	// cost/coverage debugging: a 10-K answer that read pages 50-55 +
+	// 102-104 leaves a concrete page footprint behind.
+	PagesRead []PageReadEntry `json:"pages_read,omitempty"`
+}
+
+// PageReadEntry is one get_pages tool call that materialised during a
+// page-based retrieval loop. StartPage and EndPage are inclusive,
+// 1-indexed. SectionIDs lists every section whose [PageStart,PageEnd]
+// overlapped the requested range. CharCount records the size of the
+// returned text after PageContentLimit clipping so cost reporting can
+// reflect bytes-on-the-wire, not bytes-requested.
+type PageReadEntry struct {
+	StartPage  int              `json:"start_page"`
+	EndPage    int              `json:"end_page"`
+	SectionIDs []tree.SectionID `json:"section_ids,omitempty"`
+	CharCount  int              `json:"char_count,omitempty"`
 }
 
 // Usage is the aggregated token + cost accounting across all LLM calls
