@@ -279,6 +279,93 @@ paths:
         "501":
           description: Endpoint not available — no LLM client configured
 
+  /v1/answer/pageindex:
+    post:
+      tags: [Query]
+      summary: PageIndex-style page-based agentic answer
+      operationId: answerPageIndex
+      description: |
+        Quote-grounded answer endpoint backed by the page-based
+        agentic strategy. The model navigates the document via a
+        three-tool loop:
+
+          1. get_document_structure() — returns the TOC tree
+             (titles + page ranges, no body text).
+          2. get_pages(start_page, end_page) — returns the
+             concatenated content of every section whose page
+             range overlaps the requested range.
+          3. done(answer, cited_pages, reasoning) — terminates
+             with the natural-language answer plus the inclusive
+             page ranges the answer relies on.
+
+        Unlike /v1/answer this endpoint runs no separate
+        synthesis call — the model produces the final answer
+        inside the done tool call. Citations are per-page-range
+        with answer-span quotes pulled from the cited content.
+
+        Differentiators:
+          - `trace_token` substrate is reused: the page-based
+            input set (sorted cited page ranges) is folded into
+            the same sha256 the per-section endpoints use, so
+            /v1/replay accepts page-index responses uniformly.
+          - `reasoning_trace` lists every tool call the agent
+            made, opt-in via body `reasoning:true` or query
+            `?reasoning=true`.
+          - Streaming (`stream:true`) returns Server-Sent
+            Events with one event per tool call.
+
+        Gracefully degrades when no LLM-built TOC tree has
+        been persisted for the document yet — the strategy
+        synthesises a TOC view from the section list rather
+        than failing the request.
+      parameters:
+        - name: reasoning
+          in: query
+          required: false
+          description: |
+            Alternative to the body's `reasoning` field. When set
+            to `true` the response carries a `reasoning_trace`
+            array describing every tool call.
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PageIndexAnswerRequest"
+      responses:
+        "200":
+          description: |
+            Synthesised answer plus page-grounded citations. When
+            `stream` is `true`, the response is Server-Sent
+            Events (Content-Type `text/event-stream`) rather than
+            JSON; see the description for event types.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageIndexAnswerResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE event stream. Event types emitted in
+                  order: `started`, one event per tool call
+                  (`get_document_structure`, `get_pages`,
+                  `done`), and finally `answer` carrying the
+                  full PageIndexAnswerResponse payload. On
+                  error a single `error` event is emitted.
+        "400":
+          description: Missing or invalid request body.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          description: |
+            Endpoint not available. Either the server has no LLM
+            client configured, or
+            `retrieval.pageindex.enabled=false`, or the
+            PageIndexStrategy instance was not wired at boot.
+
   /v1/replay:
     post:
       tags: [Query]
@@ -578,7 +665,7 @@ components:
           type: string
         strategy:
           type: string
-          enum: [single-pass, chunked-tree, agentic]
+          enum: [single-pass, chunked-tree, agentic, pageindex]
         model:
           type: string
         sections:
@@ -947,6 +1034,249 @@ components:
             Re-rank relevance score on a 0-100 scale. Omitted when no
             re-rank ran. Higher means the section is more directly
             relevant to the query.
+
+    PageIndexAnswerRequest:
+      type: object
+      description: |
+        Body for POST /v1/answer/pageindex. The endpoint exposes
+        per-request overrides for the page-based loop's caps
+        (max_hops, max_pages_per_fetch) alongside the standard
+        document_id / query / model fields.
+      required: [document_id, query]
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+          description: Natural-language query.
+        model:
+          type: string
+          description: |
+            Override the LLM model used by the navigation loop.
+            Falls back to `retrieval.pageindex.model`, then to the
+            engine's default model.
+        max_hops:
+          type: integer
+          description: |
+            Cap on the number of LLM turns the loop consumes,
+            counting the terminal `done` turn. Overrides
+            `retrieval.pageindex.max_hops` for this request only.
+            Default at the server level is 8.
+        max_pages_per_fetch:
+          type: integer
+          description: |
+            Cap on the characters one `get_pages` tool call may
+            return. Keeps a stray full-document fetch from
+            torching the model's context window. Overrides
+            `retrieval.pageindex.page_content_limit`. Default
+            16000.
+        stream:
+          type: boolean
+          description: |
+            When true, the response is Server-Sent Events: one
+            event per tool call (get_document_structure /
+            get_pages / done) followed by a terminal `answer`
+            event carrying the full PageIndexAnswerResponse
+            payload. Lets the caller WATCH the agent navigate
+            in real time rather than waiting for the final
+            answer.
+        reasoning:
+          type: boolean
+          description: |
+            When true, the response carries a `reasoning_trace`
+            array describing every tool call the agent made
+            (hop, tool tag, args, optional sections-touched and
+            result-chars metadata). Equivalent to the
+            `?reasoning=true` query parameter.
+
+    PageIndexAnswerResponse:
+      type: object
+      description: |
+        Non-streaming response shape. The `answer` field carries
+        the agent's natural-language reply produced inside the
+        terminal `done` tool call (no separate synthesis call).
+        Citations are per-page-range (not per-section) with
+        answer-span quotes pulled from the cited content.
+      properties:
+        document_id:
+          type: string
+        query:
+          type: string
+        answer:
+          type: string
+          description: |
+            Natural-language answer the agent emitted inside its
+            terminal `done` tool call. Empty when the loop hit
+            max_hops without the model finalising — callers
+            should fall through to a manual /v1/query or retry.
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/PageIndexCitation"
+        strategy:
+          type: string
+          enum: [pageindex]
+        model:
+          type: string
+        hops_taken:
+          type: integer
+          description: |
+            Number of LLM turns the loop consumed, counting any
+            forced terminal turn fired when max_hops was hit.
+        usage:
+          type: object
+          properties:
+            input_tokens: {type: integer}
+            output_tokens: {type: integer}
+            total_tokens: {type: integer}
+            cost_usd: {type: number}
+            llm_calls: {type: integer}
+        elapsed_ms:
+          type: integer
+        trace_token:
+          type: string
+          description: |
+            Deterministic 64-char hex sha256 token over the
+            document, system-prompt version, "pageindex:" model
+            tag, and sorted cited page ranges (e.g. ["1-2","5-7"]).
+            Two runs that cite the same pages — even via
+            different navigation paths — collapse to the same
+            token. Pass to /v1/replay with the original `query`
+            and `document_id` to fetch the byte-identical
+            response.
+        pages_read:
+          type: array
+          items:
+            $ref: "#/components/schemas/PageReadEntry"
+          description: |
+            Every `get_pages` invocation the loop made,
+            including ones whose ranges the model did not end
+            up citing. Useful for cost debugging and for
+            building a "navigation timeline" UI.
+        reasoning_trace:
+          type: array
+          items:
+            $ref: "#/components/schemas/PageIndexTraceEntry"
+          description: |
+            Per-hop tool calls + arg summaries. Present only
+            when the request opted in via `reasoning:true` or
+            `?reasoning=true`.
+
+    PageIndexCitation:
+      type: object
+      description: |
+        One citation behind the agent's answer. The pages
+        identify the cited range; `section_ids` lists every
+        section whose page range overlaps it; `quote` is the
+        verbatim answer-span the extractor judged most
+        relevant. When the extractor finds nothing in the
+        cited content the `quote` field is omitted (no
+        sentinel: absent means absent).
+      properties:
+        start_page:
+          type: integer
+          description: Inclusive first page in the citation.
+        end_page:
+          type: integer
+          description: Inclusive last page in the citation.
+        section_ids:
+          type: array
+          items:
+            type: string
+          description: |
+            Every section whose [page_start,page_end] overlaps
+            this citation, in document order.
+        quote:
+          type: string
+          description: |
+            Verbatim quote from the cited content judged most
+            relevant to the query. Omitted when no quote was
+            extracted (e.g. extractor returned nothing).
+        quote_start:
+          type: integer
+          description: |
+            Byte offset of the quote in the concatenated cited
+            content. -1 when the extractor returned a quote but
+            could not locate it verbatim (typically a
+            paraphrase).
+        quote_end:
+          type: integer
+
+    PageReadEntry:
+      type: object
+      description: |
+        One `get_pages` call the agent made during navigation.
+        Surfaces what the model actually fetched (sections
+        touched + char count) rather than what it cited, so a
+        reviewer can audit the full evidence cone.
+      properties:
+        start_page:
+          type: integer
+        end_page:
+          type: integer
+        section_ids:
+          type: array
+          items:
+            type: string
+        char_count:
+          type: integer
+          description: |
+            Number of characters returned to the model after
+            clipping at `page_content_limit`. Bytes-on-the-wire,
+            not bytes-requested.
+
+    PageIndexTraceEntry:
+      type: object
+      description: |
+        One tool call in the navigation timeline. Lets a
+        reviewer watch the agent's reasoning without paying for
+        a full streaming connection.
+      properties:
+        hop:
+          type: integer
+          description: 1-indexed turn number.
+        tool:
+          type: string
+          enum: [get_document_structure, get_pages, done]
+        reasoning:
+          type: string
+          description: |
+            One-sentence rationale the agent emitted alongside
+            the tool call. Populated only when the model
+            actually filled the `reasoning` field on the call.
+        args:
+          type: object
+          description: |
+            Tool-specific arguments. For `get_pages`,
+            `start_page` and `end_page`; for `done`,
+            `cited_pages`. Omitted for `get_document_structure`
+            (no args).
+        result_chars:
+          type: integer
+          description: |
+            Number of characters the tool result returned.
+            Populated for `get_pages` and (when present)
+            `get_document_structure`.
+        sections_touched:
+          type: array
+          items:
+            type: string
+          description: |
+            Section IDs the `get_pages` call materialised
+            content from.
+        answer:
+          type: string
+          description: |
+            The agent's final-turn answer string. Present only
+            on the terminal `done` entry; mirrors the
+            top-level `answer` field for debuggers reading the
+            trace.
+        note:
+          type: string
+          description: |
+            Optional human-readable note (e.g. "invalid range"
+            when the model asked for pages past the document's
+            end).
 
     ReplayRequest:
       type: object

@@ -95,7 +95,20 @@ llm:
     reasoning_model: "gemini-2.5-pro"
 
 retrieval:
-  # strategy: single-pass | chunked-tree
+  # strategy: single-pass | chunked-tree | agentic | pageindex
+  #
+  #   single-pass:  whole tree in one LLM call; fastest, smallest docs.
+  #   chunked-tree: split the tree, reason over slices in parallel, merge.
+  #                 The default. Scales to any tree size by trading
+  #                 context for parallelism.
+  #   agentic:      iterative outline → expand → read → done loop.
+  #                 Picks per-section IDs via a tool-using model.
+  #   pageindex:    PageIndex-style page-based agentic loop. Three
+  #                 tools (get_document_structure / get_pages / done);
+  #                 the model navigates by INCLUSIVE PAGE RANGE
+  #                 rather than by section ID. Best for paginated
+  #                 documents (SEC filings, academic PDFs) where the
+  #                 per-section interface is too noisy.
   strategy: "chunked-tree"
 
   chunked_tree:
@@ -231,6 +244,54 @@ retrieval:
     # How long an entry remains valid. 86400 = 24 hours. Long
     # audit flows may bump this; tight memory budgets shrink it.
     ttl_seconds: 86400
+
+  # pageindex: PageIndex-style page-based agentic strategy and its
+  # dedicated POST /v1/answer/pageindex endpoint.
+  #
+  # The strategy runs a three-tool loop:
+  #   1. get_document_structure() — returns the TOC tree (titles +
+  #      page ranges, no body text).
+  #   2. get_pages(start_page, end_page) — returns the concatenated
+  #      content of every section whose page range overlaps.
+  #   3. done(answer, cited_pages, reasoning) — terminates with the
+  #      natural-language answer plus the cited inclusive ranges.
+  #
+  # Unlike /v1/answer there's no separate synthesis call — the
+  # model emits the final answer inside the done tool call. The
+  # response carries per-page-range citations with answer-span
+  # quotes, a deterministic trace_token (replayable via
+  # /v1/replay), and an optional reasoning_trace describing every
+  # tool call. Streaming via SSE is available with `stream:true`
+  # on the request body — one event per tool call so callers
+  # watch the navigation in real time.
+  #
+  # OPT-OUT. Default enabled. Disable to unwire the endpoint
+  # (returns 501); the strategy itself can still be selected by
+  # setting `retrieval.strategy: pageindex` even when this block
+  # is disabled.
+  #
+  # Works WITHOUT a persisted TOC tree (pre-PR-A state) — the
+  # strategy synthesises a TOC view from the section list when
+  # documents.toc_tree is NULL. No request fails because of a
+  # missing TOC.
+  pageindex:
+    enabled: true
+    # Cap on LLM turns per request, including the terminal done
+    # turn. The reference PageIndex demo converges in 3-5 hops on
+    # typical questions; 8 leaves buffer for retries on parse
+    # failures and the occasional extra get_pages call.
+    max_hops: 8
+    # Cap on chars one get_pages tool call returns. 16,000 ≈ 4K
+    # tokens — enough for a 5-7 page excerpt, well under any
+    # flagship model's context window. Higher values risk burning
+    # context budget on stray full-document fetches.
+    page_content_limit: 16000
+    # Override the navigation-loop model; empty inherits the
+    # request's model (which itself falls back to the engine
+    # default). Most deployments leave this blank — navigation
+    # and answer happen in the same loop, so a "small model for
+    # navigation, large for answer" split doesn't apply.
+    model: ""
 
 ingest:
   # The summarize and HyDE stages run concurrently. This caps the total

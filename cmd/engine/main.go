@@ -196,24 +196,41 @@ func run() error {
 	}
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
+	// /v1/answer/pageindex gets its OWN PageIndexStrategy instance,
+	// independent of whatever selection strategy is configured in
+	// retrieval.strategy. This way the endpoint is always available
+	// (gated by retrieval.pageindex.enabled), even on a deployment
+	// using chunked-tree as its default selection path.
+	var pageIndexStrategy *retrieval.PageIndexStrategy
+	if cfg.Retrieval.PageIndex.Enabled && llmClient != nil {
+		pageIndexStrategy = buildPageIndexStrategy(cfg.Retrieval, llmClient, store)
+		logger.Info("retrieval: pageindex answer endpoint enabled",
+			"max_hops", pageIndexStrategy.MaxHops,
+			"page_content_limit", pageIndexStrategy.PageContentLimit,
+			"model_override", cfg.Retrieval.PageIndex.Model,
+		)
+	}
+
 	deps := api.Deps{
-		Logger:     logger,
-		DB:         pool,
-		Storage:    store,
-		Queue:      q,
-		Strategy:   strategy,
-		Version:    version,
-		MultiDoc:   multiDoc,
-		LLM:        llmClient,
-		LLMModel:   modelFor(cfg.LLM),
-		AnswerSpan: cfg.Retrieval.AnswerSpan,
-		Answer:     cfg.Retrieval.Answer,
-		Planner:    planner,
-		Planning:   cfg.Retrieval.Planning,
-		ReRanker:   reRanker,
-		ReRank:     cfg.Retrieval.ReRank,
-		Replay:     replayStore,
-		Abstain:    cfg.Retrieval.Abstain,
+		Logger:            logger,
+		DB:                pool,
+		Storage:           store,
+		Queue:             q,
+		Strategy:          strategy,
+		Version:           version,
+		MultiDoc:          multiDoc,
+		LLM:               llmClient,
+		LLMModel:          modelFor(cfg.LLM),
+		AnswerSpan:        cfg.Retrieval.AnswerSpan,
+		Answer:            cfg.Retrieval.Answer,
+		Planner:           planner,
+		Planning:          cfg.Retrieval.Planning,
+		ReRanker:          reRanker,
+		ReRank:            cfg.Retrieval.ReRank,
+		Replay:            replayStore,
+		Abstain:           cfg.Retrieval.Abstain,
+		PageIndexStrategy: pageIndexStrategy,
+		PageIndex:         cfg.Retrieval.PageIndex,
 	}
 
 	srv := &http.Server{
@@ -365,9 +382,34 @@ func buildStrategy(c config.RetrievalConfig, client llmgate.Client, store storag
 		}
 		a.ModelOverride = c.Agentic.Model
 		return a
+	case "pageindex":
+		return buildPageIndexStrategy(c, client, store)
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
+}
+
+// buildPageIndexStrategy constructs the page-based agentic
+// strategy with the storage-backed PageLoader and the configured
+// caps. Used by buildStrategy when retrieval.strategy=pageindex AND
+// by the /v1/answer/pageindex endpoint setup (which wires its own
+// instance regardless of the selection strategy).
+//
+// The TOCProvider is left nil here. PR-A (toc-tree-builder) adds
+// documents.toc_tree + a DB-backed provider; until it lands the
+// strategy degrades to its synthesised view, which is the
+// documented fallback path.
+func buildPageIndexStrategy(c config.RetrievalConfig, client llmgate.Client, store storage.Storage) *retrieval.PageIndexStrategy {
+	p := retrieval.NewPageIndexStrategy(client)
+	p.PageLoader = storagePageLoader{s: store}
+	if c.PageIndex.MaxHops > 0 {
+		p.MaxHops = c.PageIndex.MaxHops
+	}
+	if c.PageIndex.PageContentLimit > 0 {
+		p.PageContentLimit = c.PageIndex.PageContentLimit
+	}
+	p.ModelOverride = c.PageIndex.Model
+	return p
 }
 
 // storageFetcher adapts a storage.Storage to retrieval.ContentFetcher.
@@ -378,6 +420,23 @@ type storageFetcher struct{ s storage.Storage }
 
 func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
 	rc, _, err := sf.s.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// storagePageLoader adapts a storage.Storage to
+// retrieval.PageContentLoader. Mirrors storageFetcher but lives
+// behind a separate interface so the two callers (agentic /
+// pageindex) can be wired independently. The PageIndex strategy
+// materialises section bodies once per get_pages observation, so
+// reading the full reader into a []byte is the right shape.
+type storagePageLoader struct{ s storage.Storage }
+
+func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error) {
+	rc, _, err := l.s.Get(ctx, ref)
 	if err != nil {
 		return nil, err
 	}

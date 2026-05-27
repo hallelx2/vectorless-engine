@@ -329,6 +329,54 @@ type RetrievalConfig struct {
 	ReRank      ReRankBlock      `yaml:"rerank"`
 	Replay      ReplayBlock      `yaml:"replay"`
 	Abstain     AbstainBlock     `yaml:"abstain"`
+	PageIndex   PageIndexBlock   `yaml:"pageindex"`
+}
+
+// PageIndexBlock configures the PageIndex page-based agentic
+// strategy and its dedicated /v1/answer/pageindex endpoint.
+//
+// The strategy is registered as a Strategy choice
+// (retrieval.strategy: pageindex) AND is wired into the
+// /v1/answer/pageindex endpoint regardless of which selection
+// strategy the server runs by default. The Enabled flag controls
+// the endpoint only — flipping it off does not unregister the
+// strategy, so a deployment that wants the strategy available
+// to /v1/query but not the dedicated answer endpoint can still
+// disable the endpoint here.
+//
+// Defaults are tuned to match the reference PageIndex demo: 8
+// hops covers structure → 3 navigation calls → done + buffer,
+// and 16,000 chars of get_pages content fits a 5-7 page excerpt
+// comfortably under any flagship model's context window.
+//
+// Per-request overrides on /v1/answer/pageindex (max_hops,
+// max_pages_per_fetch) win over this block; this block is the
+// server-side default.
+type PageIndexBlock struct {
+	// Enabled toggles the /v1/answer/pageindex endpoint. Default:
+	// true. When false, the endpoint returns 501. The
+	// PageIndexStrategy itself stays registered as a selection
+	// strategy regardless — disabling here only unwires the
+	// dedicated answer surface.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxHops caps the number of LLM turns one /v1/answer/pageindex
+	// request consumes, including the terminal done turn. Default:
+	// 8. Set to 0 to use the strategy's built-in default.
+	MaxHops int `yaml:"max_hops"`
+
+	// PageContentLimit caps how many chars a single get_pages tool
+	// call returns. Default: 16000. Keeps one stray full-document
+	// fetch from torching the model's context window.
+	PageContentLimit int `yaml:"page_content_limit"`
+
+	// Model overrides the LLM model used for the navigation loop.
+	// Empty means use the request's model (which itself falls back
+	// to the engine default). Useful when navigation should run on
+	// a fast/cheap model while answering benefits from a stronger
+	// one — though the PageIndex protocol does both in the same
+	// loop, so most deployments leave this blank.
+	Model string `yaml:"model"`
 }
 
 // AbstainBlock configures the Phase 2.4 abstention behaviour.
@@ -602,6 +650,11 @@ func Default() Config {
 			Abstain: AbstainBlock{
 				Enabled: true,
 				Below:   0.4,
+			},
+			PageIndex: PageIndexBlock{
+				Enabled:          true,
+				MaxHops:          8,
+				PageContentLimit: 16000,
 			},
 		},
 		Ingest: IngestConfig{
@@ -936,6 +989,27 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.Abstain.Below = f
 		}
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.PageIndex.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.PageIndex.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Retrieval.PageIndex.MaxHops = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Retrieval.PageIndex.PageContentLimit = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL"); v != "" {
+		c.Retrieval.PageIndex.Model = v
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -989,7 +1063,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Retrieval.Strategy {
-	case "single-pass", "chunked-tree", "agentic":
+	case "single-pass", "chunked-tree", "agentic", "pageindex":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
 	}
@@ -1074,6 +1148,13 @@ func (c Config) Validate() error {
 
 	if c.Retrieval.Abstain.Below < 0 || c.Retrieval.Abstain.Below > 1 {
 		return fmt.Errorf("retrieval.abstain.below must be in [0.0, 1.0], got %v", c.Retrieval.Abstain.Below)
+	}
+
+	if c.Retrieval.PageIndex.MaxHops < 0 {
+		return fmt.Errorf("retrieval.pageindex.max_hops must be >= 0, got %d", c.Retrieval.PageIndex.MaxHops)
+	}
+	if c.Retrieval.PageIndex.PageContentLimit < 0 {
+		return fmt.Errorf("retrieval.pageindex.page_content_limit must be >= 0, got %d", c.Retrieval.PageIndex.PageContentLimit)
 	}
 
 	return nil
