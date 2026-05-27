@@ -190,6 +190,22 @@ func writeSectionLine(b *strings.Builder, sv tree.SectionView) {
 		b.WriteString(" — ")
 		b.WriteString(sv.Summary)
 	}
+	// Phase 2.5: append entities + numbers from the structured axes
+	// when present. They live on the SAME outline line as the summary,
+	// truncated to the first 3 each, so the retrieval prompt sees the
+	// section's proper-noun + numeric surface without doubling the
+	// per-section budget. Older sections (axes==nil) skip this block,
+	// so un-backfilled docs see the prompt unchanged.
+	if sv.SummaryAxes != nil {
+		if ents := firstN(sv.SummaryAxes.Entities, 3); len(ents) > 0 {
+			b.WriteString(" — entities: ")
+			b.WriteString(strings.Join(ents, ", "))
+		}
+		if nums := firstN(sv.SummaryAxes.Numbers, 3); len(nums) > 0 {
+			b.WriteString(" — numbers: ")
+			b.WriteString(strings.Join(nums, ", "))
+		}
+	}
 	b.WriteByte('\n')
 	// HyDE: surface the first candidate question (truncated) as an
 	// "answers:" hint. Keeps the prompt budget impact small (~120 chars
@@ -203,6 +219,28 @@ func writeSectionLine(b *strings.Builder, sv tree.SectionView) {
 		b.WriteString(q)
 		b.WriteByte('\n')
 	}
+}
+
+// firstN returns up to n non-empty trimmed entries from xs in order.
+// Used by writeSectionLine to cap entities / numbers per section so a
+// section whose axes carry 30 entities doesn't blow up the retrieval
+// prompt's token budget.
+func firstN(xs []string, n int) []string {
+	if n <= 0 || len(xs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, n)
+	for _, x := range xs {
+		x = strings.TrimSpace(x)
+		if x == "" {
+			continue
+		}
+		out = append(out, x)
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
 }
 
 // firstCandidateQuestion returns the first non-empty candidate question,

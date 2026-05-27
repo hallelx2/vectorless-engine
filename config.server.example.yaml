@@ -113,6 +113,17 @@ engine:
       num_questions: 5
       concurrency: 4
 
+    # Multi-axis structured summaries (Phase 2.5). JSON-mode summarizer
+    # returns {topics, entities, numbers, one_line}. The retrieval
+    # prompt surfaces entities + numbers on the section line; the
+    # one_line continues to populate the flat `summary` field for
+    # backward compatibility.
+    summary_axes:
+      enabled: true
+      max_topics: 4
+      max_entities: 8
+      max_numbers: 6
+
   log:
     level: "info"     # "debug", "info", "warn", "error"
     format: "json"    # "json" or "console"

@@ -169,16 +169,20 @@ func run() error {
 	}
 
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		DB:                   pool,
-		Storage:              store,
-		LLM:                  llmClient,
-		Parsers:              ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Ingest.Tables)),
-		Logger:               logger,
-		HyDEEnabled:          cfg.Ingest.HyDE.Enabled,
-		HyDEModel:            cfg.Ingest.HyDE.Model,
-		HyDENumQuestions:     cfg.Ingest.HyDE.NumQuestions,
-		HyDEConcurrency:      cfg.Ingest.HyDE.Concurrency,
-		GlobalLLMConcurrency: cfg.Ingest.GlobalLLMConcurrency,
+		DB:                     pool,
+		Storage:                store,
+		LLM:                    llmClient,
+		Parsers:                ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Ingest.Tables)),
+		Logger:                 logger,
+		HyDEEnabled:            cfg.Ingest.HyDE.Enabled,
+		HyDEModel:              cfg.Ingest.HyDE.Model,
+		HyDENumQuestions:       cfg.Ingest.HyDE.NumQuestions,
+		HyDEConcurrency:        cfg.Ingest.HyDE.Concurrency,
+		SummaryAxesEnabled:     cfg.Ingest.SummaryAxes.Enabled,
+		SummaryAxesMaxTopics:   cfg.Ingest.SummaryAxes.MaxTopics,
+		SummaryAxesMaxEntities: cfg.Ingest.SummaryAxes.MaxEntities,
+		SummaryAxesMaxNumbers:  cfg.Ingest.SummaryAxes.MaxNumbers,
+		GlobalLLMConcurrency:   cfg.Ingest.GlobalLLMConcurrency,
 	})
 	if cfg.Ingest.Tables.Enabled {
 		logger.Info("ingest: pdf table extraction enabled",

@@ -41,6 +41,13 @@ type IngestConfig struct {
 	// hides in a balance sheet that text-only extraction collapses.
 	Tables TablesConfig `yaml:"tables"`
 
+	// SummaryAxes configures the Phase 2.5 multi-axis summarizer.
+	// Enabled by default — the structured shape unlocks
+	// entity / numeric matching at retrieval time without changing the
+	// existing `summary` field's contract (axes.one_line continues to
+	// populate it).
+	SummaryAxes SummaryAxesBlock `yaml:"summary_axes"`
+
 	// GlobalLLMConcurrency caps the total number of LLM calls in flight
 	// across the summarize and HyDE stages combined, which now run
 	// concurrently. Each stage still respects its own per-stage cap
@@ -51,6 +58,33 @@ type IngestConfig struct {
 	// 4 + 4 per-stage caps while staying well below typical provider
 	// per-tenant concurrency limits.
 	GlobalLLMConcurrency int `yaml:"global_llm_concurrency"`
+}
+
+// SummaryAxesBlock configures the Phase 2.5 structured summarizer.
+//
+// When enabled, the summarize stage runs in JSON mode and produces
+// {topics, entities, numbers, one_line} per section instead of a
+// single sentence. The structured blob is persisted in
+// sections.summary_axes (JSONB); the one_line continues to land in
+// sections.summary so older API consumers keep working.
+//
+// Disable to roll back to the pre-2.5 single-sentence behaviour
+// without un-deploying the binary — useful for A/B comparisons or as
+// a fast off-switch if a real-world document triggers a regression.
+type SummaryAxesBlock struct {
+	// Enabled toggles the structured path. Default: true.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxTopics caps the topics axis the summarizer returns per
+	// section. Default: 4. A misbehaving model that returns 50 topics
+	// can't push past this cap; the prompt-budget impact stays bounded.
+	MaxTopics int `yaml:"max_topics"`
+
+	// MaxEntities caps the entities axis. Default: 8.
+	MaxEntities int `yaml:"max_entities"`
+
+	// MaxNumbers caps the numbers axis. Default: 6.
+	MaxNumbers int `yaml:"max_numbers"`
 }
 
 // TablesConfig configures the table-extraction stage of the PDF parser.
@@ -504,6 +538,12 @@ func Default() Config {
 				MinTableRows:       2,
 				MinTableCols:       2,
 			},
+			SummaryAxes: SummaryAxesBlock{
+				Enabled:     true,
+				MaxTopics:   4,
+				MaxEntities: 8,
+				MaxNumbers:  6,
+			},
 		},
 		Log: LogConfig{Level: "info", Format: "json"},
 	}
@@ -659,6 +699,32 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_TABLES_MIN_COLS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Ingest.Tables.MinTableCols = n
+		}
+	}
+	// Phase 2.5 structured-summary knobs. Booleans accept the same
+	// truthy strings the other ingest toggles use; numeric overrides
+	// require a positive int (a typo silently preserves the default).
+	if v := os.Getenv("VLE_INGEST_SUMMARY_AXES_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ingest.SummaryAxes.Enabled = true
+		case "0", "false", "no", "off":
+			c.Ingest.SummaryAxes.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.SummaryAxes.MaxTopics = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.SummaryAxes.MaxEntities = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.SummaryAxes.MaxNumbers = n
 		}
 	}
 	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_ENABLED"); v != "" {
@@ -847,6 +913,16 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.Tables.MinTableCols < 0 {
 		return fmt.Errorf("ingest.tables.min_table_cols must be >= 0, got %d", c.Ingest.Tables.MinTableCols)
+	}
+
+	if c.Ingest.SummaryAxes.MaxTopics < 0 {
+		return fmt.Errorf("ingest.summary_axes.max_topics must be >= 0, got %d", c.Ingest.SummaryAxes.MaxTopics)
+	}
+	if c.Ingest.SummaryAxes.MaxEntities < 0 {
+		return fmt.Errorf("ingest.summary_axes.max_entities must be >= 0, got %d", c.Ingest.SummaryAxes.MaxEntities)
+	}
+	if c.Ingest.SummaryAxes.MaxNumbers < 0 {
+		return fmt.Errorf("ingest.summary_axes.max_numbers must be >= 0, got %d", c.Ingest.SummaryAxes.MaxNumbers)
 	}
 
 	if c.Retrieval.Planning.CacheSize < 0 {

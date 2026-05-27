@@ -682,3 +682,97 @@ func TestTablesValidateRejectsBadStrategy(t *testing.T) {
 		t.Error("expected error for negative min_table_rows")
 	}
 }
+
+// TestSummaryAxesDefaults locks the Phase 2.5 defaults: structured
+// summaries opt-in by default, with the caps the spec calls for. The
+// retrieval prompt downstream relies on these caps to keep the prompt
+// budget bounded per section.
+func TestSummaryAxesDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if !cfg.Ingest.SummaryAxes.Enabled {
+		t.Error("ingest.summary_axes.enabled should default to true (opt-out)")
+	}
+	if cfg.Ingest.SummaryAxes.MaxTopics != 4 {
+		t.Errorf("max_topics = %d, want 4", cfg.Ingest.SummaryAxes.MaxTopics)
+	}
+	if cfg.Ingest.SummaryAxes.MaxEntities != 8 {
+		t.Errorf("max_entities = %d, want 8", cfg.Ingest.SummaryAxes.MaxEntities)
+	}
+	if cfg.Ingest.SummaryAxes.MaxNumbers != 6 {
+		t.Errorf("max_numbers = %d, want 6", cfg.Ingest.SummaryAxes.MaxNumbers)
+	}
+}
+
+// TestSummaryAxesEnvOverride covers the opt-out path: env disables the
+// structured summarizer, and the numeric caps re-tune via env.
+func TestSummaryAxesEnvOverride(t *testing.T) {
+	// Mutates env — restore on exit. Not parallel.
+	prevEnabled := os.Getenv("VLE_INGEST_SUMMARY_AXES_ENABLED")
+	prevTopics := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS")
+	prevEntities := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES")
+	prevNumbers := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS")
+	defer func() {
+		os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", prevEnabled)
+		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics)
+		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", prevEntities)
+		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", prevNumbers)
+	}()
+
+	os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", "false")
+	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "10")
+	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", "20")
+	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", "15")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Ingest.SummaryAxes.Enabled {
+		t.Error("VLE_INGEST_SUMMARY_AXES_ENABLED=false should disable")
+	}
+	if cfg.Ingest.SummaryAxes.MaxTopics != 10 {
+		t.Errorf("max_topics env override: got %d, want 10", cfg.Ingest.SummaryAxes.MaxTopics)
+	}
+	if cfg.Ingest.SummaryAxes.MaxEntities != 20 {
+		t.Errorf("max_entities env override: got %d, want 20", cfg.Ingest.SummaryAxes.MaxEntities)
+	}
+	if cfg.Ingest.SummaryAxes.MaxNumbers != 15 {
+		t.Errorf("max_numbers env override: got %d, want 15", cfg.Ingest.SummaryAxes.MaxNumbers)
+	}
+}
+
+// TestSummaryAxesEnvOverrideRejectsBad: garbage values preserve the
+// default rather than zeroing the cap (which would silently fail to
+// trim model output).
+func TestSummaryAxesEnvOverrideRejectsBad(t *testing.T) {
+	prevTopics := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS")
+	defer os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics)
+	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "not-a-number")
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Ingest.SummaryAxes.MaxTopics != 4 {
+		t.Errorf("garbled env should preserve default 4, got %d", cfg.Ingest.SummaryAxes.MaxTopics)
+	}
+}
+
+// TestSummaryAxesValidateNegatives: negative caps fail validation so a
+// typo in the YAML doesn't silently disable trimming.
+func TestSummaryAxesValidateNegatives(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		fn   func(*Config)
+	}{
+		{"topics", func(c *Config) { c.Ingest.SummaryAxes.MaxTopics = -1 }},
+		{"entities", func(c *Config) { c.Ingest.SummaryAxes.MaxEntities = -1 }},
+		{"numbers", func(c *Config) { c.Ingest.SummaryAxes.MaxNumbers = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Database.URL = "postgres://localhost/test"
+			tc.fn(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("negative %s should fail validation", tc.name)
+			}
+		})
+	}
+}

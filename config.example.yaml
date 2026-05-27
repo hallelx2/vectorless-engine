@@ -249,6 +249,26 @@ ingest:
     min_table_rows: 2
     min_table_cols: 2
 
+  # Multi-axis structured summaries (Phase 2.5). When enabled, the
+  # summarize stage runs in JSON mode and produces {topics, entities,
+  # numbers, one_line} per section instead of a single sentence. The
+  # structured blob lives in sections.summary_axes; the one_line still
+  # populates sections.summary so older API consumers keep working
+  # unchanged. The retrieval prompt surfaces entities + numbers from
+  # the axes block on the section line so the model has direct
+  # surface-form access to proper-noun and numeric anchors.
+  #
+  # ENABLED BY DEFAULT. Flip to false to roll back to the pre-2.5
+  # single-sentence path without redeploying the binary.
+  summary_axes:
+    enabled: true
+    # Per-axis caps prevent a misbehaving model from blowing up the
+    # retrieval prompt budget. Values below are the defaults; tune
+    # only if the model returns systematically truncated output.
+    max_topics: 4
+    max_entities: 8
+    max_numbers: 6
+
 log:
   level: "info"            # debug | info | warn | error
   format: "json"           # json | console
