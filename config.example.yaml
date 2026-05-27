@@ -152,6 +152,36 @@ retrieval:
     # isolation (plan returned, but retrieval uses the original query).
     decompose: true
 
+  # rerank: Phase 2.3 content-aware re-rank pass. After the retrieval
+  # strategy returns candidate sections and their content is loaded,
+  # one extra LLM call scores each section (0-100) against the query
+  # and the engine reorders descending by score.
+  #
+  # This is the safety net for the case where the strategy reasoned
+  # over title + summary + HyDE candidate questions and got fooled
+  # by surface-level matches. Reading the actual content closes that
+  # gap. ~3-5k input tokens per query on gemini-2.5-flash; ~$0.0003
+  # per call at typical rates.
+  #
+  # OPT-IN. Default disabled. Per-request `enable_rerank` body field
+  # overrides this block. Failures never drop sections — at worst the
+  # strategy's order is preserved.
+  rerank:
+    enabled: false
+    # Override the re-rank model; empty inherits the request's model
+    # (or the engine default). Keep this on a small/fast model — the
+    # re-rank prompt is short and shouldn't burn the flagship model.
+    model: ""
+    # Per-candidate content budget. Higher = more context for the
+    # model to judge with, lower = tighter cost. 2000 chars ≈ 500
+    # tokens, comfortable for typical section sizes.
+    max_content_chars: 2000
+    # Truncate the post-rerank candidate list to the top K. 0 means
+    # keep all candidates (re-rank only reorders). Useful when the
+    # strategy returns a wide candidate list and you want the
+    # re-rank pass to do the final selection.
+    top_k: 0
+
 ingest:
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the

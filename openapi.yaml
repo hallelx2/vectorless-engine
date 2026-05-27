@@ -462,6 +462,19 @@ components:
             retrieval fans out one selection call per sub-question
             and unions the results. Overrides the server's
             `retrieval.planning.enabled` setting for this request only.
+        enable_rerank:
+          type: boolean
+          description: |
+            Opt this request into the Phase 2.3 content-aware re-rank
+            pass. After the retrieval strategy returns candidate
+            section IDs and the engine loads their content, one extra
+            LLM call scores each section (0-100) against the query and
+            sections are reordered descending by score. When
+            `retrieval.rerank.top_k` is set on the server, only the
+            top-k sections survive. Failures preserve the strategy's
+            original order — re-rank never drops sections. Overrides
+            the server's `retrieval.rerank.enabled` setting for this
+            request only.
 
     QueryResponse:
       type: object
@@ -513,6 +526,14 @@ components:
           description: Full section content from storage.
         answer_span:
           $ref: "#/components/schemas/AnswerSpan"
+        score:
+          type: number
+          description: |
+            Re-rank relevance score on a 0-100 scale, populated only
+            when the request opted into the Phase 2.3 re-rank pass
+            (`enable_rerank`) or the server has
+            `retrieval.rerank.enabled=true`. Sections are returned
+            sorted descending by score. Omitted when no re-rank ran.
 
     AnswerSpan:
       type: object
@@ -560,6 +581,14 @@ components:
             full semantics. When enabled, the synthesis prompt also sees
             the planner's structured intent and entity hints, and the
             response carries a top-level `plan` field.
+        enable_rerank:
+          type: boolean
+          description: |
+            Opt this request into the Phase 2.3 content-aware re-rank
+            pass. See QueryRequest.enable_rerank for full semantics.
+            When the pass runs, the synthesis prompt sees the
+            re-ranked top-k (capped by `retrieval.rerank.top_k`), and
+            each citation in the response carries a `score` field.
 
     AnswerResponse:
       type: object
@@ -647,6 +676,9 @@ components:
         found one). `quote_start`/`quote_end` give byte offsets into
         the source section's content. `page_start`/`page_end` are the
         section's page range — omitted for non-paginated formats.
+        `score` carries the re-rank relevance score on a 0-100 scale,
+        present only when the request opted into the Phase 2.3
+        re-rank pass.
       properties:
         section_id:
           type: string
@@ -662,3 +694,9 @@ components:
           type: integer
         page_end:
           type: integer
+        score:
+          type: number
+          description: |
+            Re-rank relevance score on a 0-100 scale. Omitted when no
+            re-rank ran. Higher means the section is more directly
+            relevant to the query.

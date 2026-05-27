@@ -73,6 +73,16 @@ type Deps struct {
 	// `enable_planning` field on /v1/query and /v1/answer overrides
 	// Planning.Enabled.
 	Planning config.PlanningBlock
+
+	// ReRanker runs Phase 2.3 content-aware re-rank on the strategy's
+	// candidate sections (one extra LLM call per query). Nil disables
+	// re-rank even when a request opts in via `enable_rerank`.
+	ReRanker *retrieval.ReRanker
+
+	// ReRank carries the server-side re-rank config. The body-level
+	// `enable_rerank` field on /v1/query and /v1/answer overrides
+	// ReRank.Enabled. TopK truncates the post-rerank candidate list.
+	ReRank config.ReRankBlock
 }
 
 // Router builds and returns the chi router wired with v1 routes.
@@ -400,6 +410,10 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		// planner. A pointer so we can distinguish "absent" from
 		// "explicit false" — absent falls back to the server config.
 		EnablePlanning *bool `json:"enable_planning"`
+		// EnableReRank opts this request into the Phase 2.3
+		// content-aware re-rank pass. Pointer for the same reason as
+		// EnablePlanning. Overrides retrieval.rerank.enabled.
+		EnableReRank *bool `json:"enable_rerank"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -471,6 +485,15 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
 	}
 
+	// Optional: content-aware re-rank pass. One LLM call that scores
+	// each loaded section against the query and re-orders the slice
+	// descending by score. TopK truncates the survivors. Failures
+	// never drop sections — at worst the strategy's order is
+	// preserved (see retrieval.ReRanker.ReRank).
+	if d.reRankEnabled(body.EnableReRank) {
+		enriched, _ = d.runReRank(r.Context(), enriched, body.Query, body.Model)
+	}
+
 	// Optional: per-section answer-span extraction. Opt-in via config —
 	// one LLM call per returned section. Failures are non-fatal; the
 	// section is returned without a span.
@@ -499,11 +522,18 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 // sectionWithContent bundles a tree section with its loaded content
-// and an optional answer-span. Used by /v1/query and /v1/answer.
+// and optional re-rank score / answer-span. Used by /v1/query and
+// /v1/answer.
 type sectionWithContent struct {
 	sec     *tree.Section
 	content string
 	span    *retrieval.AnswerSpan
+
+	// hasScore reports whether score was populated by a re-rank pass.
+	// Distinct from score == 0 since 0 is a legitimate score the
+	// model can return.
+	hasScore bool
+	score    float64
 }
 
 // sectionWithContentToMap renders the section as the API map shape.
@@ -527,6 +557,9 @@ func sectionWithContentToMap(e sectionWithContent) map[string]any {
 	}
 	if e.span != nil {
 		s["answer_span"] = e.span
+	}
+	if e.hasScore {
+		s["score"] = e.score
 	}
 	return s
 }
@@ -620,6 +653,10 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		// EnablePlanning opts this request into the Phase 2.1 query
 		// planner. See handleQuery for the same field's semantics.
 		EnablePlanning *bool `json:"enable_planning"`
+		// EnableReRank opts this request into the Phase 2.3 re-rank
+		// pass. Synthesis then sees the re-ranked top-k. Overrides
+		// retrieval.rerank.enabled.
+		EnableReRank *bool `json:"enable_rerank"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -699,6 +736,16 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
 	}
 
+	// Optional: content-aware re-rank before synthesis sees the
+	// evidence. When TopK is set the synthesis prompt only ever sees
+	// the post-rerank top-k, keeping the answer focused on the
+	// best-evidence sections.
+	if d.reRankEnabled(body.EnableReRank) {
+		var reRankUsage retrieval.Usage
+		enriched, reRankUsage = d.runReRank(r.Context(), enriched, body.Query, body.Model)
+		totalUsage.Add(reRankUsage)
+	}
+
 	// Always extract spans for /v1/answer — they ground each citation.
 	spanExtractor := d.spanExtractor(body.Model)
 	runSpansConcurrent(r.Context(), spanExtractor, body.Query, enriched, d.AnswerSpan.MaxConcurrency, d.Logger)
@@ -746,6 +793,9 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 				c["quote_start"] = e.span.Start
 				c["quote_end"] = e.span.End
 			}
+		}
+		if e.hasScore {
+			c["score"] = e.score
 		}
 		citations = append(citations, c)
 	}
@@ -1130,6 +1180,123 @@ func (d Deps) shouldDecompose(plan *retrieval.Plan) bool {
 		return false
 	}
 	return d.Planning.Decompose
+}
+
+// --- re-rank helpers ---
+
+// reRankEnabled reports whether the request should go through the
+// re-rank pass. The per-request body field (when present) wins over
+// the server-side config; a nil body field falls back to the config.
+//
+// Returns false when no LLM client is wired or when no ReRanker is
+// configured, regardless of intent — re-rank without an LLM is
+// physically impossible.
+func (d Deps) reRankEnabled(bodyOverride *bool) bool {
+	if d.ReRanker == nil || d.LLM == nil {
+		return false
+	}
+	if bodyOverride != nil {
+		return *bodyOverride
+	}
+	return d.ReRank.Enabled
+}
+
+// runReRank executes the re-rank pass over the loaded section slice
+// and returns the reordered slice plus the LLM Usage spent. On any
+// failure the original slice is returned (with the same hasScore
+// values it had on input — i.e. unchanged) so the caller never has
+// to think about partial state. The error is LOGGED, not returned —
+// re-rank is best-effort and a failure must never abort the request.
+//
+// requestModel is the model the request asked for. When the
+// ReRanker has its own Model set (the config-level override), that
+// wins; the request model is the fall-through.
+func (d Deps) runReRank(ctx context.Context, enriched []sectionWithContent, query, requestModel string) ([]sectionWithContent, retrieval.Usage) {
+	if d.ReRanker == nil || d.LLM == nil || len(enriched) == 0 {
+		return enriched, retrieval.Usage{}
+	}
+
+	// Apply the model fall-through: config override → request model →
+	// engine default. We don't mutate d.ReRanker since Deps is shared
+	// across requests; instead build a shallow copy with the chosen
+	// model. This is the same pattern spanExtractor() uses.
+	ranker := *d.ReRanker
+	if ranker.Model == "" {
+		if requestModel != "" {
+			ranker.Model = requestModel
+		} else {
+			ranker.Model = d.LLMModel
+		}
+	}
+
+	candidates := make([]retrieval.SectionContent, len(enriched))
+	for i, e := range enriched {
+		candidates[i] = retrieval.SectionContent{
+			ID:      e.sec.ID,
+			Title:   e.sec.Title,
+			Content: e.content,
+		}
+	}
+
+	scored, usage, err := ranker.ReRank(ctx, query, candidates)
+	if err != nil {
+		if d.Logger != nil {
+			d.Logger.Warn("rerank: failed; preserving strategy order", "err", err)
+		}
+		// ReRank returns input order on error so we *could* apply it
+		// (it'd just stamp score=0 on everything). Skip — the caller
+		// shouldn't see score=0 on every section when re-rank
+		// physically failed.
+		return enriched, usage
+	}
+	if len(scored) == 0 {
+		return enriched, usage
+	}
+
+	reordered := reorderByScore(enriched, scored)
+	if d.ReRank.TopK > 0 && len(reordered) > d.ReRank.TopK {
+		reordered = reordered[:d.ReRank.TopK]
+	}
+	return reordered, usage
+}
+
+// reorderByScore takes the loaded section slice and the model's
+// scored output (already sorted descending by score by the
+// ReRanker), and returns a new slice in the same order as scored
+// with each entry carrying the per-section score.
+//
+// Defensive: every input enriched section appears in the output
+// exactly once, in the order dictated by scored. If scored is
+// missing an input ID (shouldn't happen — ReRank's contract is to
+// surface every input ID), that section is appended at the end with
+// hasScore=false so the response stays complete.
+func reorderByScore(enriched []sectionWithContent, scored []retrieval.ScoredSection) []sectionWithContent {
+	byID := make(map[tree.SectionID]int, len(enriched))
+	for i, e := range enriched {
+		byID[e.sec.ID] = i
+	}
+
+	out := make([]sectionWithContent, 0, len(enriched))
+	taken := make([]bool, len(enriched))
+	for _, s := range scored {
+		idx, ok := byID[s.ID]
+		if !ok || taken[idx] {
+			continue
+		}
+		taken[idx] = true
+		e := enriched[idx]
+		e.hasScore = true
+		e.score = s.Score
+		out = append(out, e)
+	}
+	// Append anything ReRank didn't surface — invariant says this
+	// should be empty, but a defence-in-depth check costs nothing.
+	for i, e := range enriched {
+		if !taken[i] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // writePlanHints appends a short, model-readable "Planner notes" block

@@ -129,6 +129,28 @@ func run() error {
 		}
 	}
 
+	// ReRanker: opt-in Phase 2.3. Instantiated whenever an LLM client
+	// is wired — the per-request `enable_rerank` body field overrides
+	// the config, mirroring the planner pattern.
+	var reRanker *retrieval.ReRanker
+	if llmClient != nil {
+		reRankModel := cfg.Retrieval.ReRank.Model
+		if reRankModel == "" {
+			reRankModel = modelFor(cfg.LLM)
+		}
+		reRanker = retrieval.NewReRanker(llmClient, reRankModel)
+		if cfg.Retrieval.ReRank.MaxContentChars > 0 {
+			reRanker.MaxContentChars = cfg.Retrieval.ReRank.MaxContentChars
+		}
+		if cfg.Retrieval.ReRank.Enabled {
+			logger.Info("retrieval: rerank enabled",
+				"model", reRankModel,
+				"max_content_chars", reRanker.MaxContentChars,
+				"top_k", cfg.Retrieval.ReRank.TopK,
+			)
+		}
+	}
+
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                   pool,
 		Storage:              store,
@@ -157,6 +179,8 @@ func run() error {
 		Answer:     cfg.Retrieval.Answer,
 		Planner:    planner,
 		Planning:   cfg.Retrieval.Planning,
+		ReRanker:   reRanker,
+		ReRank:     cfg.Retrieval.ReRank,
 	}
 
 	srv := &http.Server{
