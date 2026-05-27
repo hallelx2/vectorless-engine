@@ -77,15 +77,23 @@ func (c *Cached) Select(ctx context.Context, t *tree.Tree, query string, budget 
 // SelectWithCost checks the cache first. On a hit it returns zero usage
 // (no LLM call was made). On a miss it delegates to the inner strategy's
 // SelectWithCost if available, otherwise falls back to Select.
+//
+// The replay trace token is preserved across cache hits: because the
+// token is a pure function of (document_id, doc_version, model, sorted
+// selected_ids) and the cache key already varies with document + model,
+// re-deriving the token from the cached slice produces the same value
+// the original strategy would have stamped.
 func (c *Cached) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	key := cache.Key(string(t.DocumentID), query, c.inner.Name(), budget.ModelName)
 
 	if v, ok := c.cache.Get(key); ok {
+		ids := v.([]tree.SectionID)
 		return &Result{
-			SelectedIDs: v.([]tree.SectionID),
+			SelectedIDs: ids,
 			Reasoning:   "cached",
 			ModelUsed:   budget.ModelName,
 			Usage:       Usage{}, // zero — no LLM call
+			TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, ids),
 		}, nil
 	}
 
@@ -101,7 +109,10 @@ func (c *Cached) SelectWithCost(ctx context.Context, t *tree.Tree, query string,
 		if err != nil {
 			return nil, err
 		}
-		result = &Result{SelectedIDs: ids}
+		result = &Result{
+			SelectedIDs: ids,
+			TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, ids),
+		}
 	}
 
 	c.cache.Set(key, result.SelectedIDs, c.ttl)

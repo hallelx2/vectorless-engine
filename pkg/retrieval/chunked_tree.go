@@ -55,6 +55,9 @@ func (c *ChunkedTree) Select(ctx context.Context, t *tree.Tree, query string, bu
 
 // SelectWithCost implements CostStrategy.
 func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
+	if t == nil || t.Root == nil {
+		return &Result{}, nil
+	}
 	tok := LLMTokenizer{C: c.LLM}
 	slices, err := c.Splitter.Split(ctx, t, budget, tok)
 	if err != nil {
@@ -109,10 +112,12 @@ func (c *ChunkedTree) SelectWithCost(ctx context.Context, t *tree.Tree, query st
 		totalUsage.Add(r.usage)
 	}
 
+	selected := c.Merge.Merge(allIDs)
 	return &Result{
-		SelectedIDs: c.Merge.Merge(allIDs),
+		SelectedIDs: selected,
 		Usage:       totalUsage,
 		HopsTaken:   1,
+		TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, selected),
 	}, nil
 }
 
