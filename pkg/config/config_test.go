@@ -37,8 +37,52 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Retrieval.Cache.TTLSeconds != 600 {
 		t.Errorf("cache.ttl_seconds = %d, want 600", cfg.Retrieval.Cache.TTLSeconds)
 	}
+	if cfg.Retrieval.Planning.Enabled {
+		t.Error("retrieval.planning.enabled should default to false")
+	}
+	if cfg.Retrieval.Planning.CacheSize != 128 {
+		t.Errorf("retrieval.planning.cache_size = %d, want 128", cfg.Retrieval.Planning.CacheSize)
+	}
+	if !cfg.Retrieval.Planning.Decompose {
+		t.Error("retrieval.planning.decompose should default to true (when planning is enabled)")
+	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("log.level = %q, want info", cfg.Log.Level)
+	}
+}
+
+func TestPlanningEnvOverride(t *testing.T) {
+	// Not parallel — mutates env. Restore on exit.
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_PLANNING_ENABLED")
+	prevModel := os.Getenv("VLE_RETRIEVAL_PLANNING_MODEL")
+	prevCache := os.Getenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE")
+	prevDecompose := os.Getenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", prevModel)
+		os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", prevCache)
+		os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", prevDecompose)
+	}()
+
+	os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", "true")
+	os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", "gemini-2.0-flash")
+	os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", "256")
+	os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", "false")
+
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+
+	if !cfg.Retrieval.Planning.Enabled {
+		t.Error("VLE_RETRIEVAL_PLANNING_ENABLED=true should enable planning")
+	}
+	if cfg.Retrieval.Planning.Model != "gemini-2.0-flash" {
+		t.Errorf("planning model = %q, want gemini-2.0-flash", cfg.Retrieval.Planning.Model)
+	}
+	if cfg.Retrieval.Planning.CacheSize != 256 {
+		t.Errorf("planning cache_size = %d, want 256", cfg.Retrieval.Planning.CacheSize)
+	}
+	if cfg.Retrieval.Planning.Decompose {
+		t.Error("VLE_RETRIEVAL_PLANNING_DECOMPOSE=false should disable decompose")
 	}
 }
 

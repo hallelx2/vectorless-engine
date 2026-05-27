@@ -451,6 +451,17 @@ components:
         max_sections:
           type: integer
           description: Cap on returned sections. 0 = no cap.
+        enable_planning:
+          type: boolean
+          description: |
+            Opt this request into the query planner. One short LLM call
+            runs before retrieval and returns a structured Plan
+            (intent, entities, expected document areas, multi-hop
+            flag, sub-questions). When the plan is multi-hop and
+            `retrieval.planning.decompose` is enabled on the server,
+            retrieval fans out one selection call per sub-question
+            and unions the results. Overrides the server's
+            `retrieval.planning.enabled` setting for this request only.
 
     QueryResponse:
       type: object
@@ -461,13 +472,15 @@ components:
           type: string
         strategy:
           type: string
-          enum: [single-pass, chunked-tree]
+          enum: [single-pass, chunked-tree, agentic]
         model:
           type: string
         sections:
           type: array
           items:
             $ref: "#/components/schemas/QuerySection"
+        plan:
+          $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
 
@@ -540,6 +553,13 @@ components:
         max_answer_tokens:
           type: integer
           description: Bound the synthesised answer length. Defaults to retrieval.answer.max_answer_tokens (1024).
+        enable_planning:
+          type: boolean
+          description: |
+            Opt this request into the query planner. See QueryRequest for
+            full semantics. When enabled, the synthesis prompt also sees
+            the planner's structured intent and entity hints, and the
+            response carries a top-level `plan` field.
 
     AnswerResponse:
       type: object
@@ -567,8 +587,57 @@ components:
             total_tokens: {type: integer}
             cost_usd: {type: number}
             llm_calls: {type: integer}
+        plan:
+          $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
+
+    Plan:
+      type: object
+      description: |
+        Structured understanding of the query produced by the Phase 2.1
+        planner. Returned only when the request opts in (per-request
+        `enable_planning` or server-side `retrieval.planning.enabled`).
+        Synthesis (in /v1/answer) reads `intent`, `entities`, and
+        `expected_doc_areas` as orientation hints. When `is_multi_hop`
+        is true and `retrieval.planning.decompose` is on, retrieval
+        fans out one selection call per `sub_questions[i]` and unions
+        the per-sub-question selections.
+      properties:
+        intent:
+          type: string
+          description: |
+            Short snake_case label for the query intent. Open-ended:
+            common values are `factual_lookup`, `comparison`, `summary`,
+            `definition`, `list`, `calculation`.
+        entities:
+          type: array
+          items:
+            type: string
+          description: |
+            Salient proper nouns, dates, numbers, or specific terms the
+            query hinges on. Surfaced to the synthesis model for
+            orientation.
+        expected_doc_areas:
+          type: array
+          items:
+            type: string
+          description: |
+            Hints about which parts of a document are likely to hold the
+            answer (e.g. "balance sheet", "risk factors"). Empty when
+            no strong prior exists.
+        is_multi_hop:
+          type: boolean
+          description: |
+            True only when the query requires answering distinct
+            sub-questions whose answers must be combined.
+        sub_questions:
+          type: array
+          items:
+            type: string
+          description: |
+            Focused sub-questions the decomposer dispatches one-at-a-time.
+            Populated only when `is_multi_hop` is true.
 
     AnswerCitation:
       type: object

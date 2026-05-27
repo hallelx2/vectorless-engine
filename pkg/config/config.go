@@ -203,6 +203,41 @@ type RetrievalConfig struct {
 	Cache       CacheBlock       `yaml:"cache"`
 	AnswerSpan  AnswerSpanBlock  `yaml:"answer_span"`
 	Answer      AnswerBlock      `yaml:"answer"`
+	Planning    PlanningBlock    `yaml:"planning"`
+}
+
+// PlanningBlock configures Phase 2.1 query planning + Phase 2.2 multi-hop
+// decomposition.
+//
+// When enabled, every /v1/query and /v1/answer request issues one short
+// LLM call before retrieval to build a Plan (intent + entities + expected
+// document areas + multi-hop flag + sub-questions). On multi-hop plans,
+// retrieval fans out one selection call per sub-question and unions the
+// results.
+//
+// Planning is opt-in. The per-request `enable_planning` body field
+// overrides this config block; the body field winning lets callers
+// experiment without a server restart.
+type PlanningBlock struct {
+	// Enabled toggles planning at the server level. Default: false.
+	Enabled bool `yaml:"enabled"`
+
+	// Model overrides the planner's LLM model. Empty means use the
+	// request's model (which itself falls back to the engine default).
+	// Point this at a small/fast model — planning is a short prompt
+	// that should not run on the same flagship used for synthesis.
+	Model string `yaml:"model"`
+
+	// CacheSize bounds the per-process LRU of (query, model) → Plan
+	// entries. 0 means use the planner's default (128).
+	CacheSize int `yaml:"cache_size"`
+
+	// Decompose toggles Phase 2.2 multi-hop decomposition. When false,
+	// planning still runs (and the plan is surfaced in the response)
+	// but retrieval always sees the original query — useful for
+	// validating the planner in isolation before turning decomposition
+	// on. Default: true (when Enabled).
+	Decompose bool `yaml:"decompose"`
 }
 
 // AnswerSpanBlock configures the answer-span extractor.
@@ -327,6 +362,11 @@ func Default() Config {
 			Answer: AnswerBlock{
 				MaxSections:     5,
 				MaxAnswerTokens: 1024,
+			},
+			Planning: PlanningBlock{
+				Enabled:   false,
+				CacheSize: 128,
+				Decompose: true,
 			},
 		},
 		Ingest: IngestConfig{
@@ -492,6 +532,30 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.Answer.MaxSections = n
 		}
 	}
+	if v := os.Getenv("VLE_RETRIEVAL_PLANNING_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.Planning.Enabled = true
+		case "0", "false", "no", "off":
+			c.Retrieval.Planning.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PLANNING_MODEL"); v != "" {
+		c.Retrieval.Planning.Model = v
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Retrieval.Planning.CacheSize = n
+		}
+	}
+	if v := os.Getenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Retrieval.Planning.Decompose = true
+		case "0", "false", "no", "off":
+			c.Retrieval.Planning.Decompose = false
+		}
+	}
 }
 
 // Validate checks that required fields for the selected drivers are set.
@@ -572,6 +636,10 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.GlobalLLMConcurrency < 0 {
 		return fmt.Errorf("ingest.global_llm_concurrency must be >= 0, got %d", c.Ingest.GlobalLLMConcurrency)
+	}
+
+	if c.Retrieval.Planning.CacheSize < 0 {
+		return fmt.Errorf("retrieval.planning.cache_size must be >= 0, got %d", c.Retrieval.Planning.CacheSize)
 	}
 
 	return nil
