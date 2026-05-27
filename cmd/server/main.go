@@ -169,6 +169,10 @@ func run() error {
 		SummaryAxesMaxTopics:   cfg.Engine.Ingest.SummaryAxes.MaxTopics,
 		SummaryAxesMaxEntities: cfg.Engine.Ingest.SummaryAxes.MaxEntities,
 		SummaryAxesMaxNumbers:  cfg.Engine.Ingest.SummaryAxes.MaxNumbers,
+		TOCEnabled:             cfg.Engine.Ingest.TOC.Enabled,
+		TOCModel:               cfg.Engine.Ingest.TOC.Model,
+		TOCConcurrency:         cfg.Engine.Ingest.TOC.Concurrency,
+		TOCCheckPages:          cfg.Engine.Ingest.TOC.TOCCheckPages,
 		GlobalLLMConcurrency:   cfg.Engine.Ingest.GlobalLLMConcurrency,
 	})
 	if cfg.Engine.Ingest.Tables.Enabled {

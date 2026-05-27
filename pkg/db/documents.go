@@ -43,6 +43,18 @@ type Document struct {
 	Metadata     map[string]string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+
+	// TOCTree is the JSONB blob persisted by the ingest pipeline's
+	// LLM-driven TOC builder ([]tree.TOCNode marshalled). nil
+	// (NULL in DB) means "not yet generated" — the expected state
+	// for non-PDF documents, for documents ingested before the
+	// 0006 migration, and when the builder failed (builder
+	// failures are non-fatal and leave this column NULL).
+	//
+	// Stored raw so the column round-trips byte-identically
+	// regardless of slice-element ordering inside the encoder.
+	// Callers that need the typed shape unmarshal at read time.
+	TOCTree []byte
 }
 
 // NewDocument inserts a fresh document row in the "pending" state.
@@ -83,7 +95,7 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, store
 	}
 	q := `
         SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
-               byte_size, metadata, created_at, updated_at
+               byte_size, metadata, created_at, updated_at, toc_tree
         FROM documents WHERE id = $1 AND org_id = $2`
 	args := []any{string(id), orgID}
 	if storeID != "" {
@@ -94,13 +106,14 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, store
 
 	var d Document
 	var status string
-	var rawMeta []byte
+	var rawMeta, rawTOC []byte
 	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
-		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
 		return nil, mapErr(err)
 	}
 	d.Status = DocumentStatus(status)
 	d.Metadata = unmarshalMeta(rawMeta)
+	d.TOCTree = rawTOC
 	return &d, nil
 }
 
@@ -111,18 +124,19 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, store
 func (p *Pool) GetDocumentForWorker(ctx context.Context, id tree.DocumentID) (*Document, error) {
 	row := p.QueryRow(ctx, `
         SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
-               byte_size, metadata, created_at, updated_at
+               byte_size, metadata, created_at, updated_at, toc_tree
         FROM documents WHERE id = $1`, string(id))
 
 	var d Document
 	var status string
-	var rawMeta []byte
+	var rawMeta, rawTOC []byte
 	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
-		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
 		return nil, mapErr(err)
 	}
 	d.Status = DocumentStatus(status)
 	d.Metadata = unmarshalMeta(rawMeta)
+	d.TOCTree = rawTOC
 	return &d, nil
 }
 
@@ -140,6 +154,24 @@ func (p *Pool) SetDocumentTitle(ctx context.Context, id tree.DocumentID, title s
 	_, err := p.Exec(ctx, `
         UPDATE documents SET title = $2, updated_at = now() WHERE id = $1`,
 		string(id), title)
+	return mapErr(err)
+}
+
+// UpdateDocumentTOCTree persists the LLM-built table-of-contents
+// tree onto the documents.toc_tree column. treeJSON is the already
+// JSON-marshalled []tree.TOCNode; pass a nil slice to clear (writes
+// SQL NULL — the "not yet generated" state). Mirrors
+// UpdateSectionSummaryAxes so the column can be patched
+// independently of the rest of the document row.
+func (p *Pool) UpdateDocumentTOCTree(ctx context.Context, id tree.DocumentID, treeJSON []byte) error {
+	var arg any
+	if len(treeJSON) > 0 {
+		arg = treeJSON
+	}
+	_, err := p.Exec(ctx, `
+        UPDATE documents
+        SET toc_tree = $2, updated_at = now()
+        WHERE id = $1`, string(id), arg)
 	return mapErr(err)
 }
 
@@ -197,7 +229,7 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 
 	q := `
         SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
-               byte_size, metadata, created_at, updated_at
+               byte_size, metadata, created_at, updated_at, toc_tree
         FROM documents ` + where + `
         ORDER BY created_at DESC
         LIMIT $` + itoa(next)
@@ -212,13 +244,14 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 	for rows.Next() {
 		var d Document
 		var status string
-		var rawMeta []byte
+		var rawMeta, rawTOC []byte
 		if err := rows.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
-			&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
 			return nil, time.Time{}, err
 		}
 		d.Status = DocumentStatus(status)
 		d.Metadata = unmarshalMeta(rawMeta)
+		d.TOCTree = rawTOC
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {

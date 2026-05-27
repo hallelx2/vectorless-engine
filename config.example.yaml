@@ -297,6 +297,32 @@ ingest:
     max_entities: 8
     max_numbers: 6
 
+  # LLM-built table-of-contents tree (PageIndex-style). Runs after
+  # summarize+HyDE on PDF inputs and persists a hierarchical TOC on
+  # documents.toc_tree (JSONB). The tree is small (a few KB even
+  # for 300-page filings) and is intended as a higher-level map
+  # retrieval strategies can reason over before drilling into the
+  # parser-derived sections tree.
+  #
+  # ENABLED BY DEFAULT for PDFs. Non-PDF documents skip the stage
+  # unconditionally. Builder failures are non-fatal — the document
+  # remains fully retrievable via the existing sections tree.
+  toc:
+    enabled: true
+    # Override the LLM model used by the builder; empty inherits
+    # the summary model. Point this at a reasoning-capable model —
+    # the no-TOC generator has to find hierarchy in raw body text,
+    # which a small/fast model often botches.
+    model: ""
+    # Cap on parallel LLM calls during the verification phase
+    # (one call per leaf node).
+    concurrency: 4
+    # The detector scans the first N pages for a table of
+    # contents. PageIndex defaults this to 20 — financial filings
+    # put their TOC inside the first dozen pages and a document
+    # without one by page 20 almost never has one further in.
+    toc_check_pages: 20
+
 log:
   level: "info"            # debug | info | warn | error
   format: "json"           # json | console

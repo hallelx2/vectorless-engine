@@ -48,6 +48,13 @@ type IngestConfig struct {
 	// populate it).
 	SummaryAxes SummaryAxesBlock `yaml:"summary_axes"`
 
+	// TOC configures the PageIndex-style LLM-built table-of-contents
+	// tree stage. Enabled by default for PDF inputs; the resulting
+	// tree is persisted on documents.toc_tree (JSONB). Failures are
+	// non-fatal — they leave the column NULL and the document fully
+	// retrievable via the existing sections tree.
+	TOC TOCBlock `yaml:"toc"`
+
 	// GlobalLLMConcurrency caps the total number of LLM calls in flight
 	// across the summarize and HyDE stages combined, which now run
 	// concurrently. Each stage still respects its own per-stage cap
@@ -58,6 +65,39 @@ type IngestConfig struct {
 	// 4 + 4 per-stage caps while staying well below typical provider
 	// per-tenant concurrency limits.
 	GlobalLLMConcurrency int `yaml:"global_llm_concurrency"`
+}
+
+// TOCBlock configures the LLM-driven table-of-contents tree
+// builder. The builder reads page-by-page text from a freshly-
+// ingested PDF and emits a hierarchical TOC (PageIndex-style),
+// persisted on documents.toc_tree (JSONB).
+//
+// Enabled by default for PDF inputs; non-PDF documents skip the
+// stage unconditionally. Builder failures never break ingest —
+// the document remains fully retrievable via the existing
+// sections tree.
+type TOCBlock struct {
+	// Enabled toggles the stage. Default: true. Flip to false to
+	// skip the extra LLM round-trip when ingest budget matters
+	// more than having a TOC tree for retrieval to reason over.
+	Enabled bool `yaml:"enabled"`
+
+	// Model overrides the LLM model used by the builder. Empty
+	// inherits the engine's configured default. Point this at a
+	// reasoning-capable model — the no-TOC generator has to find
+	// hierarchy in raw body text, which a small/fast model often
+	// botches.
+	Model string `yaml:"model"`
+
+	// Concurrency caps parallel LLM calls during the verification
+	// phase (one call per leaf node). Default: 4.
+	Concurrency int `yaml:"concurrency"`
+
+	// TOCCheckPages bounds the leading prefix the detector scans
+	// for a table of contents. Default: 20 — financial filings
+	// put their TOC inside the first dozen pages and a document
+	// without one by page 20 almost never has one further in.
+	TOCCheckPages int `yaml:"toc_check_pages"`
 }
 
 // SummaryAxesBlock configures the Phase 2.5 structured summarizer.
@@ -584,6 +624,11 @@ func Default() Config {
 				MaxEntities: 8,
 				MaxNumbers:  6,
 			},
+			TOC: TOCBlock{
+				Enabled:       true,
+				Concurrency:   4,
+				TOCCheckPages: 20,
+			},
 		},
 		Log: LogConfig{Level: "info", Format: "json"},
 	}
@@ -765,6 +810,30 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.Ingest.SummaryAxes.MaxNumbers = n
+		}
+	}
+	// LLM-built TOC tree (PageIndex-style). Same truthy-string set
+	// as the other ingest toggles; numeric overrides require a
+	// positive int so a typo doesn't silently flip the default.
+	if v := os.Getenv("VLE_INGEST_TOC_ENABLED"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ingest.TOC.Enabled = true
+		case "0", "false", "no", "off":
+			c.Ingest.TOC.Enabled = false
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_TOC_MODEL"); v != "" {
+		c.Ingest.TOC.Model = v
+	}
+	if v := os.Getenv("VLE_INGEST_TOC_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.TOC.Concurrency = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_TOC_TOC_CHECK_PAGES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Ingest.TOC.TOCCheckPages = n
 		}
 	}
 	if v := os.Getenv("VLE_RETRIEVAL_ANSWER_SPAN_ENABLED"); v != "" {
@@ -976,6 +1045,13 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.SummaryAxes.MaxNumbers < 0 {
 		return fmt.Errorf("ingest.summary_axes.max_numbers must be >= 0, got %d", c.Ingest.SummaryAxes.MaxNumbers)
+	}
+
+	if c.Ingest.TOC.Concurrency < 0 {
+		return fmt.Errorf("ingest.toc.concurrency must be >= 0, got %d", c.Ingest.TOC.Concurrency)
+	}
+	if c.Ingest.TOC.TOCCheckPages < 0 {
+		return fmt.Errorf("ingest.toc.toc_check_pages must be >= 0, got %d", c.Ingest.TOC.TOCCheckPages)
 	}
 
 	if c.Retrieval.Planning.CacheSize < 0 {
