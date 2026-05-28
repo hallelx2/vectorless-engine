@@ -37,6 +37,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 
 	"github.com/hallelx2/vectorless-engine/internal/config"
 	"github.com/hallelx2/vectorless-engine/internal/handler"
@@ -133,7 +134,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init llm: %w", err)
 	}
-	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, store)
+	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, store, pool)
 
 	// Wrap with caching if enabled in engine config.
 	if cfg.Engine.Retrieval.Cache.Enabled {
@@ -349,7 +350,11 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 	}
 }
 
-func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage) retrieval.Strategy {
+// buildStrategy constructs the retrieval strategy named by
+// retrieval.strategy. The DB pool is threaded through so the
+// pageindex strategy can wire a TOC provider that reads
+// documents.toc_tree (the other strategies ignore it).
+func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) retrieval.Strategy {
 	switch c.Strategy {
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
@@ -362,9 +367,81 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 		}
 		a.ModelOverride = c.Agentic.Model
 		return a
+	case "pageindex":
+		return buildPageIndexStrategy(c, client, store, pool)
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
+}
+
+// buildPageIndexStrategy constructs the page-based agentic strategy
+// with the storage-backed PageLoader, a DB-backed TOC provider, and
+// the configured caps. Ported from cmd/engine so the DEPLOYED
+// cmd/server binary can serve retrieval.strategy=pageindex AND the
+// /v1/answer/pageindex endpoint.
+//
+// The TOC provider reads documents.toc_tree via the worker-scoped
+// document lookup. The strategy degrades to its synthesised view
+// (built from the loaded section tree) whenever the column is NULL or
+// the read errors, so a document ingested before the TOC builder ran
+// still navigates cleanly.
+func buildPageIndexStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) *retrieval.PageIndexStrategy {
+	p := retrieval.NewPageIndexStrategy(client)
+	p.PageLoader = storagePageLoader{s: store}
+	if pool != nil {
+		p.TOC = dbTOCProvider{db: pool}
+	}
+	if c.PageIndex.MaxHops > 0 {
+		p.MaxHops = c.PageIndex.MaxHops
+	}
+	if c.PageIndex.PageContentLimit > 0 {
+		p.PageContentLimit = c.PageIndex.PageContentLimit
+	}
+	p.ModelOverride = c.PageIndex.Model
+	return p
+}
+
+// storagePageLoader adapts a storage.Storage to
+// retrieval.PageContentLoader. Mirrors storageFetcher but lives behind
+// a separate interface so the two callers (agentic / pageindex) can be
+// wired independently. The PageIndex strategy materialises section
+// bodies once per get_pages observation, so reading the full reader
+// into a []byte is the right shape.
+type storagePageLoader struct{ s storage.Storage }
+
+func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error) {
+	rc, _, err := l.s.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// dbTOCProvider adapts the DB pool to retrieval.TOCProvider. It reads
+// the persisted documents.toc_tree JSONB and returns it verbatim for
+// the get_document_structure tool. A NULL column (the "not yet
+// generated" state) surfaces as retrieval.ErrNoTOC, which the strategy
+// treats as a graceful-degrade signal: it synthesises the TOC view
+// from the section tree instead of failing the request.
+//
+// GetTOC carries only a document ID (the TOCProvider contract), so the
+// lookup uses the worker-scoped accessor. That is safe here: the
+// caller has already resolved + authorised the tree for this document
+// via the org-scoped LoadTree before the strategy ever calls GetTOC,
+// and the TOC tree is the same structural metadata (titles + page
+// ranges, no bodies) already present on that authorised tree.
+type dbTOCProvider struct{ db *db.Pool }
+
+func (p dbTOCProvider) GetTOC(ctx context.Context, docID tree.DocumentID) ([]byte, error) {
+	doc, err := p.db.GetDocumentForWorker(ctx, docID)
+	if err != nil {
+		return nil, err
+	}
+	if len(doc.TOCTree) == 0 {
+		return nil, retrieval.ErrNoTOC
+	}
+	return doc.TOCTree, nil
 }
 
 // storageFetcher adapts a storage.Storage to retrieval.ContentFetcher.
