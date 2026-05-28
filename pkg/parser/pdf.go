@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hallelx2/pdftable"
 	pdflib "github.com/ledongthuc/pdf"
@@ -1256,7 +1257,21 @@ func extractPDFTables(doc pdftable.Document, opts *TableOpts) []Section {
 	minCols := opts.MinTableCols
 
 	var sections []Section
+	// Total table-extraction budget across the whole document. pdftable's
+	// finder is geometry-heavy and has pathological cases on dense
+	// financial pages (a balance sheet with hundreds of ruling segments
+	// can blow up the intersection grid). Once the doc-wide budget is
+	// spent we stop extracting tables on the remaining pages and let
+	// ingest proceed text-only — a doc with no table sections still
+	// indexes fine (the page text, including the table's text, is in the
+	// prose sections).
+	deadline := time.Now().Add(tableExtractDocBudget)
 	for n := 1; n <= doc.NumPages(); n++ {
+		if time.Now().After(deadline) {
+			slog.Warn("pdf: table-extraction doc budget exhausted; skipping remaining pages",
+				"pages_done", n-1, "total_pages", doc.NumPages())
+			break
+		}
 		page, err := doc.Page(n)
 		if err != nil {
 			continue
@@ -1298,27 +1313,60 @@ func extractPDFTables(doc pdftable.Document, opts *TableOpts) []Section {
 	return sections
 }
 
-// safeExtractTables wraps page.ExtractTables in a recover() so a bug
-// deep inside pdftable can never take down the engine's ingest
-// pipeline. Errors and panics are logged at warn level (not error —
-// the document still gets ingested, just without its tables).
-func safeExtractTables(page pdftable.Page, settings pdftable.TableSettings, pageNum int) (tables []*pdftable.Table) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("pdf: table extraction panicked",
-				"page", pageNum,
-				"panic", fmt.Sprintf("%v", r))
-			tables = nil
-		}
-	}()
-	tables, err := page.ExtractTables(settings)
-	if err != nil {
-		slog.Warn("pdf: table extraction failed",
-			"page", pageNum,
-			"err", err)
-		return nil
+// Table-extraction time bounds. pdftable's finder is pure geometry (no
+// LLM, so the ingest LLM-call timeout doesn't cover it) and has
+// pathological cases on dense financial pages where the
+// intersection-grid construction blows up. A 92-page 10-K was observed
+// stuck in `parsing` for 20+ minutes on a single such page. These
+// bounds keep table extraction strictly time-boxed:
+//   - tableExtractPageTimeout caps any single page.
+//   - tableExtractDocBudget caps the whole document (checked in the
+//     page loop); once spent, remaining pages are skipped text-only.
+const (
+	tableExtractPageTimeout = 15 * time.Second
+	tableExtractDocBudget   = 90 * time.Second
+)
+
+// safeExtractTables wraps page.ExtractTables so a bug — or a pathological
+// O(n^2) page — deep inside pdftable can never take down (or hang) the
+// engine's ingest pipeline. It runs the extraction on a goroutine and
+// abandons it if it exceeds tableExtractPageTimeout. Errors, panics, and
+// timeouts are logged at warn level; the document still ingests, just
+// without that page's tables.
+func safeExtractTables(page pdftable.Page, settings pdftable.TableSettings, pageNum int) []*pdftable.Table {
+	type result struct {
+		tables []*pdftable.Table
+		err    error
 	}
-	return tables
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("pdf: table extraction panicked",
+					"page", pageNum, "panic", fmt.Sprintf("%v", r))
+				done <- result{}
+			}
+		}()
+		t, err := page.ExtractTables(settings)
+		done <- result{tables: t, err: err}
+	}()
+
+	select {
+	case <-time.After(tableExtractPageTimeout):
+		// The goroutine is abandoned (it will finish on its own and the
+		// buffered channel lets it send without blocking, then get GC'd).
+		// A single slow page is not worth stalling the whole ingest.
+		slog.Warn("pdf: table extraction timed out; skipping page",
+			"page", pageNum, "timeout", tableExtractPageTimeout)
+		return nil
+	case res := <-done:
+		if res.err != nil {
+			slog.Warn("pdf: table extraction failed",
+				"page", pageNum, "err", res.err)
+			return nil
+		}
+		return res.tables
+	}
 }
 
 // normaliseTableRows trims whitespace per cell and pads short rows out
