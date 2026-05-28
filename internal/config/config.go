@@ -320,6 +320,12 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_LLM_DRIVER", "VLE_LLM_DRIVER"); v != "" {
 		c.Engine.LLM.Driver = v
 	}
+	// Ingest mode (full | minimal). Forwarded so the live
+	// vectorless-server can be flipped to minimal ingest with a single
+	// env var, no secret/config edit. VLS_-prefixed wins over VLE_.
+	if v := firstEnv("VLS_INGEST_MODE", "VLE_INGEST_MODE"); v != "" {
+		c.Engine.Ingest.Mode = v
+	}
 	// Anthropic-compatible gateway overrides (e.g. GLM/Zhipu via
 	// https://api.z.ai/api/anthropic): base URL + model, so the
 	// anthropic driver can run a non-Anthropic model without a secret
