@@ -5,8 +5,10 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hallelx2/llmgate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
@@ -28,6 +30,41 @@ type Deps struct {
 	MultiDoc *retrieval.MultiDoc
 	Version  string
 	Config   config.Config
+
+	// Strategies is the pre-built set of selectable retrieval
+	// strategies keyed by config name. It backs the per-request
+	// "strategy" override on /v1/query (the benchmark uses it to A/B
+	// chunked-tree vs pageindex against one running engine). Nil
+	// disables the override — every /v1/query uses Strategy.
+	Strategies map[string]retrieval.Strategy
+
+	// LLM is the shared llmgate client used by the answer endpoints
+	// (/v1/answer, /v1/answer/pageindex) for span extraction and
+	// synthesis. Nil makes those endpoints return 501.
+	LLM llmgate.Client
+
+	// LLMModel is the default model name. Per-request model overrides
+	// win over it.
+	LLMModel string
+
+	// AnswerSpan / Answer hold the answer-endpoint config blocks.
+	AnswerSpan enginecfg.AnswerSpanBlock
+	Answer     enginecfg.AnswerBlock
+
+	// Replay is the replay-trace store. Every /v1/answer and
+	// /v1/answer/pageindex response is stamped with a trace_token and
+	// persisted here. Nil skips replay capture for those endpoints.
+	Replay retrieval.ReplayStore
+
+	// PageIndexStrategy is the dedicated page-based agentic strategy
+	// instance used by /v1/answer/pageindex, independent of whichever
+	// selection strategy retrieval.strategy chose. Nil (or
+	// PageIndex.Enabled=false) makes the endpoint return 501.
+	PageIndexStrategy *retrieval.PageIndexStrategy
+
+	// PageIndex carries the page-based answer endpoint's config. The
+	// per-request max_hops / max_pages_per_fetch fields override it.
+	PageIndex enginecfg.PageIndexBlock
 }
 
 // Router builds the chi router with all v1 routes and the full
@@ -104,10 +141,12 @@ func Router(d Deps) http.Handler {
 	// ── REST Handlers (hand-written, chi) ─────────────────────────
 	health := NewHealthHandler(d.Version)
 	docs := NewDocumentsHandler(d.Logger, d.DB, d.Storage, d.Queue)
-	query := NewQueryHandler(d.Logger, d.DB, d.Storage, d.Strategy)
+	query := NewQueryHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.Strategies)
 	queryStream := NewQueryStreamHandler(d.Logger, d.DB, d.Storage, d.Strategy)
 	queryMulti := NewQueryMultiHandler(d.Logger, d.Storage, d.Strategy, d.MultiDoc)
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
+	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay)
+	answerPageIndex := NewAnswerPageIndexHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.PageIndexStrategy, d.PageIndex)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
 
 	// ── Connect-RPC Handlers (generated stubs, three-transport) ───
@@ -159,6 +198,12 @@ func Router(d Deps) http.Handler {
 			r.Post("/multi", queryMulti.HandleQueryMulti)
 			r.Post("/multi/stream", queryStreamMulti.HandleQueryStreamMulti)
 		})
+
+		// Answer: retrieval + synthesis in one round-trip. /answer
+		// uses the configured selection strategy; /answer/pageindex
+		// runs the page-based agentic loop end-to-end.
+		r.Post("/answer", answer.HandleAnswer)
+		r.Post("/answer/pageindex", answerPageIndex.HandleAnswerPageIndex)
 	})
 
 	// Internal: queue webhook (QStash).
