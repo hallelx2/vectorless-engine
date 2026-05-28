@@ -28,6 +28,13 @@ type Deps struct {
 	MultiDoc *retrieval.MultiDoc
 	Version  string
 	Config   config.Config
+
+	// Strategies is the pre-built set of selectable retrieval
+	// strategies keyed by config name. It backs the per-request
+	// "strategy" override on /v1/query (the benchmark uses it to A/B
+	// chunked-tree vs pageindex against one running engine). Nil
+	// disables the override — every /v1/query uses Strategy.
+	Strategies map[string]retrieval.Strategy
 }
 
 // Router builds the chi router with all v1 routes and the full
@@ -104,7 +111,7 @@ func Router(d Deps) http.Handler {
 	// ── REST Handlers (hand-written, chi) ─────────────────────────
 	health := NewHealthHandler(d.Version)
 	docs := NewDocumentsHandler(d.Logger, d.DB, d.Storage, d.Queue)
-	query := NewQueryHandler(d.Logger, d.DB, d.Storage, d.Strategy)
+	query := NewQueryHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.Strategies)
 	queryStream := NewQueryStreamHandler(d.Logger, d.DB, d.Storage, d.Strategy)
 	queryMulti := NewQueryMultiHandler(d.Logger, d.Storage, d.Strategy, d.MultiDoc)
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)

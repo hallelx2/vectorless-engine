@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,20 +21,48 @@ type QueryHandler struct {
 	db       *db.Pool
 	storage  storage.Storage
 	strategy retrieval.Strategy
+	// strategies is the pre-built set of selectable strategies keyed
+	// by config name (chunked-tree, pageindex, agentic, single-pass).
+	// A per-request "strategy" field selects one of these; an absent
+	// or empty field falls back to the configured default (strategy).
+	// Nil/empty disables the override entirely — every request uses
+	// the default.
+	strategies map[string]retrieval.Strategy
+
+	// treeLoader is a test seam overriding how the handler resolves
+	// the document tree. Nil routes through the org-scoped DB lookup
+	// (the production path); tests set it to a deterministic in-memory
+	// function so the handler runs end-to-end without a real Postgres
+	// backend.
+	treeLoader func(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error)
 }
 
-// NewQueryHandler creates a QueryHandler.
+// loadTree resolves the document tree, routing through the test seam
+// when set.
+func (h *QueryHandler) loadTree(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error) {
+	if h.treeLoader != nil {
+		return h.treeLoader(ctx, orgID, storeID, docID)
+	}
+	return h.db.LoadTree(ctx, docID, orgID, storeID)
+}
+
+// NewQueryHandler creates a QueryHandler. strategies is the optional
+// pre-built map that backs the per-request "strategy" override; pass
+// nil to disable the override (every request uses the default
+// strategy).
 func NewQueryHandler(
 	logger *slog.Logger,
 	pool *db.Pool,
 	store storage.Storage,
 	strategy retrieval.Strategy,
+	strategies map[string]retrieval.Strategy,
 ) *QueryHandler {
 	return &QueryHandler{
-		logger:   logger,
-		db:       pool,
-		storage:  store,
-		strategy: strategy,
+		logger:     logger,
+		db:         pool,
+		storage:    store,
+		strategy:   strategy,
+		strategies: strategies,
 	}
 }
 
@@ -46,6 +75,28 @@ type queryRequest struct {
 	ReservedForPrompt int             `json:"reserved_for_prompt"`
 	MaxParallelCalls  int             `json:"max_parallel_calls"`
 	MaxSections       int             `json:"max_sections"`
+	// Strategy optionally overrides the configured retrieval strategy
+	// for THIS request only. One of: chunked-tree, pageindex, agentic,
+	// single-pass. Empty uses the server default. This lets a caller
+	// (e.g. the benchmark harness) A/B strategies against the same
+	// running engine without a redeploy. Unknown values return 400.
+	Strategy string `json:"strategy"`
+}
+
+// resolveStrategy picks the strategy for one request. An empty
+// override yields the configured default. A non-empty override is
+// looked up in the pre-built set; an unknown name (or an override on a
+// handler with no strategy set wired) returns ok=false so the caller
+// can reply 400 rather than silently falling back.
+func (h *QueryHandler) resolveStrategy(override string) (retrieval.Strategy, bool) {
+	if override == "" {
+		return h.strategy, true
+	}
+	if h.strategies == nil {
+		return nil, false
+	}
+	s, ok := h.strategies[override]
+	return s, ok
 }
 
 // HandleQuery accepts a query, loads the document tree, runs the
@@ -65,12 +116,18 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "document_id and query are required")
 		return
 	}
-	if h.strategy == nil {
+
+	strategy, ok := h.resolveStrategy(body.Strategy)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "unknown strategy: "+body.Strategy)
+		return
+	}
+	if strategy == nil {
 		writeErr(w, http.StatusServiceUnavailable, "no retrieval strategy configured")
 		return
 	}
 
-	t, err := h.db.LoadTree(r.Context(), body.DocumentID, orgID, storeID(r))
+	t, err := h.loadTree(r.Context(), orgID, storeID(r), body.DocumentID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -103,7 +160,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		ids   []tree.SectionID
 		usage *retrieval.Usage
 	)
-	if cs, ok := h.strategy.(retrieval.CostStrategy); ok {
+	if cs, ok := strategy.(retrieval.CostStrategy); ok {
 		result, err := cs.SelectWithCost(r.Context(), t, body.Query, budget)
 		if err != nil {
 			h.logger.Error("query: strategy failed",
@@ -117,7 +174,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		usage = &result.Usage
 	} else {
 		var err error
-		ids, err = h.strategy.Select(r.Context(), t, body.Query, budget)
+		ids, err = strategy.Select(r.Context(), t, body.Query, budget)
 		if err != nil {
 			h.logger.Error("query: strategy failed",
 				"err", err,
@@ -160,7 +217,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
-		"strategy":    h.strategy.Name(),
+		"strategy":    strategy.Name(),
 		"model":       body.Model,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),

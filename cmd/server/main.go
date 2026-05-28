@@ -155,6 +155,14 @@ func run() error {
 	// Multi-document query dispatcher.
 	multiDoc := retrieval.NewMultiDoc(strategy, pool.LoadTree)
 
+	// Pre-built set of selectable strategies, keyed by config name.
+	// Backs the per-request "strategy" override on /v1/query so the
+	// benchmark can A/B chunked-tree vs pageindex against this same
+	// running engine without a redeploy. Built from the raw client so
+	// each override behaves identically to booting with that strategy
+	// as the default (no shared cache wrapper across overrides).
+	strategies := buildStrategySet(cfg.Engine.Retrieval, llmClient, store, pool)
+
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                     pool,
@@ -202,14 +210,15 @@ func run() error {
 	// Only start the HTTP server in "server" role.
 	if *role == "server" {
 		deps := handler.Deps{
-			Logger:   logger,
-			DB:       pool,
-			Storage:  store,
-			Queue:    q,
-			Strategy: strategy,
-			MultiDoc: multiDoc,
-			Version:  version,
-			Config:   cfg,
+			Logger:     logger,
+			DB:         pool,
+			Storage:    store,
+			Queue:      q,
+			Strategy:   strategy,
+			MultiDoc:   multiDoc,
+			Version:    version,
+			Config:     cfg,
+			Strategies: strategies,
 		}
 
 		srv := &http.Server{
@@ -371,6 +380,32 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 		return buildPageIndexStrategy(c, client, store, pool)
 	default:
 		return retrieval.NewChunkedTree(client)
+	}
+}
+
+// buildStrategySet pre-builds one instance of every selectable
+// strategy, keyed by its config name. The deployed /v1/query handler
+// uses this map to honour a per-request "strategy" override without
+// rebuilding a strategy on the hot path: selection is a map lookup.
+//
+// This is what lets the benchmark A/B chunked-tree vs pageindex
+// against the SAME running engine — no redeploy, no config flip. The
+// caps (agentic max-hops, pageindex page limits, model overrides) come
+// from the same config blocks the default builder reads, so an
+// override behaves identically to booting with that strategy as the
+// default.
+func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) map[string]retrieval.Strategy {
+	agentic := retrieval.NewAgentic(client, storageFetcher{s: store})
+	if c.Agentic.MaxHops > 0 {
+		agentic.MaxHops = c.Agentic.MaxHops
+	}
+	agentic.ModelOverride = c.Agentic.Model
+
+	return map[string]retrieval.Strategy{
+		"single-pass":  retrieval.NewSinglePass(client),
+		"chunked-tree": retrieval.NewChunkedTree(client),
+		"agentic":      agentic,
+		"pageindex":    buildPageIndexStrategy(c, client, store, pool),
 	}
 }
 
