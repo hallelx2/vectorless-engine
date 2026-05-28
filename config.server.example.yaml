@@ -99,9 +99,21 @@ engine:
       include_sibling_breadcrumbs: true
 
   ingest:
+    # Ingest mode: full (default) | minimal.
+    #   full     parse -> persist -> summarize -> HyDE -> multi-axis ->
+    #            TOC build. Maximum retrieval quality; minutes on a large
+    #            filing.
+    #   minimal  parse -> persist -> ready. Skips every LLM enrichment
+    #            stage AND table extraction — queryable in seconds. The
+    #            page-based strategy (/v1/answer/pageindex) works on it
+    #            unchanged (synthesised TOC + raw page reads).
+    # Flip the live service without a secret edit: VLS_INGEST_MODE=minimal.
+    mode: "full"
+
     # The summarize and HyDE stages run concurrently. This caps the total
     # number of LLM calls in flight across both stages combined.
     # 0 disables the global cap; default is 12.
+    # (Ignored when mode: minimal — no LLM stages run.)
     global_llm_concurrency: 12
 
     # HyDE candidate-question generation per leaf section. Folded into

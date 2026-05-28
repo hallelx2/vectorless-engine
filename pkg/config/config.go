@@ -33,6 +33,35 @@ type Config struct {
 // IngestConfig configures retrieval-quality boosters that run during
 // the ingest pipeline (between summarize and StatusReady).
 type IngestConfig struct {
+	// Mode selects how much work the ingest pipeline does before a
+	// document is marked ready.
+	//
+	//   "full"    (default) — parse → build tree → persist → summarize
+	//                          → HyDE → multi-axis summaries → TOC build.
+	//                          Maximises retrieval quality at the cost of
+	//                          ~1,000-3,000 LLM calls + a table-extraction
+	//                          pass on a large filing (minutes of wall time).
+	//
+	//   "minimal"           — parse → build tree → persist → ready.
+	//                          Skips ALL per-section LLM enrichment
+	//                          (summarize, HyDE, multi-axis, TOC build)
+	//                          AND the pdftable table-finding pass, so a
+	//                          document becomes queryable in ~parse-speed
+	//                          (seconds). The page-based retrieval strategy
+	//                          (/v1/answer/pageindex) needs none of the
+	//                          skipped enrichment: it navigates a TOC tree
+	//                          (synthesised from the section tree when
+	//                          documents.toc_tree is NULL) and reads raw
+	//                          section/page text at query time — and the raw
+	//                          page text still contains the tables' text, so
+	//                          dropping table *sections* loses nothing for
+	//                          it. The summary-dependent strategies
+	//                          (chunked-tree, agentic) degrade to using
+	//                          titles + raw content with no summaries.
+	//
+	// Empty defaults to "full". Engine env override: VLE_INGEST_MODE.
+	Mode string `yaml:"mode"`
+
 	HyDE HyDEConfig `yaml:"hyde"`
 
 	// Tables configures pdftable's table-finding pass over PDF inputs.
@@ -695,6 +724,7 @@ func Default() Config {
 			},
 		},
 		Ingest: IngestConfig{
+			Mode:                  "full",
 			GlobalLLMConcurrency:  12,
 			LLMCallTimeoutSeconds: 90,
 			MaxSections:           400,
@@ -837,6 +867,11 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("VLE_RETRIEVAL_AGENTIC_MODEL"); v != "" {
 		c.Retrieval.Agentic.Model = v
+	}
+	// Ingest mode switch (full | minimal). A single env var flips the
+	// engine into fast/minimal ingest with no secret edit.
+	if v := os.Getenv("VLE_INGEST_MODE"); v != "" {
+		c.Ingest.Mode = v
 	}
 	// Ingest / HyDE knobs. Booleans accept the usual truthy strings —
 	// kept narrow so a typo doesn't silently flip the flag.
@@ -1142,6 +1177,12 @@ func (c Config) Validate() error {
 	}
 	if v := c.Server.TLS.MinVersion; v != "" && v != "1.2" && v != "1.3" {
 		return fmt.Errorf("server.tls.min_version must be 1.2 or 1.3, got %q", v)
+	}
+
+	switch c.Ingest.Mode {
+	case "", "full", "minimal":
+	default:
+		return fmt.Errorf("ingest.mode must be one of full|minimal, got %q", c.Ingest.Mode)
 	}
 
 	if c.Ingest.HyDE.NumQuestions < 0 {

@@ -200,6 +200,7 @@ func run() error {
 		LLM:                    llmClient,
 		Parsers:                ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Engine.Ingest.Tables)),
 		Logger:                 logger,
+		Mode:                   cfg.Engine.Ingest.Mode,
 		HyDEEnabled:            cfg.Engine.Ingest.HyDE.Enabled,
 		HyDEModel:              cfg.Engine.Ingest.HyDE.Model,
 		HyDENumQuestions:       cfg.Engine.Ingest.HyDE.NumQuestions,
@@ -214,7 +215,9 @@ func run() error {
 		TOCCheckPages:          cfg.Engine.Ingest.TOC.TOCCheckPages,
 		GlobalLLMConcurrency:   cfg.Engine.Ingest.GlobalLLMConcurrency,
 	})
-	if cfg.Engine.Ingest.Tables.Enabled {
+	if cfg.Engine.Ingest.Mode == ingest.ModeMinimal {
+		logger.Info("ingest: MINIMAL mode — parse→persist→ready; skipping summarize/HyDE/multi-axis/TOC + table extraction")
+	} else if cfg.Engine.Ingest.Tables.Enabled {
 		logger.Info("ingest: pdf table extraction enabled",
 			"vertical_strategy", cfg.Engine.Ingest.Tables.VerticalStrategy,
 			"horizontal_strategy", cfg.Engine.Ingest.Tables.HorizontalStrategy,
