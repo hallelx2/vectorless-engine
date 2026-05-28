@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -158,7 +159,7 @@ func (p *Pipeline) candidateQuestionsFor(ctx context.Context, s db.Section, prof
 		JSONSchema: []byte(hydeJSONSchema),
 	}
 
-	questions, err := runHyDEWithRetry(ctx, p.LLM, req, defaultHyDERetries)
+	questions, err := runHyDEWithRetry(ctx, p.LLM, req, defaultHyDERetries, p.LLMCallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +177,12 @@ const defaultHyDERetries = 2
 // parse failure returns an error so the caller can log it; transport
 // errors propagate. ErrNotImplemented (stub LLM) degrades to "no
 // questions" so test paths keep working.
-func runHyDEWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int) ([]string, error) {
+//
+// timeout bounds each individual Complete call. A per-call timeout (or
+// context cancellation) is terminal — it short-circuits the retry loop
+// rather than re-issuing a call that just hung. A non-positive timeout
+// disables the per-call bound.
+func runHyDEWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int, timeout time.Duration) ([]string, error) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -193,11 +199,12 @@ func runHyDEWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgat
 			}
 			req.Messages = msgs
 		}
-		resp, err := client.Complete(ctx, req)
+		resp, err := completeWithTimeout(ctx, client, req, timeout)
 		if err != nil {
 			// Stub clients return ErrNotImplemented — treat as "no
 			// questions" so the pipeline proceeds without LLM access
-			// in test setups.
+			// in test setups. Per-call timeouts and other transport
+			// errors propagate (the caller skips this section).
 			if errors.Is(err, llmgate.ErrNotImplemented) {
 				return nil, nil
 			}

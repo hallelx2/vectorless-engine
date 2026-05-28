@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hallelx2/llmgate"
 
@@ -82,7 +83,13 @@ const defaultSummaryAxesRetries = 2
 //
 // ErrNotImplemented (stub LLM) is folded into the error return so
 // callers can degrade to the text fallback path.
-func runSummaryAxesWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int) (*tree.SummaryAxes, string, error) {
+//
+// timeout bounds each individual Complete call. A per-call timeout (or
+// context cancellation) is terminal — it short-circuits the retry loop
+// and returns the error immediately, because re-issuing a call that just
+// hung would only multiply the wall-time cost. A non-positive timeout
+// disables the per-call bound.
+func runSummaryAxesWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int, timeout time.Duration) (*tree.SummaryAxes, string, error) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -99,10 +106,11 @@ func runSummaryAxesWithRetry(ctx context.Context, client llmgate.Client, baseReq
 			}
 			req.Messages = msgs
 		}
-		resp, err := client.Complete(ctx, req)
+		resp, err := completeWithTimeout(ctx, client, req, timeout)
 		if err != nil {
 			// ErrNotImplemented bubbles up so the caller can use a
-			// purely text-based fallback. Transport errors do the same.
+			// purely text-based fallback. Transport errors and per-call
+			// timeouts do the same (a timeout is terminal — no retry).
 			return nil, lastRaw, err
 		}
 		lastRaw = resp.Content

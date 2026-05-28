@@ -65,6 +65,37 @@ type IngestConfig struct {
 	// 4 + 4 per-stage caps while staying well below typical provider
 	// per-tenant concurrency limits.
 	GlobalLLMConcurrency int `yaml:"global_llm_concurrency"`
+
+	// LLMCallTimeoutSeconds bounds each INDIVIDUAL LLM call issued by the
+	// ingest pipeline (one section's summary, one leaf's HyDE questions,
+	// one TOC detect/extract/verify turn). Without it, a single provider
+	// call that hangs — no response, no error — blocks its bounded-
+	// concurrency errgroup forever, and the document never leaves
+	// `summarizing`. (Observed: a doc stuck for 13+ hours.)
+	//
+	// When a call exceeds this deadline it is treated exactly like any
+	// other per-section failure: logged and skipped, leaving that
+	// section with its existing/empty summary. One bad section can no
+	// longer freeze the whole document — it still reaches `ready`.
+	//
+	// 0 (or omitted) defaults to 90. Set explicitly to tune for slow
+	// reasoning models; a negative value is rejected by Validate.
+	LLMCallTimeoutSeconds int `yaml:"llm_call_timeout_seconds"`
+
+	// MaxSections caps the number of leaf sections a single document may
+	// produce. A pathological PDF (e.g. a 92-page 10-Q whose every bold
+	// table cell looks like a heading) can shatter into ~1500 leaves,
+	// each of which then costs a summarize + HyDE LLM call — thousands of
+	// calls that throttle or stall ingest.
+	//
+	// When the parsed leaf count exceeds this cap, the parser merges
+	// adjacent small leaf sections under a shared parent (smallest
+	// siblings first) until the document is back under the cap.
+	//
+	// 0 (or omitted) defaults to 400 — comfortably above a real filing's
+	// section count (~170-510 with tables) while still catching the
+	// runaway case. A negative value is rejected by Validate.
+	MaxSections int `yaml:"max_sections"`
 }
 
 // TOCBlock configures the LLM-driven table-of-contents tree
@@ -658,7 +689,9 @@ func Default() Config {
 			},
 		},
 		Ingest: IngestConfig{
-			GlobalLLMConcurrency: 12,
+			GlobalLLMConcurrency:  12,
+			LLMCallTimeoutSeconds: 90,
+			MaxSections:           400,
 			HyDE: HyDEConfig{
 				Enabled:      true,
 				NumQuestions: 5,
@@ -812,6 +845,16 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_GLOBAL_LLM_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Ingest.GlobalLLMConcurrency = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_LLM_CALL_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.LLMCallTimeoutSeconds = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_MAX_SECTIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.MaxSections = n
 		}
 	}
 	// pdftable-driven table extraction.
@@ -1090,6 +1133,12 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.GlobalLLMConcurrency < 0 {
 		return fmt.Errorf("ingest.global_llm_concurrency must be >= 0, got %d", c.Ingest.GlobalLLMConcurrency)
+	}
+	if c.Ingest.LLMCallTimeoutSeconds < 0 {
+		return fmt.Errorf("ingest.llm_call_timeout_seconds must be >= 0, got %d", c.Ingest.LLMCallTimeoutSeconds)
+	}
+	if c.Ingest.MaxSections < 0 {
+		return fmt.Errorf("ingest.max_sections must be >= 0, got %d", c.Ingest.MaxSections)
 	}
 
 	switch c.Ingest.Tables.VerticalStrategy {
