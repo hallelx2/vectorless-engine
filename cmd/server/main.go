@@ -163,6 +163,36 @@ func run() error {
 	// as the default (no shared cache wrapper across overrides).
 	strategies := buildStrategySet(cfg.Engine.Retrieval, llmClient, store, pool)
 
+	// Replay store: every /v1/answer and /v1/answer/pageindex response
+	// is stamped with a deterministic trace_token and its body bytes
+	// persisted here so /v1/replay can return them verbatim. On by
+	// default; operators opt out via retrieval.replay.enabled=false.
+	var replayStore retrieval.ReplayStore
+	if cfg.Engine.Retrieval.Replay.Enabled {
+		replayStore = retrieval.NewLRUReplayStore(retrieval.LRUReplayConfig{
+			MaxEntries: cfg.Engine.Retrieval.Replay.MaxEntries,
+			TTL:        time.Duration(cfg.Engine.Retrieval.Replay.TTLSeconds) * time.Second,
+		})
+		logger.Info("retrieval: replay store enabled",
+			"max_entries", cfg.Engine.Retrieval.Replay.MaxEntries,
+			"ttl_seconds", cfg.Engine.Retrieval.Replay.TTLSeconds,
+		)
+	}
+
+	// /v1/answer/pageindex gets its OWN PageIndexStrategy instance,
+	// independent of whatever selection strategy retrieval.strategy
+	// chose, so the endpoint is always available (gated by
+	// retrieval.pageindex.enabled) even on a chunked-tree deployment.
+	var pageIndexStrategy *retrieval.PageIndexStrategy
+	if cfg.Engine.Retrieval.PageIndex.Enabled && llmClient != nil {
+		pageIndexStrategy = buildPageIndexStrategy(cfg.Engine.Retrieval, llmClient, store, pool)
+		logger.Info("retrieval: pageindex answer endpoint enabled",
+			"max_hops", pageIndexStrategy.MaxHops,
+			"page_content_limit", pageIndexStrategy.PageContentLimit,
+			"model_override", cfg.Engine.Retrieval.PageIndex.Model,
+		)
+	}
+
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                     pool,
@@ -210,15 +240,22 @@ func run() error {
 	// Only start the HTTP server in "server" role.
 	if *role == "server" {
 		deps := handler.Deps{
-			Logger:     logger,
-			DB:         pool,
-			Storage:    store,
-			Queue:      q,
-			Strategy:   strategy,
-			MultiDoc:   multiDoc,
-			Version:    version,
-			Config:     cfg,
-			Strategies: strategies,
+			Logger:            logger,
+			DB:                pool,
+			Storage:           store,
+			Queue:             q,
+			Strategy:          strategy,
+			MultiDoc:          multiDoc,
+			Version:           version,
+			Config:            cfg,
+			Strategies:        strategies,
+			LLM:               llmClient,
+			LLMModel:          modelFor(cfg.Engine.LLM),
+			AnswerSpan:        cfg.Engine.Retrieval.AnswerSpan,
+			Answer:            cfg.Engine.Retrieval.Answer,
+			Replay:            replayStore,
+			PageIndexStrategy: pageIndexStrategy,
+			PageIndex:         cfg.Engine.Retrieval.PageIndex,
 		}
 
 		srv := &http.Server{
@@ -332,6 +369,21 @@ func buildQueue(c enginecfg.QueueConfig, dbURL string) (queue.Queue, error) {
 	default:
 		return nil, fmt.Errorf("unknown queue driver: %s", c.Driver)
 	}
+}
+
+// modelFor returns the configured chat/general-purpose model name for
+// the selected LLM driver. Used as the engine-default fallback when an
+// API request omits an explicit model (answer + answer/pageindex).
+func modelFor(c enginecfg.LLMConfig) string {
+	switch c.Driver {
+	case "anthropic":
+		return c.Anthropic.Model
+	case "openai":
+		return c.OpenAI.Model
+	case "gemini":
+		return c.Gemini.Model
+	}
+	return ""
 }
 
 func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
