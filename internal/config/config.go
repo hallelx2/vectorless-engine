@@ -320,6 +320,16 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_LLM_DRIVER", "VLE_LLM_DRIVER"); v != "" {
 		c.Engine.LLM.Driver = v
 	}
+	// Anthropic-compatible gateway overrides (e.g. GLM/Zhipu via
+	// https://api.z.ai/api/anthropic): base URL + model, so the
+	// anthropic driver can run a non-Anthropic model without a secret
+	// edit.
+	if v := firstEnv("VLS_LLM_ANTHROPIC_BASE_URL", "VLE_LLM_ANTHROPIC_BASE_URL"); v != "" {
+		c.Engine.LLM.Anthropic.BaseURL = v
+	}
+	if v := firstEnv("VLS_LLM_ANTHROPIC_MODEL", "VLE_LLM_ANTHROPIC_MODEL"); v != "" {
+		c.Engine.LLM.Anthropic.Model = v
+	}
 }
 
 // firstEnv returns the first non-empty value from the named env vars.

@@ -332,6 +332,12 @@ type AnthropicBlock struct {
 	APIKey         string `yaml:"api_key"`
 	Model          string `yaml:"model"`
 	ReasoningModel string `yaml:"reasoning_model"`
+	// BaseURL overrides the Anthropic API endpoint. Empty = official
+	// api.anthropic.com. Set this to point the Anthropic driver at any
+	// Anthropic-compatible gateway — e.g. GLM/Zhipu's
+	// https://api.z.ai/api/anthropic — so the same driver can drive a
+	// non-Anthropic model that speaks the Messages API.
+	BaseURL string `yaml:"base_url"`
 }
 
 // OpenAIBlock configures the OpenAI provider.
@@ -804,6 +810,19 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("VLE_LLM_DRIVER"); v != "" {
 		c.LLM.Driver = v
+	}
+	// Anthropic-driver overrides. These let an operator point the
+	// anthropic driver at an Anthropic-compatible gateway (e.g. GLM via
+	// https://api.z.ai/api/anthropic) without baking the values into the
+	// config file or secret.
+	if v := os.Getenv("VLE_LLM_ANTHROPIC_API_KEY"); v != "" {
+		c.LLM.Anthropic.APIKey = v
+	}
+	if v := os.Getenv("VLE_LLM_ANTHROPIC_BASE_URL"); v != "" {
+		c.LLM.Anthropic.BaseURL = v
+	}
+	if v := os.Getenv("VLE_LLM_ANTHROPIC_MODEL"); v != "" {
+		c.LLM.Anthropic.Model = v
 	}
 	if v := os.Getenv("VLE_TLS_CERT_FILE"); v != "" {
 		c.Server.TLS.CertFile = v
