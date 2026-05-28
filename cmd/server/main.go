@@ -393,6 +393,7 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 			APIKey:         c.Anthropic.APIKey,
 			Model:          c.Anthropic.Model,
 			ReasoningModel: c.Anthropic.ReasoningModel,
+			BaseURL:        c.Anthropic.BaseURL,
 		})
 	case "openai":
 		return openai.New(openai.Config{
