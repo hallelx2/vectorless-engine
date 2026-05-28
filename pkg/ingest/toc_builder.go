@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -66,6 +67,17 @@ type TOCBuilder struct {
 	// document with no TOC by page 20 almost never has one
 	// further in. Default: 20.
 	TOCCheckPages int
+
+	// LLMCallTimeout bounds each individual LLM call the builder issues
+	// (every detect, extract, no-TOC-generate, and verify turn). It is
+	// the same safety valve the rest of the ingest pipeline uses: a
+	// single provider call that hangs must not block the builder's
+	// verification errgroup — and therefore the whole document — forever.
+	//
+	// Zero disables the per-call bound, preserving the legacy behaviour
+	// for TOCBuilder literals in tests. The pipeline sets it from
+	// Pipeline.LLMCallTimeout (default 90s).
+	LLMCallTimeout time.Duration
 }
 
 // Usage is the cumulative LLM accounting returned by Build. Mirrors
@@ -214,7 +226,7 @@ Please note: abstract, summary, notation list, figure list, table list, etc. are
 		JSONMode:   true,
 		JSONSchema: []byte(tocDetectorJSONSchema),
 	}
-	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage)
+	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage, b.LLMCallTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -269,7 +281,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 		JSONMode:   true,
 		JSONSchema: []byte(tocNodesJSONSchema),
 	}
-	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage)
+	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage, b.LLMCallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +319,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 		JSONMode:   true,
 		JSONSchema: []byte(tocNodesJSONSchema),
 	}
-	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage)
+	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage, b.LLMCallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +435,7 @@ Directly return the final JSON structure. Do not output anything else.`, title, 
 		JSONMode:   true,
 		JSONSchema: []byte(tocVerifyJSONSchema),
 	}
-	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage)
+	raw, err := runTOCJSONWithRetry(ctx, b.LLM, req, defaultTOCRetries, usage, b.LLMCallTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -491,7 +503,12 @@ type tocNodesPayload struct {
 // Returns the final raw response text (empty on transport / stub
 // failure). Caller decodes; a final parse failure degrades to "no
 // usable response" rather than an error.
-func runTOCJSONWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int, usage *Usage) (string, error) {
+//
+// timeout bounds each individual Complete call. A per-call timeout (or
+// context cancellation) is terminal — it short-circuits the retry loop
+// rather than re-issuing a call that just hung. A non-positive timeout
+// disables the per-call bound.
+func runTOCJSONWithRetry(ctx context.Context, client llmgate.Client, baseReq llmgate.Request, maxRetries int, usage *Usage, timeout time.Duration) (string, error) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -508,11 +525,12 @@ func runTOCJSONWithRetry(ctx context.Context, client llmgate.Client, baseReq llm
 			}
 			req.Messages = msgs
 		}
-		resp, err := client.Complete(ctx, req)
+		resp, err := completeWithTimeout(ctx, client, req, timeout)
 		if err != nil {
 			// Stub LLM (ErrNotImplemented) is a soft failure — the
-			// caller will degrade. Transport errors do the same so
-			// ingest never dies on a transient blip.
+			// caller will degrade. Transport errors and per-call
+			// timeouts do the same so ingest never dies on a transient
+			// blip or a hung call.
 			if errors.Is(err, llmgate.ErrNotImplemented) {
 				return "", nil
 			}

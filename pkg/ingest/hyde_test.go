@@ -91,7 +91,7 @@ func TestRunHyDEWithRetryHappy(t *testing.T) {
 	m := &llmgate.Mock{Reply: `{"questions":["Q1","Q2","Q3","Q4","Q5"]}`}
 	got, err := runHyDEWithRetry(context.Background(), m, llmgate.Request{
 		Messages: []llmgate.Message{{Role: llmgate.RoleUser, Content: "go"}},
-	}, 2)
+	}, 2, 0)
 	if err != nil {
 		t.Fatalf("happy path: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestRunHyDEWithRetryRetriesOnNonJSON(t *testing.T) {
 	}
 	got, err := runHyDEWithRetry(context.Background(), m, llmgate.Request{
 		Messages: []llmgate.Message{{Role: llmgate.RoleUser, Content: "go"}},
-	}, 2)
+	}, 2, 0)
 	if err != nil {
 		t.Fatalf("should recover on 3rd attempt: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestRunHyDEWithRetryFinalParseFailReturnsError(t *testing.T) {
 	m := &llmgate.Mock{Reply: "no JSON anywhere here, just prose."}
 	_, err := runHyDEWithRetry(context.Background(), m, llmgate.Request{
 		Messages: []llmgate.Message{{Role: llmgate.RoleUser, Content: "go"}},
-	}, 2)
+	}, 2, 0)
 	if err == nil {
 		t.Error("want final-parse error after all retries fail")
 	}
@@ -181,7 +181,7 @@ func TestHyDEGracefulOnNonJSON(t *testing.T) {
 
 	_, err := runHyDEWithRetry(context.Background(), m, llmgate.Request{
 		Messages: []llmgate.Message{{Role: llmgate.RoleUser, Content: "u"}},
-	}, 2)
+	}, 2, 0)
 	if err == nil {
 		t.Fatal("want graceful error after 3 failed attempts")
 	}

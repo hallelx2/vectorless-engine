@@ -45,6 +45,24 @@ type PDF struct {
 	// to use the engine defaults; pass a zero value to disable tables
 	// entirely.
 	Tables *TableOpts
+
+	// MaxSections caps the number of leaf sections the parser emits for a
+	// single document. A pathological PDF — e.g. a 90-page filing whose
+	// every bold statement title and repeated "<Company> and
+	// Subsidiaries" line trips the heading detector, leaving a swarm of
+	// empty/tiny heading-only leaves — can otherwise produce far more
+	// leaves than the document has real sections. Each leaf later costs a
+	// summarize + HyDE LLM call, so an uncapped count directly throttles
+	// or stalls ingest.
+	//
+	// When the prose leaf count exceeds MaxSections, adjacent small leaf
+	// siblings under a shared parent are merged (smallest first) until the
+	// count is back under the cap. Table sections (which carry distinct
+	// numeric content) are never merged.
+	//
+	// Zero selects defaultMaxLeafSections. A negative value disables the
+	// cap entirely (escape hatch for callers that want the raw outline).
+	MaxSections int
 }
 
 // TableOpts controls pdftable's table-finding stage. The zero value
@@ -89,13 +107,23 @@ func DefaultTableOpts() *TableOpts {
 }
 
 // NewPDF returns a new PDF parser with table extraction enabled at the
-// production defaults. Pass NewPDFWithTables(nil) (or a zero TableOpts)
-// to opt out of tables.
+// production defaults and the default leaf-section cap. Pass
+// NewPDFWithTables(nil) (or a zero TableOpts) to opt out of tables.
 func NewPDF() *PDF { return &PDF{Tables: DefaultTableOpts()} }
 
 // NewPDFWithTables returns a PDF parser using the supplied table-
-// extraction options. Pass nil to disable table extraction.
+// extraction options and the default leaf-section cap. Pass nil to
+// disable table extraction.
 func NewPDFWithTables(opts *TableOpts) *PDF { return &PDF{Tables: opts} }
+
+// NewPDFWithOpts returns a PDF parser using the supplied table-extraction
+// options and an explicit leaf-section cap. maxSections == 0 selects
+// defaultMaxLeafSections; a negative value disables the cap. This is the
+// constructor the engine wiring uses so the cap is operator-tunable via
+// config (ingest.max_sections).
+func NewPDFWithOpts(opts *TableOpts, maxSections int) *PDF {
+	return &PDF{Tables: opts, MaxSections: maxSections}
+}
 
 // Name implements Parser.
 func (*PDF) Name() string { return "pdf" }
@@ -190,6 +218,7 @@ func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	if reader != nil {
 		if outline := reader.Outline(); len(outline.Child) > 0 {
 			if doc, ok := parsePDFWithOutline(outline, rows); ok {
+				doc.Sections = capLeafSections(doc.Sections, p.resolvedMaxSections())
 				attachTableSections(doc, tableSections)
 				return doc, nil
 			}
@@ -360,10 +389,21 @@ func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 
 	out := &ParsedDoc{
 		Title:    title,
-		Sections: chunkOversizedLeaves(rootSec.Children),
+		Sections: capLeafSections(chunkOversizedLeaves(rootSec.Children), p.resolvedMaxSections()),
 	}
 	attachTableSections(out, tableSections)
 	return out, nil
+}
+
+// resolvedMaxSections turns the configured MaxSections into the value
+// the cap actually uses: 0 selects defaultMaxLeafSections; a negative
+// value disables the cap (returns a non-positive number capLeafSections
+// treats as "off").
+func (p *PDF) resolvedMaxSections() int {
+	if p.MaxSections == 0 {
+		return defaultMaxLeafSections
+	}
+	return p.MaxSections
 }
 
 // propagateSectionPages fills internal-node PageStart/PageEnd from the union
@@ -410,6 +450,117 @@ const (
 	leafChunkThreshold = 2400 // chars; high enough to leave paper sub-sections alone
 	leafChunkTarget    = 900  // chars per chunk, give or take
 )
+
+// defaultMaxLeafSections is the ceiling NewPDF applies when MaxSections
+// is left at zero. A 92-page 10-K whose "Notes to Financial Statements"
+// section byte-splits into ~50 chunks (and whose body splits into
+// hundreds more) was observed producing ~1500 leaves — each one of
+// which then costs a summarize + HyDE + multi-axis LLM call at ingest,
+// which is what stalled the pipeline. 400 keeps a filing richly
+// structured while bounding ingest cost to something Gemini's
+// free-tier RPM can clear.
+const defaultMaxLeafSections = 400
+
+// countLeafSections returns the number of leaf sections (no children)
+// in the tree rooted at sections.
+func countLeafSections(sections []Section) int {
+	n := 0
+	for i := range sections {
+		if len(sections[i].Children) == 0 {
+			n++
+		} else {
+			n += countLeafSections(sections[i].Children)
+		}
+	}
+	return n
+}
+
+// capLeafSections enforces a ceiling on the total leaf-section count.
+// While the count exceeds maxLeaves it repeatedly merges the two
+// smallest ADJACENT leaf siblings under whichever parent currently has
+// the most leaf children — so the runaway byte-split sections collapse
+// back first, while genuinely distinct top-level sections are left
+// alone. maxLeaves <= 0 disables the cap.
+//
+// Merged leaves concatenate their content (blank-line separated), keep
+// the first sibling's title, and union their page ranges. Table
+// sections are attached AFTER this pass (attachTableSections), so their
+// numeric content is never merged away.
+func capLeafSections(sections []Section, maxLeaves int) []Section {
+	if maxLeaves <= 0 {
+		return sections
+	}
+	// Guard against pathological loops: at most one merge per excess leaf.
+	for guard := 0; countLeafSections(sections) > maxLeaves && guard < 100000; guard++ {
+		if !mergeOneSmallestAdjacentLeafPair(sections) {
+			break // no mergeable adjacent leaf pair anywhere
+		}
+	}
+	return sections
+}
+
+// mergeOneSmallestAdjacentLeafPair finds the adjacent leaf-sibling pair
+// with the smallest combined content length anywhere in the tree and
+// merges it in place. Returns false when no sibling list has two
+// adjacent leaves to merge.
+func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
+	bestList := (*[]Section)(nil)
+	bestIdx := -1
+	bestSize := -1
+
+	var walk func(list *[]Section)
+	walk = func(list *[]Section) {
+		s := *list
+		for i := 0; i+1 < len(s); i++ {
+			if len(s[i].Children) == 0 && len(s[i+1].Children) == 0 {
+				size := len(s[i].Content) + len(s[i+1].Content)
+				if bestSize < 0 || size < bestSize {
+					bestSize, bestList, bestIdx = size, list, i
+				}
+			}
+		}
+		for i := range s {
+			if len(s[i].Children) > 0 {
+				walk(&s[i].Children)
+			}
+		}
+	}
+	walk(&sections)
+
+	if bestList == nil {
+		return false
+	}
+	s := *bestList
+	a, b := s[bestIdx], s[bestIdx+1]
+	merged := a
+	if strings.TrimSpace(a.Content) == "" {
+		merged.Content = b.Content
+	} else if strings.TrimSpace(b.Content) != "" {
+		merged.Content = a.Content + "\n\n" + b.Content
+	}
+	merged.PageStart = minNonZero(a.PageStart, b.PageStart)
+	if b.PageEnd > merged.PageEnd {
+		merged.PageEnd = b.PageEnd
+	}
+	s[bestIdx] = merged
+	*bestList = append(s[:bestIdx+1], s[bestIdx+2:]...)
+	return true
+}
+
+// minNonZero returns the smaller of two page numbers, treating 0
+// (unknown) as "no lower bound" so a known page always wins.
+func minNonZero(a, b int) int {
+	switch {
+	case a == 0:
+		return b
+	case b == 0:
+		return a
+	case a < b:
+		return a
+	default:
+		return b
+	}
+}
 
 // chunkOversizedLeaves splits any LEAF section whose content exceeds
 // leafChunkThreshold into smaller sub-sections. Internal nodes (sections with

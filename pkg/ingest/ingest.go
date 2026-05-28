@@ -157,11 +157,36 @@ type Pipeline struct {
 	// for a table of contents. Default: 20.
 	TOCCheckPages int
 
+	// LLMCallTimeout bounds each INDIVIDUAL LLM call the pipeline issues
+	// (one section's summary, one leaf's HyDE questions, one TOC
+	// detect/extract/verify turn). It is the safety valve against a
+	// provider call that hangs with neither a response nor an error:
+	// without it, that call's bounded-concurrency errgroup blocks on
+	// Wait() forever and the document never leaves `summarizing` (observed
+	// stuck for 13+ hours).
+	//
+	// A call that exceeds this deadline is handled exactly like any other
+	// per-section failure: the surrounding stage logs it and skips the
+	// section, leaving its existing/empty summary. One hung call can no
+	// longer freeze the whole document.
+	//
+	// Zero (the Go zero value, used by Pipeline literals in tests) means
+	// "no per-call timeout" so existing test paths that don't set it keep
+	// their unbounded behaviour. NewPipeline defaults it to 90s.
+	LLMCallTimeout time.Duration
+
 	// globalLLMSem is the lazily-initialized shared semaphore enforcing
 	// GlobalLLMConcurrency. nil means "no global cap" — callers fall back
 	// to per-stage limits only.
 	globalLLMSem chan struct{}
 }
+
+// defaultLLMCallTimeout is the per-call deadline NewPipeline applies when
+// LLMCallTimeout is left unset. 90s is generous for a single summarize /
+// HyDE / TOC turn even on a slow reasoning model, while still being short
+// enough that a hung call is reaped in seconds-to-low-minutes rather than
+// blocking the document forever.
+const defaultLLMCallTimeout = 90 * time.Second
 
 // NewPipeline returns a Pipeline with sensible defaults filled in.
 func NewPipeline(p Pipeline) *Pipeline {
@@ -210,10 +235,43 @@ func NewPipeline(p Pipeline) *Pipeline {
 	if p.GlobalLLMConcurrency > 0 {
 		p.globalLLMSem = make(chan struct{}, p.GlobalLLMConcurrency)
 	}
+	// A per-call timeout is the difference between "one bad section" and
+	// "the whole document wedged for hours", so NewPipeline always fills
+	// one in. Pipeline literals (test paths) that leave it zero keep the
+	// historical unbounded behaviour.
+	if p.LLMCallTimeout <= 0 {
+		p.LLMCallTimeout = defaultLLMCallTimeout
+	}
 	if p.Logger == nil {
 		p.Logger = slog.Default()
 	}
 	return &p
+}
+
+// completeWithTimeout issues a single LLM call bounded by timeout. A
+// non-positive timeout disables the bound (calls ctx directly), preserving
+// the legacy behaviour for Pipeline literals that never set one.
+//
+// The returned error on deadline expiry is context.DeadlineExceeded
+// wrapped by the client — callers in the ingest stages already treat any
+// Complete error as a non-fatal per-section skip, so a timeout slots into
+// the existing degrade-and-continue path with no special-casing.
+func completeWithTimeout(ctx context.Context, client llmgate.Client, req llmgate.Request, timeout time.Duration) (*llmgate.Response, error) {
+	if timeout <= 0 {
+		return client.Complete(ctx, req)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return client.Complete(callCtx, req)
+}
+
+// isTimeout reports whether err is a context deadline/cancellation — the
+// signature of a per-call LLM timeout. The ingest retry loops use it to
+// stop retrying immediately on a timeout: re-issuing a call that just hung
+// would only multiply the wall-time cost (N retries × the timeout) without
+// changing the outcome, so a timeout is terminal, not retryable.
+func isTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // acquireGlobalLLM blocks until a global-LLM-concurrency slot is free,
@@ -331,10 +389,11 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		model = p.SummaryModel
 	}
 	builder := &TOCBuilder{
-		LLM:           p.LLM,
-		Model:         model,
-		Concurrency:   p.TOCConcurrency,
-		TOCCheckPages: p.TOCCheckPages,
+		LLM:            p.LLM,
+		Model:          model,
+		Concurrency:    p.TOCConcurrency,
+		TOCCheckPages:  p.TOCCheckPages,
+		LLMCallTimeout: p.LLMCallTimeout,
 	}
 	nodes, usage, err := builder.Build(ctx, pages)
 	if err != nil {
@@ -717,7 +776,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 // request. Kept for the SummaryAxesEnabled=false opt-out branch and
 // for unit tests that build a Pipeline literal without the new flag.
 func (p *Pipeline) legacyOneLineSummary(ctx context.Context, s db.Section, body, profile string) (string, error) {
-	resp, err := p.LLM.Complete(ctx, llmgate.Request{
+	resp, err := completeWithTimeout(ctx, p.LLM, llmgate.Request{
 		Model:       p.SummaryModel,
 		Temperature: 0.0,
 		MaxTokens:   260,
@@ -727,7 +786,7 @@ func (p *Pipeline) legacyOneLineSummary(ctx context.Context, s db.Section, body,
 				"Section titled %q.\n\n%s\n\nReturn a single sentence (≤ 60 words) that names this section's concrete topics, entities, identifiers, and key items so a retrieval engine can match it to user questions.",
 				cleanForLLM(s.Title), body)},
 		},
-	})
+	}, p.LLMCallTimeout)
 	if err != nil {
 		// Stub LLMs return ErrNotImplemented. Degrade gracefully: use a
 		// truncated excerpt as the "summary" so downstream retrieval
@@ -770,7 +829,7 @@ func (p *Pipeline) structuredSummaryFor(ctx context.Context, s db.Section, body,
 		JSONSchema: []byte(summaryAxesJSONSchema),
 	}
 
-	axes, rawText, err := runSummaryAxesWithRetry(ctx, p.LLM, req, defaultSummaryAxesRetries)
+	axes, rawText, err := runSummaryAxesWithRetry(ctx, p.LLM, req, defaultSummaryAxesRetries, p.LLMCallTimeout)
 	if err != nil {
 		// Transport / ErrNotImplemented / unrecoverable: fall back to a
 		// text excerpt as OneLine with empty axes. Never fail ingest.
