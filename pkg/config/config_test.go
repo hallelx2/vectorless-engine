@@ -84,6 +84,52 @@ func TestDefaultValues(t *testing.T) {
 	}
 }
 
+// TestIngestModeDefault locks the default ingest mode to "full" so the
+// current full-enrichment behaviour is preserved unless explicitly
+// switched.
+func TestIngestModeDefault(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Ingest.Mode != "full" {
+		t.Errorf("ingest.mode = %q, want full (default)", cfg.Ingest.Mode)
+	}
+}
+
+// TestIngestModeEnvOverride covers the VLE_INGEST_MODE override — the
+// single env var that flips the engine into fast/minimal ingest.
+func TestIngestModeEnvOverride(t *testing.T) {
+	prev := os.Getenv("VLE_INGEST_MODE")
+	defer os.Setenv("VLE_INGEST_MODE", prev)
+
+	os.Setenv("VLE_INGEST_MODE", "minimal")
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Ingest.Mode != "minimal" {
+		t.Errorf("VLE_INGEST_MODE=minimal not applied, got %q", cfg.Ingest.Mode)
+	}
+}
+
+// TestIngestModeValidate asserts Validate accepts the documented values
+// (and empty, which Default normalises to full) and rejects garbage.
+func TestIngestModeValidate(t *testing.T) {
+	t.Parallel()
+	for _, m := range []string{"", "full", "minimal"} {
+		cfg := Default()
+		cfg.Database.URL = "postgres://localhost/test"
+		cfg.Ingest.Mode = m
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("ingest.mode=%q should pass validation, got %v", m, err)
+		}
+	}
+
+	cfg := Default()
+	cfg.Database.URL = "postgres://localhost/test"
+	cfg.Ingest.Mode = "turbo"
+	if err := cfg.Validate(); err == nil {
+		t.Error("ingest.mode=turbo should fail validation")
+	}
+}
+
 func TestTOCEnvOverride(t *testing.T) {
 	// Mutates env — restore on exit. Not parallel.
 	keys := []string{

@@ -190,6 +190,87 @@ func TestPageIndexHappyPath(t *testing.T) {
 	}
 }
 
+// buildMinimalIngestedTree mirrors the post-ingest shape of a document
+// run through MINIMAL ingest mode: sections carry page ranges (the PDF
+// parser populates them) and content refs (persisted bodies) but NO
+// summaries (minimal mode skips the summarize stage) and NO HyDE
+// questions. documents.toc_tree is NULL after minimal ingest, which the
+// strategy models by leaving TOC nil — forcing synthesiseTOC.
+func buildMinimalIngestedTree() *tree.Tree {
+	a1 := &tree.Section{ID: "sec_a1", ParentID: "sec_a", Title: "Ownership", ContentRef: "a1_ref", PageStart: 1, PageEnd: 2}
+	a2 := &tree.Section{ID: "sec_a2", ParentID: "sec_a", Title: "Borrowing", ContentRef: "a2_ref", PageStart: 3, PageEnd: 4}
+	b1 := &tree.Section{ID: "sec_b1", ParentID: "sec_b", Title: "Lifetimes", ContentRef: "b1_ref", PageStart: 5, PageEnd: 7}
+	a := &tree.Section{ID: "sec_a", ParentID: "sec_root", Title: "Memory", Children: []*tree.Section{a1, a2}, PageStart: 1, PageEnd: 4}
+	b := &tree.Section{ID: "sec_b", ParentID: "sec_root", Title: "Advanced", Children: []*tree.Section{b1}, PageStart: 5, PageEnd: 7}
+	root := &tree.Section{ID: "sec_root", Title: "Rust", Children: []*tree.Section{a, b}, PageStart: 1, PageEnd: 7}
+	return &tree.Tree{DocumentID: "doc_minimal", Title: "Rust", Root: root}
+}
+
+// TestPageIndexMinimalIngestedDoc is the cross-package guarantee for the
+// minimal ingest mode: a document ingested with NO LLM enrichment (no
+// summaries, no HyDE, NULL toc_tree) is still fully answerable through
+// the page-based strategy. It drives the canonical structure → get_pages
+// → done loop with TOC left nil (the NULL-toc_tree state) and asserts:
+//
+//   - get_document_structure surfaces the SYNTHESISED TOC (section titles
+//     from the tree) — proving the NULL-toc_tree fallback works; and
+//   - get_pages surfaces RAW section content read via the loader — the
+//     text the strategy answers from, which on a real minimal-ingested
+//     doc is the persisted page text (and still contains any table text).
+//
+// No summaries are present anywhere in the tree, so this also proves the
+// strategy does not hard-require a summary to navigate or answer.
+func TestPageIndexMinimalIngestedDoc(t *testing.T) {
+	t.Parallel()
+
+	tr := buildMinimalIngestedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"get_document_structure","reasoning":"orient by titles"}`,
+			`{"tool":"get_pages","start_page":1,"end_page":2,"reasoning":"ownership lives up front"}`,
+			`{"tool":"done","answer":"Ownership is a set of rules the compiler checks.","cited_pages":[[1,2]],"reasoning":"pages 1-2 define ownership"}`,
+		},
+	}
+	loader := pageMapLoader{data: map[string]string{
+		"a1_ref": "Ownership is a set of rules that govern how a Rust program manages memory.",
+		"a2_ref": "References borrow a value without taking ownership.",
+		"b1_ref": "Lifetimes ensure references are valid.",
+	}}
+
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = loader
+	// s.TOC intentionally left nil — models the NULL documents.toc_tree
+	// state minimal ingest leaves behind. The strategy must synthesise.
+
+	res, err := s.SelectWithCost(context.Background(), tr, "what is ownership?", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost on minimal-ingested doc: %v", err)
+	}
+	if !strings.Contains(res.Reasoning, "Ownership is a set of rules") {
+		t.Errorf("answer must carry the model's reply, got %q", res.Reasoning)
+	}
+	if _, ok := indexOfSection(res.SelectedIDs, "sec_a1"); !ok {
+		t.Errorf("sec_a1 (pages 1-2) must be cited, got %v", res.SelectedIDs)
+	}
+	if len(res.PagesRead) != 1 || res.PagesRead[0].CharCount == 0 {
+		t.Errorf("expected one non-empty get_pages read, got %+v", res.PagesRead)
+	}
+
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	if len(llm.lastPrompts) < 3 {
+		t.Fatalf("expected >=3 prompts captured, got %d", len(llm.lastPrompts))
+	}
+	// (1) Synthesised TOC carried a section title (no toc_tree provider).
+	if !strings.Contains(llm.lastPrompts[1], "Ownership") {
+		t.Errorf("synthesised TOC observation should include section titles; got:\n%s", llm.lastPrompts[1])
+	}
+	// (2) get_pages carried the RAW persisted body, not a summary.
+	if !strings.Contains(llm.lastPrompts[2], "Ownership is a set of rules that govern") {
+		t.Errorf("get_pages observation should include raw section content; got:\n%s", llm.lastPrompts[2])
+	}
+}
+
 // TestPageIndexMultiRangeDone covers a done with two cited ranges:
 // the strategy must surface every section that overlaps EITHER
 // range. This is the FinanceBench-shaped pattern: an answer that

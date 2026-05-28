@@ -294,10 +294,37 @@ retrieval:
     model: ""
 
 ingest:
+  # Ingest mode — how much work the pipeline does before a document is
+  # marked `ready` (queryable).
+  #
+  #   full     (default) parse -> build tree -> persist -> summarize ->
+  #            HyDE -> multi-axis summaries -> TOC build. Maximises
+  #            retrieval quality but costs ~1,000-3,000 LLM calls plus a
+  #            pdftable table-finding pass on a large filing — minutes of
+  #            wall time for a 90-page 10-K.
+  #
+  #   minimal  parse -> build tree -> persist -> ready. Skips ALL
+  #            per-section LLM enrichment (summarize, HyDE, multi-axis,
+  #            TOC build) AND the pdftable table-extraction pass, so a
+  #            document becomes queryable in ~parse-speed (seconds).
+  #            The page-based strategy (/v1/answer/pageindex) needs none
+  #            of the skipped work: it navigates a TOC synthesised from
+  #            the section tree (documents.toc_tree is left NULL) and
+  #            reads raw section/page text at query time — and that raw
+  #            page text still contains the tables' text, so dropping
+  #            table *sections* loses nothing for it. The
+  #            summary-dependent strategies (chunked-tree, agentic)
+  #            degrade to titles + raw content with no summaries.
+  #
+  # Override per-process with VLE_INGEST_MODE; on the deployed
+  # vectorless-server use VLS_INGEST_MODE=minimal (no secret edit needed).
+  mode: "full"
+
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the
   # provider's per-tenant concurrency limit isn't exceeded. 0 disables
   # the global cap; default applied by the engine is 12.
+  # (Ignored when mode: minimal — no LLM stages run.)
   global_llm_concurrency: 12
 
   # HyDE candidate-question stage. For each leaf section the pipeline asks
