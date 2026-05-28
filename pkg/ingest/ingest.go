@@ -45,6 +45,22 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
+// ModeMinimal is the Pipeline.Mode value that collapses ingest to
+// parse → build tree → persist → ready, skipping all LLM enrichment
+// and table extraction. Any other value runs the full pipeline.
+const ModeMinimal = "minimal"
+
+// docPersister is the narrow slice of *db.Pool the parse → persist →
+// ready path depends on. Declaring it here (rather than threading the
+// concrete *db.Pool) lets the minimal-mode runner be exercised with a
+// fake store, so the "zero LLM calls, still reaches ready" guarantee is
+// provable without a live Postgres. *db.Pool satisfies it.
+type docPersister interface {
+	SetDocumentStatus(ctx context.Context, id tree.DocumentID, s db.DocumentStatus, errMsg string) error
+	SetDocumentTitle(ctx context.Context, id tree.DocumentID, title string) error
+	UpsertSection(ctx context.Context, s db.Section) error
+}
+
 // Payload is the JSON body attached to an ingest job.
 type Payload struct {
 	DocumentID  tree.DocumentID `json:"document_id"`
@@ -64,6 +80,19 @@ type Pipeline struct {
 	LLM     llmgate.Client
 	Parsers *parser.Registry
 	Logger  *slog.Logger
+
+	// Mode selects how much work Run does before marking a document
+	// ready. "minimal" collapses ingest to parse → build tree → persist
+	// → ready, skipping every per-section LLM stage (summarize, HyDE,
+	// multi-axis summaries, TOC build) AND the pdftable table-finding
+	// pass. Anything else (including the empty Go zero value used by
+	// Pipeline literals in tests) runs the full enrichment pipeline.
+	//
+	// The page-based retrieval strategy (/v1/answer/pageindex) needs none
+	// of the skipped enrichment — it navigates a synthesised-from-sections
+	// TOC and reads raw section/page text at query time — so a
+	// minimal-ingested document is immediately queryable through it.
+	Mode string
 
 	// SummaryMaxChars caps the content window sent to the LLM per section.
 	// Sections longer than this are truncated — we're generating a short
@@ -301,8 +330,16 @@ func (p *Pipeline) Handler() queue.Handler {
 	}
 }
 
-// Run executes the full pipeline for one document. Safe to retry.
+// Run executes the pipeline for one document. Safe to retry.
+//
+// When Mode == ModeMinimal it dispatches to runMinimal — parse → build
+// tree → persist → ready, with no LLM enrichment and no table
+// extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
+	if p.Mode == ModeMinimal {
+		return p.runMinimal(ctx, p.DB, pl)
+	}
+
 	log := p.Logger.With("document_id", string(pl.DocumentID))
 	log.Info("ingest: start", "source_ref", pl.SourceRef)
 
@@ -310,15 +347,15 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 		return err
 	}
 
-	parsed, err := p.parse(ctx, pl)
+	parsed, err := p.parse(ctx, p.Parsers, pl)
 	if err != nil {
-		p.fail(ctx, pl.DocumentID, "parse", err)
+		p.fail(ctx, p.DB, pl.DocumentID, "parse", err)
 		return err
 	}
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
-	if err := p.persistTree(ctx, pl.DocumentID, parsed); err != nil {
-		p.fail(ctx, pl.DocumentID, "persist tree", err)
+	if err := p.persistTree(ctx, p.DB, pl.DocumentID, parsed); err != nil {
+		p.fail(ctx, p.DB, pl.DocumentID, "persist tree", err)
 		return err
 	}
 
@@ -504,25 +541,80 @@ func runParallelStages(ctx context.Context, summarizeFn, hydeFn func(context.Con
 	return summarizeErr, hydeErr
 }
 
-func (p *Pipeline) parse(ctx context.Context, pl Payload) (*parser.ParsedDoc, error) {
+func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Payload) (*parser.ParsedDoc, error) {
 	rc, _, err := p.Storage.Get(ctx, pl.SourceRef)
 	if err != nil {
 		return nil, fmt.Errorf("fetch source: %w", err)
 	}
 	defer rc.Close()
-	return p.Parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
+	return parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
+}
+
+// runMinimal is the fast/minimal ingest path: parse → build tree →
+// persist → ready. It does ZERO LLM work — no summarize, no HyDE, no
+// multi-axis summaries, no TOC build — and parses with table extraction
+// DISABLED (the pdftable table-finding pass is the slow/hang-prone part
+// of parse, and the page-based strategy reads raw page text which still
+// contains the table's text, so dropping table *sections* loses nothing
+// for it).
+//
+// The doc reaches StatusReady the moment the section tree is persisted,
+// which is what "ready" means for the page-based strategy: it
+// synthesises its TOC from the section tree (titles + page ranges) when
+// documents.toc_tree is NULL — and minimal mode leaves it NULL — and
+// reads section bodies from storage at query time.
+//
+// store is the persistence target; production passes p.DB. The DB seam
+// is an interface so this path is testable without a live Postgres.
+func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payload) error {
+	log := p.Logger.With("document_id", string(pl.DocumentID))
+	log.Info("ingest: start (minimal mode)", "source_ref", pl.SourceRef)
+
+	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusParsing, ""); err != nil {
+		return err
+	}
+
+	// Table extraction is disabled unconditionally in minimal mode,
+	// regardless of ingest.tables.enabled: a nil-opts registry makes the
+	// PDF parser skip the table-finding pass entirely. All other parsers
+	// are unaffected.
+	parsers := RegistryFromTableOpts(nil)
+	parsed, err := p.parse(ctx, parsers, pl)
+	if err != nil {
+		p.fail(ctx, store, pl.DocumentID, "parse", err)
+		return err
+	}
+	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
+
+	if err := p.persistTree(ctx, store, pl.DocumentID, parsed); err != nil {
+		p.fail(ctx, store, pl.DocumentID, "persist tree", err)
+		return err
+	}
+
+	// Skip summarize / HyDE / multi-axis / TOC entirely — flip straight
+	// to ready. The document is now queryable via the page-based
+	// strategy (synthesised TOC + raw page reads).
+	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
+		return err
+	}
+	log.Info("ingest: ready (minimal mode)")
+	return nil
 }
 
 // persistTree writes sections + full content in document order. Parents
 // are written before children so the FK on sections.parent_id holds.
-func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *parser.ParsedDoc) error {
+//
+// The DB operations go through the narrow docPersister interface so the
+// persist path can be exercised (e.g. by the minimal-mode test) without
+// a live Postgres; production callers pass p.DB, which satisfies it.
+func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tree.DocumentID, doc *parser.ParsedDoc) error {
 	// Only overwrite the row's title (which was seeded with the
 	// filename at upload time) when the parsed title looks usable.
 	// Watermarked PDFs whose overlay text shares a Y coordinate with
 	// the real title produce mojibake like "GGlloobbaall SSttrraatteeggyy"
 	// — we'd rather keep the original filename than show that to a user.
 	if doc.Title != "" && !isLikelyMojibakeTitle(doc.Title) {
-		if err := p.DB.SetDocumentTitle(ctx, docID, doc.Title); err != nil {
+		if err := store.SetDocumentTitle(ctx, docID, doc.Title); err != nil {
 			return err
 		}
 	}
@@ -550,7 +642,7 @@ func (p *Pipeline) persistTree(ctx context.Context, docID tree.DocumentID, doc *
 				}
 			}
 
-			if err := p.DB.UpsertSection(ctx, db.Section{
+			if err := store.UpsertSection(ctx, db.Section{
 				ID:         id,
 				DocumentID: docID,
 				ParentID:   parent,
@@ -870,14 +962,14 @@ func fallbackSummary(title, body string) string {
 	return strings.Join(strings.Fields(body), " ")
 }
 
-func (p *Pipeline) fail(ctx context.Context, id tree.DocumentID, stage string, cause error) {
+func (p *Pipeline) fail(ctx context.Context, store docPersister, id tree.DocumentID, stage string, cause error) {
 	msg := fmt.Sprintf("%s: %s", stage, cause.Error())
 	// Use a FRESH context for the failure write — the inbound one is
 	// almost certainly the reason we're failing (timeout/cancel) and
 	// reusing it would leave the doc stuck on "parsing" forever.
 	failCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := p.DB.SetDocumentStatus(failCtx, id, db.StatusFailed, msg); err != nil {
+	if err := store.SetDocumentStatus(failCtx, id, db.StatusFailed, msg); err != nil {
 		p.Logger.Error("ingest: failed to mark document failed", "err", err, "cause", cause)
 	}
 }
