@@ -97,6 +97,24 @@ type Result struct {
 	// cost/coverage debugging: a 10-K answer that read pages 50-55 +
 	// 102-104 leaves a concrete page footprint behind.
 	PagesRead []PageReadEntry `json:"pages_read,omitempty"`
+
+	// CitedPages is the FINAL set of page ranges the answer commits
+	// to — the model's cited_pages after dedup and the confidence cap,
+	// NOT every page it read (that is PagesRead). Page-based strategies
+	// populate this; it is the authoritative input for building the
+	// response's citations[] so a confident single-pick answer surfaces
+	// ONE citation even when it skimmed several pages to find it. Nil
+	// when the answer cited nothing (refusal) or the run was hop-capped
+	// without a valid done — callers then fall back to PagesRead.
+	CitedPages [][2]int `json:"cited_pages,omitempty"`
+
+	// Confidence is the model's self-reported confidence in the answer
+	// as a whole, in [0,1], for page-based strategies that ask for it
+	// on the done action. Zero means unstated (the model didn't report
+	// one) — it is NOT a "definitely wrong" signal, and the API layer
+	// must not abstain on a zero here. Per-pick confidence for section
+	// strategies still lives in Confidences.
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // PageReadEntry is one get_pages tool call that materialised during a

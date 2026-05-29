@@ -175,6 +175,7 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 		"citations":   citations,
 		"strategy":    perReq.Name(),
 		"model":       budget.ModelName,
+		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,
 		"usage": map[string]any{
 			"input_tokens":  res.Usage.InputTokens,
@@ -268,6 +269,7 @@ func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request,
 		"citations":   citations,
 		"strategy":    strat.Name(),
 		"model":       budget.ModelName,
+		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,
 		"usage": map[string]any{
 			"input_tokens":  res.Usage.InputTokens,
@@ -298,27 +300,27 @@ func (d Deps) buildPageIndexCitations(ctx context.Context, t *tree.Tree, res *re
 	if res == nil {
 		return nil
 	}
-	// Build a citation per UNIQUE page range present in PagesRead.
-	// The set of pages the model "read" is a superset of what it
-	// cited — some get_pages calls don't end up in the final
-	// cited_pages list — but the union is the right cone of trust
-	// to surface as evidence. The trace token is computed over
-	// only the strictly-cited ranges, which the strategy already
-	// has, so citation drift doesn't break replay.
-	seen := make(map[[2]int]struct{}, len(res.PagesRead))
-	citations := make([]map[string]any, 0, len(res.PagesRead))
+	// Source of truth for citations is the FINAL cited-range set
+	// (res.CitedPages) — already deduped and capped to MaxCitations by
+	// the strategy. This is what makes a confident single-pick answer
+	// surface ONE citation even when it skimmed several pages to find
+	// it: PagesRead is the navigation footprint (a superset), not the
+	// commitment. Fall back to PagesRead only when nothing was cited
+	// (refusal) or the run was hop-capped without a done — the trace
+	// token is keyed on the cited ranges either way, so this never
+	// breaks replay.
+	sources := retrieval.CitationSources(res)
+	citations := make([]map[string]any, 0, len(sources))
 
-	for _, pr := range res.PagesRead {
-		key := [2]int{pr.StartPage, pr.EndPage}
-		if _, dup := seen[key]; dup {
-			continue
+	for _, src := range sources {
+		sectionIDs := src.SectionIDs
+		if sectionIDs == nil {
+			sectionIDs = retrieval.SectionIDsOverlapping(t, src.Start, src.End)
 		}
-		seen[key] = struct{}{}
-
 		c := map[string]any{
-			"start_page":  pr.StartPage,
-			"end_page":    pr.EndPage,
-			"section_ids": pr.SectionIDs,
+			"start_page":  src.Start,
+			"end_page":    src.End,
+			"section_ids": sectionIDs,
 		}
 
 		// Quote extraction is best-effort: an LLM blip or empty
@@ -326,7 +328,7 @@ func (d Deps) buildPageIndexCitations(ctx context.Context, t *tree.Tree, res *re
 		// path. We materialise the cited content from storage and
 		// run one SpanExtractor call per citation.
 		if d.LLM != nil {
-			content := d.materialiseCitedContent(ctx, t, pr.SectionIDs)
+			content := d.materialiseCitedContent(ctx, t, sectionIDs)
 			if strings.TrimSpace(content) != "" {
 				ext := d.pageIndexSpanExtractor(requestModel)
 				span, _, err := ext.Extract(ctx, content, query)

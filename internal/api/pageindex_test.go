@@ -261,6 +261,107 @@ func TestHandleAnswerPageIndexReasoningTrace(t *testing.T) {
 	}
 }
 
+// TestHandleAnswerPageIndexDedupAndCapCitations is the end-to-end
+// proof of the bench-facing fix: a done that sprays the SAME range
+// five times plus extras must produce a citations[] array that is
+// deduped and capped at MaxCitations — no duplicate page ranges, no
+// repeated section ids across citations, and confidence surfaced.
+// This is the API-layer mirror of the strategy's dedup test and the
+// reason precision@5 stops deflating.
+func TestHandleAnswerPageIndexDedupAndCapCitations(t *testing.T) {
+	t.Parallel()
+
+	// Read one range, then a done that cites [1,2] five times plus
+	// two more distinct ranges and a confidence. MaxCitations=3.
+	deps, _, _ := newTestDeps(t,
+		`{"tool":"get_pages","start_page":1,"end_page":2,"reasoning":"skim"}`,
+		`{"tool":"done","answer":"sprayed","confidence":0.8,"cited_pages":[[1,2],[1,2],[1,2],[1,2],[1,2],[3,4],[8,9]]}`,
+	)
+
+	body := strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	rec := httptest.NewRecorder()
+	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cits, ok := resp["citations"].([]any)
+	if !ok {
+		t.Fatalf("citations missing: %v", resp["citations"])
+	}
+	// Capped at MaxCitations=3, and every page range distinct.
+	if len(cits) > 3 {
+		t.Errorf("citations must be capped at 3, got %d", len(cits))
+	}
+	seenRange := map[[2]int]int{}
+	for _, raw := range cits {
+		c := raw.(map[string]any)
+		key := [2]int{int(c["start_page"].(float64)), int(c["end_page"].(float64))}
+		seenRange[key]++
+	}
+	for key, n := range seenRange {
+		if n > 1 {
+			t.Errorf("citation page range %v appears %d times; must be deduped", key, n)
+		}
+	}
+	// The three distinct ranges all survive (under the cap).
+	for _, want := range [][2]int{{1, 2}, {3, 4}, {8, 9}} {
+		if seenRange[want] == 0 {
+			t.Errorf("expected a citation for range %v, citations: %v", want, cits)
+		}
+	}
+	// confidence surfaces on the response.
+	if conf, ok := resp["confidence"].(float64); !ok || conf != 0.8 {
+		t.Errorf("response confidence = %v, want 0.8", resp["confidence"])
+	}
+}
+
+// TestHandleAnswerPageIndexConfidentSingleCitation is the happy half
+// at the API layer: a confident single-range done — even after the
+// model skimmed several pages — surfaces exactly ONE citation. This
+// is the f1=1.0 commit case, and the fix that stops a multi-page
+// navigation footprint from leaking into citations[].
+func TestHandleAnswerPageIndexConfidentSingleCitation(t *testing.T) {
+	t.Parallel()
+
+	// The model reads pages 1-2 AND 8-9 while searching, but commits
+	// to a single cited range [8,9]. citations[] must be just [8,9].
+	deps, _, _ := newTestDeps(t,
+		`{"tool":"get_pages","start_page":1,"end_page":2,"reasoning":"check setup"}`,
+		`{"tool":"get_pages","start_page":8,"end_page":9,"reasoning":"check debt"}`,
+		`{"tool":"done","answer":"Debt is on 8-9.","confidence":0.95,"cited_pages":[[8,9]],"reasoning":"clear"}`,
+	)
+
+	body := strings.NewReader(`{"document_id":"doc_x","query":"debt?"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	rec := httptest.NewRecorder()
+	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	cits, ok := resp["citations"].([]any)
+	if !ok || len(cits) != 1 {
+		t.Fatalf("confident single pick must yield exactly ONE citation, got %v", resp["citations"])
+	}
+	first := cits[0].(map[string]any)
+	if first["start_page"].(float64) != 8 || first["end_page"].(float64) != 9 {
+		t.Errorf("citation = %v-%v, want 8-9", first["start_page"], first["end_page"])
+	}
+	// pages_read still records the full navigation footprint (both
+	// reads) — only citations[] is tightened to the commitment.
+	if pages, ok := resp["pages_read"].([]any); !ok || len(pages) != 2 {
+		t.Errorf("pages_read must keep the full footprint (2 reads), got %v", resp["pages_read"])
+	}
+}
+
 // TestHandleAnswerPageIndexReasoningTraceQueryParam: the
 // ?reasoning=true query param is an alternative to the body field.
 // Some clients prefer it for GET-friendliness when prototyping.

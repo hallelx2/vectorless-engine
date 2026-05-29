@@ -1118,6 +1118,20 @@ components:
           enum: [pageindex]
         model:
           type: string
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: |
+            The agent's self-reported confidence in the answer +
+            citation set, in [0,1], taken from the terminal `done`
+            tool call. 0 means the model did not report one (it is
+            NOT a "definitely wrong" signal). Surfaced so callers
+            can treat a low-confidence answer more cautiously; it
+            does not suppress the answer — even an unsure agent
+            still returns its single best citation rather than a
+            spray of hedged ones.
         hops_taken:
           type: integer
           description: |

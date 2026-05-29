@@ -829,3 +829,321 @@ func indexOfSection(haystack []tree.SectionID, needle tree.SectionID) (int, bool
 	}
 	return -1, false
 }
+
+// distinctRangeCount counts the unique [start,end] pairs in a
+// CitedPages slice. The whole point of the dedup work is that this
+// equals len(CitedPages) — no pair appears twice.
+func distinctRangeCount(pairs [][2]int) int {
+	seen := map[[2]int]struct{}{}
+	for _, p := range pairs {
+		seen[p] = struct{}{}
+	}
+	return len(seen)
+}
+
+// TestPageIndexDedupCollapsesRepeatedRange is the core regression for
+// the FinanceBench "same id ×5" miss (id_00499 returned sec_363... five
+// times). A done that cites the SAME range five times, plus two more
+// distinct ranges, must collapse to distinct ranges only AND respect
+// the MaxCitations cap. With MaxCitations=3 the three distinct ranges
+// survive; the four duplicate repeats are gone.
+func TestPageIndexDedupCollapsesRepeatedRange(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree() // pages 1-9
+	llm := &pageScriptedLLM{
+		replies: []string{
+			// sec_a1 (pages 1-2) cited five times, then two distinct
+			// ranges. This is the spray-with-dupes pattern.
+			`{"tool":"done","answer":"sprayed","cited_pages":[[1,2],[1,2],[1,2],[1,2],[1,2],[3,4],[8,9]]}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+	// Default MaxCitations is 3.
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+
+	// CitedPages must be deduped: the [1,2] repeat collapses to one,
+	// and the total distinct set is capped at 3.
+	if n := distinctRangeCount(res.CitedPages); n != len(res.CitedPages) {
+		t.Errorf("CitedPages contains duplicates: %v (distinct=%d, len=%d)", res.CitedPages, n, len(res.CitedPages))
+	}
+	if len(res.CitedPages) > 3 {
+		t.Errorf("CitedPages must be capped at MaxCitations=3, got %d: %v", len(res.CitedPages), res.CitedPages)
+	}
+	// The three distinct ranges [1,2],[3,4],[8,9] all survive (each is
+	// under the cap), in canonical page order.
+	want := [][2]int{{1, 2}, {3, 4}, {8, 9}}
+	if len(res.CitedPages) != len(want) {
+		t.Fatalf("CitedPages = %v, want %v", res.CitedPages, want)
+	}
+	for i := range want {
+		if res.CitedPages[i] != want[i] {
+			t.Errorf("CitedPages[%d] = %v, want %v", i, res.CitedPages[i], want[i])
+		}
+	}
+
+	// SelectedIDs must also be deduped — sec_a1 must appear exactly
+	// once even though it was cited five times. This is the precision
+	// fix: no section id repeats.
+	count := map[tree.SectionID]int{}
+	for _, id := range res.SelectedIDs {
+		count[id]++
+	}
+	for id, c := range count {
+		if c > 1 {
+			t.Errorf("section id %q appears %d times in SelectedIDs; must be deduped", id, c)
+		}
+	}
+}
+
+// TestPageIndexCapKeepsHighestConfidence proves the cap is
+// confidence-aware: when more than MaxCitations distinct ranges are
+// cited WITH per-range confidence, the highest-confidence ranges win
+// (not the first-listed). Here five ranges are cited; the cap is 2;
+// the two with the top confidence must be the ones kept.
+func TestPageIndexCapKeepsHighestConfidence(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree() // pages 1-9
+	// Rich cited_pages with per-range confidence. The two strongest
+	// are [8,9] (0.95) and [5,7] (0.9); the cap of 2 should keep those.
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"x","confidence":0.9,"cited_pages":[` +
+				`{"pages":[1,2],"confidence":0.1},` +
+				`{"pages":[3,4],"confidence":0.2},` +
+				`{"pages":[5,7],"confidence":0.9},` +
+				`{"pages":[8,9],"confidence":0.95},` +
+				`{"pages":[1,1],"confidence":0.05}]}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+	s.MaxCitations = 2
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if len(res.CitedPages) != 2 {
+		t.Fatalf("CitedPages must be capped at 2, got %d: %v", len(res.CitedPages), res.CitedPages)
+	}
+	// Output is page-sorted, so [5,7] then [8,9].
+	want := [][2]int{{5, 7}, {8, 9}}
+	for i := range want {
+		if res.CitedPages[i] != want[i] {
+			t.Errorf("CitedPages[%d] = %v, want %v (the two highest-confidence ranges)", i, res.CitedPages[i], want[i])
+		}
+	}
+	// Overall confidence (0.9) must surface on the Result.
+	if res.Confidence != 0.9 {
+		t.Errorf("Result.Confidence = %v, want 0.9", res.Confidence)
+	}
+}
+
+// TestPageIndexConfidentSinglePreserved is the happy half of the
+// signal: a confident single citation must pass through untouched and
+// the confidence must surface on both Result.Confidence and the
+// per-section Confidences map (so the abstain machinery can read it).
+func TestPageIndexConfidentSinglePreserved(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"Install on pages 1-2.","cited_pages":[[1,2]],"confidence":0.92,"reasoning":"clear"}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+
+	res, err := s.SelectWithCost(context.Background(), tr, "how do I install?", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if len(res.CitedPages) != 1 || res.CitedPages[0] != [2]int{1, 2} {
+		t.Errorf("single confident citation must be preserved, got %v", res.CitedPages)
+	}
+	if res.Confidence != 0.92 {
+		t.Errorf("Result.Confidence = %v, want 0.92", res.Confidence)
+	}
+	if len(res.Confidences) == 0 {
+		t.Fatal("Confidences map must surface the answer confidence per selected section")
+	}
+	// sec_a1 overlaps pages 1-2 and must carry the confidence.
+	if got := res.Confidences["sec_a1"]; got != 0.92 {
+		t.Errorf("Confidences[sec_a1] = %v, want 0.92", got)
+	}
+}
+
+// TestPageIndexLowConfidenceStillCommitsSingle guards the over-
+// suppression risk: even when the model reports LOW confidence, it must
+// still return its single best pick — never an empty citation set. A
+// low confidence annotates the answer; it does not delete it.
+func TestPageIndexLowConfidenceStillCommitsSingle(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"Probably debt on 8-9.","cited_pages":[[8,9]],"confidence":0.15,"reasoning":"unsure"}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if len(res.CitedPages) != 1 || res.CitedPages[0] != [2]int{8, 9} {
+		t.Errorf("low-confidence answer must still commit to its single pick, got %v", res.CitedPages)
+	}
+	if res.Confidence != 0.15 {
+		t.Errorf("Result.Confidence = %v, want 0.15 (low but surfaced)", res.Confidence)
+	}
+	if len(res.SelectedIDs) == 0 {
+		t.Error("low confidence must not empty the selection")
+	}
+}
+
+// TestPageIndexConfidenceClamped: out-of-range confidence values clamp
+// into [0,1] rather than propagating absurd numbers.
+func TestPageIndexConfidenceClamped(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":7.5}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if res.Confidence != 1.0 {
+		t.Errorf("confidence 7.5 must clamp to 1.0, got %v", res.Confidence)
+	}
+}
+
+// TestPageIndexCapConfigurable: a custom MaxCitations is honoured. Six
+// distinct ranges cited, cap=1 → exactly one survives.
+func TestPageIndexCapConfigurable(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"x","cited_pages":[[1,1],[2,2],[3,3],[4,4],[5,5],[6,6]]}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+	s.MaxCitations = 1
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if len(res.CitedPages) != 1 {
+		t.Errorf("MaxCitations=1 must keep exactly one range, got %d: %v", len(res.CitedPages), res.CitedPages)
+	}
+	// With no per-range confidence the cap falls back to emission
+	// order: the first-listed range [1,1] wins.
+	if res.CitedPages[0] != [2]int{1, 1} {
+		t.Errorf("cap with no confidence should keep first-listed range [1,1], got %v", res.CitedPages[0])
+	}
+}
+
+// TestPageIndexEmptyCitationsNoConfidence: a refusal (empty cited_pages)
+// leaves CitedPages nil, Confidences nil, and Confidence 0 — so the
+// API layer's abstain check (which fires only on a non-empty
+// Confidences map) behaves exactly as before for refusals.
+func TestPageIndexEmptyCitationsNoConfidence(t *testing.T) {
+	t.Parallel()
+
+	tr := buildPagedTree()
+	llm := &pageScriptedLLM{
+		replies: []string{
+			`{"tool":"done","answer":"The document does not address this query.","cited_pages":[],"confidence":0}`,
+		},
+	}
+	s := retrieval.NewPageIndexStrategy(llm)
+	s.PageLoader = pageMapLoader{data: map[string]string{}}
+
+	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
+	if err != nil {
+		t.Fatalf("SelectWithCost: %v", err)
+	}
+	if len(res.CitedPages) != 0 {
+		t.Errorf("refusal must cite nothing, got %v", res.CitedPages)
+	}
+	if len(res.Confidences) != 0 {
+		t.Errorf("no confidence map on a zero-confidence refusal, got %v", res.Confidences)
+	}
+	if len(res.SelectedIDs) != 0 {
+		t.Errorf("refusal must select nothing, got %v", res.SelectedIDs)
+	}
+}
+
+// TestParsePageIndexConfidenceAndRichCitations covers the new parser
+// surfaces: a top-level confidence number, and the rich cited_pages
+// object form carrying per-range confidence.
+func TestParsePageIndexConfidenceAndRichCitations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("top_level_confidence", func(t *testing.T) {
+		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":0.8}`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if a.Confidence != 0.8 {
+			t.Errorf("Confidence = %v, want 0.8", a.Confidence)
+		}
+	})
+
+	t.Run("confidence_as_string", func(t *testing.T) {
+		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":"0.6"}`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if a.Confidence != 0.6 {
+			t.Errorf("Confidence = %v, want 0.6 (string form)", a.Confidence)
+		}
+	})
+
+	t.Run("rich_cited_pages_objects", func(t *testing.T) {
+		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[{"pages":[5,7],"confidence":0.9},{"pages":[12,12],"confidence":0.4}]}`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		want := [][2]int{{5, 7}, {12, 12}}
+		if len(a.CitedPages) != len(want) {
+			t.Fatalf("CitedPages = %v, want %v", a.CitedPages, want)
+		}
+		for i := range want {
+			if a.CitedPages[i] != want[i] {
+				t.Errorf("CitedPages[%d] = %v, want %v", i, a.CitedPages[i], want[i])
+			}
+		}
+	})
+
+	t.Run("rich_cited_pages_start_end", func(t *testing.T) {
+		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[{"start":3,"end":4,"confidence":0.7}]}`)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(a.CitedPages) != 1 || a.CitedPages[0] != [2]int{3, 4} {
+			t.Errorf("CitedPages = %v, want [[3 4]]", a.CitedPages)
+		}
+	})
+}

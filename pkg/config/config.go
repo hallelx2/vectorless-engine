@@ -436,6 +436,16 @@ type PageIndexBlock struct {
 	// fetch from torching the model's context window.
 	PageContentLimit int `yaml:"page_content_limit"`
 
+	// MaxCitations caps how many distinct page ranges the final
+	// answer may cite. Default: 3. Set to 0 to use the strategy's
+	// built-in default. This is a confidence backstop, not a
+	// navigation limit: the model may read as many pages as MaxHops
+	// allows, but the citation set it commits to is bounded. The cap
+	// mechanically tames the "spray many low-confidence ranges →
+	// miss all" failure mode FinanceBench surfaced, while still
+	// allowing a genuinely multi-location answer to cite two or three.
+	MaxCitations int `yaml:"max_citations"`
+
 	// Model overrides the LLM model used for the navigation loop.
 	// Empty means use the request's model (which itself falls back
 	// to the engine default). Useful when navigation should run on
@@ -721,6 +731,7 @@ func Default() Config {
 				Enabled:          true,
 				MaxHops:          8,
 				PageContentLimit: 16000,
+				MaxCitations:     3,
 			},
 		},
 		Ingest: IngestConfig{
@@ -1104,6 +1115,14 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.PageIndex.PageContentLimit = n
 		}
 	}
+	// MaxCitations accepts both the VLE_ and VLS_ prefixes so the
+	// deploy layer (which forwards VLS_*) and local VLE_* envs both
+	// reach it. A garbled or negative value preserves the default.
+	if v := firstEnv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Retrieval.PageIndex.MaxCitations = n
+		}
+	}
 	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL"); v != "" {
 		c.Retrieval.PageIndex.Model = v
 	}
@@ -1264,6 +1283,9 @@ func (c Config) Validate() error {
 	}
 	if c.Retrieval.PageIndex.PageContentLimit < 0 {
 		return fmt.Errorf("retrieval.pageindex.page_content_limit must be >= 0, got %d", c.Retrieval.PageIndex.PageContentLimit)
+	}
+	if c.Retrieval.PageIndex.MaxCitations < 0 {
+		return fmt.Errorf("retrieval.pageindex.max_citations must be >= 0, got %d", c.Retrieval.PageIndex.MaxCitations)
 	}
 
 	return nil

@@ -200,6 +200,7 @@ func (h *AnswerPageIndexHandler) HandleAnswerPageIndex(w http.ResponseWriter, r 
 		"citations":   citations,
 		"strategy":    perReq.Name(),
 		"model":       budget.ModelName,
+		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,
 		"usage": map[string]any{
 			"input_tokens":  res.Usage.InputTokens,
@@ -281,6 +282,7 @@ func (h *AnswerPageIndexHandler) serveStream(w http.ResponseWriter, r *http.Requ
 		"citations":   citations,
 		"strategy":    strat.Name(),
 		"model":       budget.ModelName,
+		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,
 		"usage": map[string]any{
 			"input_tokens":  res.Usage.InputTokens,
@@ -296,32 +298,33 @@ func (h *AnswerPageIndexHandler) serveStream(w http.ResponseWriter, r *http.Requ
 	emitSSE("answer", final)
 }
 
-// buildCitations transforms the strategy's PagesRead + the section
-// tree into the response's citations array: one citation per unique
-// cited page range, each carrying the overlapping section IDs and a
-// best-effort grounding quote extracted from the cited content.
+// buildCitations transforms the strategy's FINAL cited ranges + the
+// section tree into the response's citations array: one citation per
+// cited page range (deduped + capped by the strategy), each carrying
+// the overlapping section IDs and a best-effort grounding quote
+// extracted from the cited content. Falls back to the PagesRead
+// footprint when nothing was cited (refusal / hop-capped run) so the
+// caller still sees where the model looked.
 func (h *AnswerPageIndexHandler) buildCitations(ctx context.Context, t *tree.Tree, res *retrieval.Result, query, requestModel string) []map[string]any {
 	if res == nil {
 		return nil
 	}
-	seen := make(map[[2]int]struct{}, len(res.PagesRead))
-	citations := make([]map[string]any, 0, len(res.PagesRead))
+	sources := retrieval.CitationSources(res)
+	citations := make([]map[string]any, 0, len(sources))
 
-	for _, pr := range res.PagesRead {
-		key := [2]int{pr.StartPage, pr.EndPage}
-		if _, dup := seen[key]; dup {
-			continue
+	for _, src := range sources {
+		sectionIDs := src.SectionIDs
+		if sectionIDs == nil {
+			sectionIDs = retrieval.SectionIDsOverlapping(t, src.Start, src.End)
 		}
-		seen[key] = struct{}{}
-
 		c := map[string]any{
-			"start_page":  pr.StartPage,
-			"end_page":    pr.EndPage,
-			"section_ids": pr.SectionIDs,
+			"start_page":  src.Start,
+			"end_page":    src.End,
+			"section_ids": sectionIDs,
 		}
 
 		if h.llm != nil {
-			content := h.materialiseCitedContent(ctx, t, pr.SectionIDs)
+			content := h.materialiseCitedContent(ctx, t, sectionIDs)
 			if strings.TrimSpace(content) != "" {
 				ext := h.spanExtractor(requestModel)
 				span, _, err := ext.Extract(ctx, content, query)
