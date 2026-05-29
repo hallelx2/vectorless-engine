@@ -205,7 +205,7 @@ func Default() Config {
 			MaxAge:         86400,
 		},
 		Governance: GovernanceConfig{
-			MaxBodySizeBytes: 33554432,       // 32 MiB
+			MaxBodySizeBytes: 33554432, // 32 MiB
 			DefaultTimeout:   30 * time.Second,
 			QueryTimeout:     120 * time.Second,
 		},
@@ -325,6 +325,15 @@ func applyEnvOverrides(c *Config) {
 	// env var, no secret/config edit. VLS_-prefixed wins over VLE_.
 	if v := firstEnv("VLS_INGEST_MODE", "VLE_INGEST_MODE"); v != "" {
 		c.Engine.Ingest.Mode = v
+	}
+	// Total-parse timeout (seconds). Forwarded so the deployed server
+	// honours a tuned parse deadline without a secret/config edit — the
+	// outermost robustness valve against a parse that hangs (pre-LLM,
+	// pure-Go row extraction). VLS_-prefixed wins over VLE_.
+	if v := firstEnv("VLS_INGEST_PARSE_TIMEOUT_SECONDS", "VLE_INGEST_PARSE_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Engine.Ingest.ParseTimeoutSeconds = n
+		}
 	}
 	// Anthropic-compatible gateway overrides (e.g. GLM/Zhipu via
 	// https://api.z.ai/api/anthropic): base URL + model, so the

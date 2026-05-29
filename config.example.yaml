@@ -320,6 +320,39 @@ ingest:
   # vectorless-server use VLS_INGEST_MODE=minimal (no secret edit needed).
   mode: "full"
 
+  # Total-parse timeout (seconds). Bounds the ENTIRE parse of one
+  # document end to end — row extraction, table extraction, section
+  # building, and the leaf-section cap. It is the outermost robustness
+  # valve: a pathological/malformed PDF (observed: a 10-K stuck 600s+ in
+  # `parsing`, even in minimal mode, inside pure-Go row extraction) is
+  # abandoned at the deadline and the document fails fast instead of
+  # wedging the pipeline forever. NOTHING is disabled by this bound — the
+  # full feature set (LLM TOC, tables, summarize, HyDE, multi-axis) still
+  # runs; parse is merely time-boxed. Applies in BOTH full and minimal
+  # mode (parse runs in both).
+  #
+  # 120 is comfortably longer than a healthy 300-page filing's parse
+  # (seconds to low tens of seconds) yet short enough to reap a hang
+  # quickly. 0 uses the engine default (120). Override per-process with
+  # VLE_INGEST_PARSE_TIMEOUT_SECONDS; the deployed server also honours
+  # VLS_INGEST_PARSE_TIMEOUT_SECONDS.
+  parse_timeout_seconds: 120
+
+  # Cap on the number of leaf sections one document may produce. A
+  # pathological PDF (e.g. a 90-page 10-K whose every bold statement
+  # title trips the heading detector, or a heading→one-body-leaf chain
+  # repeated hundreds of times) can shatter into far more leaves than the
+  # document has real sections — each leaf then costs a summarize + HyDE
+  # + multi-axis LLM call, which is what throttles/stalls full ingest.
+  # When the parsed leaf count exceeds this cap the parser merges
+  # sections (smallest first; single-leaf parents collapse into their
+  # parent) until the document is back under the cap, preserving content
+  # and never merging table sections. 400 sits comfortably above a real
+  # filing's section count while still catching the runaway case. 0 uses
+  # the engine default (400); a negative value disables the cap. Override
+  # with VLE_INGEST_MAX_SECTIONS.
+  max_sections: 400
+
   # The summarize and HyDE stages run concurrently. This caps the total
   # number of LLM calls in flight across both stages combined, so the
   # provider's per-tenant concurrency limit isn't exceeded. 0 disables

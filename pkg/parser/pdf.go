@@ -64,6 +64,30 @@ type PDF struct {
 	// Zero selects defaultMaxLeafSections. A negative value disables the
 	// cap entirely (escape hatch for callers that want the raw outline).
 	MaxSections int
+
+	// ParseTimeout bounds the ENTIRE Parse of one document — row
+	// extraction, table extraction, section building, and the leaf cap,
+	// end to end. It is the outermost robustness valve.
+	//
+	// Every other time bound inside the parser caps a sub-stage
+	// (tableExtractPageTimeout / tableExtractDocBudget cap table
+	// extraction), but the pure-Go row extractor
+	// (extractPDFRows -> reader.Page(n).Content()) had no bound at all —
+	// and that is exactly where a pathological PDF was observed hanging
+	// 600s+ in `parsing`, even in minimal mode (pre-LLM). ParseTimeout
+	// runs the whole parse on a goroutine and abandons it on deadline,
+	// returning a clear error so ingest fails the document fast instead
+	// of wedging forever.
+	//
+	// Nothing is disabled by this bound: when the parse finishes inside
+	// the deadline the full feature set (tables, the outline/heuristic
+	// section tree, the cap) is produced exactly as before.
+	//
+	// Zero selects defaultParseTimeout (120s). A non-positive value other
+	// than zero (i.e. negative) disables the bound entirely — Parse then
+	// runs synchronously with no deadline (escape hatch / legacy
+	// behaviour for callers that want an unbounded parse).
+	ParseTimeout time.Duration
 }
 
 // TableOpts controls pdftable's table-finding stage. The zero value
@@ -119,11 +143,22 @@ func NewPDFWithTables(opts *TableOpts) *PDF { return &PDF{Tables: opts} }
 
 // NewPDFWithOpts returns a PDF parser using the supplied table-extraction
 // options and an explicit leaf-section cap. maxSections == 0 selects
-// defaultMaxLeafSections; a negative value disables the cap. This is the
-// constructor the engine wiring uses so the cap is operator-tunable via
-// config (ingest.max_sections).
+// defaultMaxLeafSections; a negative value disables the cap. The parse
+// timeout is left at its zero value, which resolves to defaultParseTimeout.
 func NewPDFWithOpts(opts *TableOpts, maxSections int) *PDF {
 	return &PDF{Tables: opts, MaxSections: maxSections}
+}
+
+// NewPDFWithConfig returns a PDF parser with the table options, leaf-
+// section cap, AND total-parse timeout all set explicitly. This is the
+// constructor the engine wiring uses so every parser robustness knob is
+// operator-tunable via config (ingest.max_sections,
+// ingest.parse_timeout_seconds).
+//
+//   - maxSections == 0  → defaultMaxLeafSections; negative disables the cap.
+//   - parseTimeout == 0 → defaultParseTimeout; negative disables the bound.
+func NewPDFWithConfig(opts *TableOpts, maxSections int, parseTimeout time.Duration) *PDF {
+	return &PDF{Tables: opts, MaxSections: maxSections, ParseTimeout: parseTimeout}
 }
 
 // Name implements Parser.
@@ -138,11 +173,87 @@ func (*PDF) Accepts(contentType, filename string) bool {
 }
 
 // Parse implements Parser.
-func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
+//
+// Parse is a thin timeout wrapper around the real parse work (parseDoc).
+// It bounds the WHOLE parse — row extraction, table extraction, section
+// building, and the leaf cap — by p.resolvedParseTimeout(). The work runs
+// on a goroutine; if it doesn't finish by the deadline (or ctx is
+// cancelled) Parse returns a clear error and abandons the goroutine. The
+// goroutine then finishes on its own (or is GC'd) — its result lands in a
+// buffered channel so it never blocks on send. This is the same
+// abandon-on-deadline pattern safeExtractTables already uses for a single
+// table page, lifted to cover the entire parse so ANY parse pathology
+// (notably the unbounded pure-Go ledongthuc row extractor) fails fast and
+// cleanly instead of hanging ingest forever.
+//
+// A negative ParseTimeout disables the bound and runs parseDoc inline.
+func (p *PDF) Parse(ctx context.Context, r io.Reader) (*ParsedDoc, error) {
+	// Read the bytes up front (outside the deadline goroutine): io.ReadAll
+	// is bounded by the reader/storage layer, not by the PDF pathology we
+	// are guarding against, and reading here keeps the goroutine body a
+	// pure CPU/parse unit.
 	buf, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
+	return runParseWithDeadline(ctx, p.resolvedParseTimeout(), func() (*ParsedDoc, error) {
+		return p.parseDoc(ctx, buf)
+	})
+}
+
+// runParseWithDeadline runs work bounded by timeout. It is the reusable
+// core of the whole-Parse robustness valve, factored out so the
+// deadline/abandon mechanism is unit-testable with an arbitrary work
+// closure (e.g. one that sleeps past the deadline) without needing a
+// pathological real PDF.
+//
+//   - timeout <= 0 runs work inline with NO bound (legacy/unbounded
+//     behaviour; the explicit escape hatch a negative ParseTimeout selects).
+//   - Otherwise work runs on a goroutine and the function selects on the
+//     work result, a time.After(timeout), and ctx cancellation. On
+//     timeout/cancel the goroutine is abandoned: its result lands in a
+//     buffered channel so it can always send and exit (no leak on send),
+//     then runs to completion on its own and is collected. A panic inside
+//     work is recovered and surfaced as an error so a backend bug can
+//     never crash the ingest worker.
+//
+// The timeout/cancel errors are deliberately phrased so the ingest
+// pipeline's existing "parse failed → document failed" path produces a
+// clear, ops-visible message instead of an infinite hang.
+func runParseWithDeadline(ctx context.Context, timeout time.Duration, work func() (*ParsedDoc, error)) (*ParsedDoc, error) {
+	if timeout <= 0 {
+		return work()
+	}
+
+	type result struct {
+		doc *ParsedDoc
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- result{err: fmt.Errorf("pdf: parse panicked: %v", rec)}
+			}
+		}()
+		doc, perr := work()
+		done <- result{doc: doc, err: perr}
+	}()
+
+	select {
+	case res := <-done:
+		return res.doc, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("pdf: parse exceeded %s — document too complex or malformed", timeout)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("pdf: parse cancelled: %w", ctx.Err())
+	}
+}
+
+// parseDoc is the real parse implementation. It is bounded by Parse's
+// deadline wrapper; on its own it has no time bound beyond the per-stage
+// table-extraction budgets.
+func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 
 	// We run TWO PDF backends in parallel here:
 	//
@@ -407,6 +518,24 @@ func (p *PDF) resolvedMaxSections() int {
 	return p.MaxSections
 }
 
+// defaultParseTimeout is the whole-Parse deadline applied when
+// ParseTimeout is left at its zero value. 120s is comfortably longer than
+// a healthy 300-page filing's parse (seconds to low tens of seconds) yet
+// short enough that a pathological/malformed document — the kind observed
+// hanging 600s+ in pure-Go row extraction — is reaped quickly and the
+// document fails fast instead of wedging ingest.
+const defaultParseTimeout = 120 * time.Second
+
+// resolvedParseTimeout turns the configured ParseTimeout into the value
+// the wrapper actually uses: 0 selects defaultParseTimeout; a negative
+// value disables the bound (Parse runs parseDoc inline with no deadline).
+func (p *PDF) resolvedParseTimeout() time.Duration {
+	if p.ParseTimeout == 0 {
+		return defaultParseTimeout
+	}
+	return p.ParseTimeout
+}
+
 // propagateSectionPages fills internal-node PageStart/PageEnd from the union
 // of descendant leaf ranges where the internal node didn't have its own
 // (because its body was empty / hoisted into children). Leaves keep their
@@ -476,34 +605,158 @@ func countLeafSections(sections []Section) int {
 	return n
 }
 
-// capLeafSections enforces a ceiling on the total leaf-section count.
-// While the count exceeds maxLeaves it repeatedly merges the two
-// smallest ADJACENT leaf siblings under whichever parent currently has
-// the most leaf children — so the runaway byte-split sections collapse
-// back first, while genuinely distinct top-level sections are left
-// alone. maxLeaves <= 0 disables the cap.
+// capLeafSections enforces a ceiling on the total leaf-section count so a
+// pathological PDF can't shatter into thousands of tiny leaves (each of
+// which costs a summarize + HyDE + multi-axis LLM call at ingest, which
+// is what throttles/stalls the full pipeline). maxLeaves <= 0 disables
+// the cap; a tree already at or under the cap is returned untouched.
 //
-// Merged leaves concatenate their content (blank-line separated), keep
-// the first sibling's title, and union their page ranges. Table
-// sections are attached AFTER this pass (attachTableSections), so their
-// numeric content is never merged away.
+// The reduction is robust to ANY tree shape, which is the fix for the
+// real 10-K explosion: that document is not a flat list of adjacent
+// leaves but hundreds of SINGLE-LEAF PARENTS (heading -> one body leaf),
+// which have no adjacent leaf-sibling pairs at all — so the old
+// adjacent-only merge silently did nothing and a 92-page filing sailed
+// past the cap at 463-1465 leaves. We fix it in two phases:
+//
+//  1. collapseSingleLeafParents flattens every heading -> lone-leaf chain
+//     so the formerly-only-children become adjacent leaf SIBLINGS. This
+//     restructures the tree without changing the leaf count (the parent
+//     absorbs the child and itself becomes the leaf).
+//
+//  2. The merge loop then repeatedly merges the smallest adjacent leaf
+//     pair until the count is back under the cap (a defensive collapse
+//     step covers any pair a table leaf blocked).
+//
+// The invariant: for any tree with > maxLeaves MERGEABLE leaves,
+// capLeafSections drives countLeafSections to <= maxLeaves. The only
+// leaves it will not merge are table sections (Metadata["table"]=="true")
+// — those carry distinct numeric content and must survive verbatim. In
+// the normal parse flow table sections are attached AFTER this pass
+// (attachTableSections), so the cap never sees them; the guard is
+// defensive for any caller that pre-attaches tables.
+//
+// Merged/collapsed leaves concatenate their content (blank-line
+// separated), keep the parent/first-sibling title, and union their page
+// ranges, so no body text is ever dropped.
 func capLeafSections(sections []Section, maxLeaves int) []Section {
 	if maxLeaves <= 0 {
 		return sections
 	}
-	// Guard against pathological loops: at most one merge per excess leaf.
-	for guard := 0; countLeafSections(sections) > maxLeaves && guard < 100000; guard++ {
-		if !mergeOneSmallestAdjacentLeafPair(sections) {
-			break // no mergeable adjacent leaf pair anywhere
+	if countLeafSections(sections) <= maxLeaves {
+		return sections // already under the cap — leave structure untouched
+	}
+
+	// Wrap the top-level sections under a synthetic root. The merge step
+	// shrinks a sibling list in place (it rewrites parent.Children), which
+	// only propagates back to the caller when the mutated list is a struct
+	// FIELD, not a bare slice parameter. The runaway shape we're fixing —
+	// hundreds of single-leaf PARENTS — needs the TOP-level list to shrink,
+	// so we make the top level a nested list (root.Children) and operate on
+	// that; the wrapper itself (length 1) never changes. We return
+	// root.Children at the end.
+	root := []Section{{Children: sections}}
+
+	// Phase 1: flatten single-leaf-parent chains so only-children become
+	// mergeable siblings. Count is unchanged; structure is normalised.
+	root[0].Children = collapseSingleLeafParents(root[0].Children)
+
+	// Phase 2: merge adjacent leaf pairs (smallest first) until under cap.
+	// Each merge removes one leaf and each fallback collapse removes one
+	// internal node — both strictly monotonic — so the loop is bounded;
+	// the guard is belt-and-braces against a logic regression.
+	for guard := 0; countLeafSections(root) > maxLeaves && guard < 1000000; guard++ {
+		if mergeOneSmallestAdjacentLeafPair(root) {
+			continue
+		}
+		// No adjacent mergeable pair left. Try to free one up by
+		// collapsing a remaining single-leaf parent; if that's impossible
+		// too, every remaining leaf is unmergeable (e.g. table sections)
+		// and we stop — there is nothing left we're permitted to merge.
+		if !collapseOneSingleLeafParent(&root) {
+			break
+		}
+	}
+	return root[0].Children
+}
+
+// isTableLeaf reports whether s is a table section that must never be
+// merged or collapsed (its cell content is distinct numeric data).
+func isTableLeaf(s *Section) bool {
+	return s.Metadata != nil && s.Metadata["table"] == "true"
+}
+
+// collapseSingleLeafParents recursively flattens every parent that has
+// exactly one child which is a (non-table) leaf: the parent absorbs the
+// child's content + page range and itself becomes the leaf. Chains
+// (heading -> subheading -> body) collapse fully in one bottom-up pass.
+//
+// Leaf count is preserved (one internal node + one leaf become one leaf);
+// the point is purely to turn only-children into adjacent siblings so the
+// adjacent-pair merge can then reduce the count. Returns the rewritten
+// slice.
+func collapseSingleLeafParents(sections []Section) []Section {
+	for i := range sections {
+		s := &sections[i]
+		if len(s.Children) == 0 {
+			continue
+		}
+		// Bottom-up: collapse within the children first so a chain folds
+		// from the leaf upward.
+		s.Children = collapseSingleLeafParents(s.Children)
+		if len(s.Children) == 1 && len(s.Children[0].Children) == 0 && !isTableLeaf(&s.Children[0]) {
+			absorbChildIntoParent(s, s.Children[0])
+			s.Children = nil
 		}
 	}
 	return sections
 }
 
+// collapseOneSingleLeafParent finds the first parent in the tree with
+// exactly one (non-table) leaf child and collapses it (parent absorbs the
+// leaf, becomes a leaf). Returns false when no such parent exists. Used
+// as a defensive fallback inside the merge loop when an adjacent pair was
+// blocked by a table leaf; the bulk flattening is done up front by
+// collapseSingleLeafParents.
+func collapseOneSingleLeafParent(sections *[]Section) bool {
+	s := *sections
+	for i := range s {
+		n := &s[i]
+		if len(n.Children) == 1 && len(n.Children[0].Children) == 0 && !isTableLeaf(&n.Children[0]) {
+			absorbChildIntoParent(n, n.Children[0])
+			n.Children = nil
+			return true
+		}
+		if len(n.Children) > 0 {
+			if collapseOneSingleLeafParent(&n.Children) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// absorbChildIntoParent folds a leaf child's content and page range up
+// into its parent. The parent keeps its own title (the heading) and
+// gains the child's body; an empty parent body is replaced outright so we
+// don't prefix a stray separator. Page ranges union (min start, max end).
+func absorbChildIntoParent(parent *Section, child Section) {
+	switch {
+	case strings.TrimSpace(parent.Content) == "":
+		parent.Content = child.Content
+	case strings.TrimSpace(child.Content) != "":
+		parent.Content = parent.Content + "\n\n" + child.Content
+	}
+	parent.PageStart = minNonZero(parent.PageStart, child.PageStart)
+	if child.PageEnd > parent.PageEnd {
+		parent.PageEnd = child.PageEnd
+	}
+}
+
 // mergeOneSmallestAdjacentLeafPair finds the adjacent leaf-sibling pair
 // with the smallest combined content length anywhere in the tree and
-// merges it in place. Returns false when no sibling list has two
-// adjacent leaves to merge.
+// merges it in place. Only pairs where BOTH siblings are NON-table leaves
+// are eligible — table sections are never merged. Returns false when no
+// sibling list has two adjacent mergeable leaves.
 func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
 	bestList := (*[]Section)(nil)
 	bestIdx := -1
@@ -513,7 +766,8 @@ func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
 	walk = func(list *[]Section) {
 		s := *list
 		for i := 0; i+1 < len(s); i++ {
-			if len(s[i].Children) == 0 && len(s[i+1].Children) == 0 {
+			if len(s[i].Children) == 0 && len(s[i+1].Children) == 0 &&
+				!isTableLeaf(&s[i]) && !isTableLeaf(&s[i+1]) {
 				size := len(s[i].Content) + len(s[i+1].Content)
 				if bestSize < 0 || size < bestSize {
 					bestSize, bestList, bestIdx = size, list, i

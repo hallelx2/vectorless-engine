@@ -125,6 +125,28 @@ type IngestConfig struct {
 	// section count (~170-510 with tables) while still catching the
 	// runaway case. A negative value is rejected by Validate.
 	MaxSections int `yaml:"max_sections"`
+
+	// ParseTimeoutSeconds bounds the ENTIRE parse of a single document —
+	// row extraction, table extraction, section building, and the leaf
+	// cap, end to end. It is the outermost robustness valve: every
+	// per-stage timeout inside the parser (per-page / doc-wide table
+	// budgets) is bounded by something pre-LLM, but pure-Go row extraction
+	// (ledongthuc's reader.Page(n).Content()) had no bound, so a
+	// pathological PDF (observed: a 10-K stuck 600s+ in `parsing` even in
+	// minimal mode) could hang the parse forever.
+	//
+	// When the whole parse exceeds this deadline the parser abandons the
+	// work and returns a clear error; the ingest pipeline treats it like
+	// any other parse failure (the document goes to `failed`), so a doc
+	// that can't parse in time fails fast and is visible to ops/bench
+	// rather than wedging the pipeline. NOTHING is disabled — the full
+	// feature set (LLM TOC, tables, summarize, HyDE, multi-axis) still
+	// runs; parse is merely bounded.
+	//
+	// 0 (or omitted) defaults to 120. A negative value is rejected by
+	// Validate. Engine env override: VLE_INGEST_PARSE_TIMEOUT_SECONDS;
+	// the server binary also forwards VLS_/VLE_INGEST_PARSE_TIMEOUT_SECONDS.
+	ParseTimeoutSeconds int `yaml:"parse_timeout_seconds"`
 }
 
 // TOCBlock configures the LLM-driven table-of-contents tree
@@ -728,6 +750,7 @@ func Default() Config {
 			GlobalLLMConcurrency:  12,
 			LLMCallTimeoutSeconds: 90,
 			MaxSections:           400,
+			ParseTimeoutSeconds:   120,
 			HyDE: HyDEConfig{
 				Enabled:      true,
 				NumQuestions: 5,
@@ -909,6 +932,11 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_INGEST_MAX_SECTIONS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Ingest.MaxSections = n
+		}
+	}
+	if v := os.Getenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Ingest.ParseTimeoutSeconds = n
 		}
 	}
 	// pdftable-driven table extraction.
@@ -1199,6 +1227,9 @@ func (c Config) Validate() error {
 	}
 	if c.Ingest.MaxSections < 0 {
 		return fmt.Errorf("ingest.max_sections must be >= 0, got %d", c.Ingest.MaxSections)
+	}
+	if c.Ingest.ParseTimeoutSeconds < 0 {
+		return fmt.Errorf("ingest.parse_timeout_seconds must be >= 0, got %d", c.Ingest.ParseTimeoutSeconds)
 	}
 
 	switch c.Ingest.Tables.VerticalStrategy {
