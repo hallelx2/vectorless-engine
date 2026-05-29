@@ -1122,15 +1122,35 @@ func DefaultRegistry() *parser.Registry {
 }
 
 // RegistryFromTableOpts returns a parser.Registry where the PDF parser
-// is configured from the supplied TableOpts. Pass nil to disable table
-// extraction entirely; pass parser.DefaultTableOpts() (or a custom set)
-// to enable. All non-PDF parsers are constructed at their defaults.
+// is configured from the supplied TableOpts, with the leaf-section cap
+// and total-parse timeout left at their parser defaults (400 sections,
+// 120s). Pass nil to disable table extraction entirely; pass
+// parser.DefaultTableOpts() (or a custom set) to enable. All non-PDF
+// parsers are constructed at their defaults.
+//
+// Use RegistryFromIngestParams to thread an operator-tuned cap / parse
+// timeout from config.
 func RegistryFromTableOpts(opts *parser.TableOpts) *parser.Registry {
+	return RegistryFromIngestParams(opts, 0, 0)
+}
+
+// RegistryFromIngestParams returns a parser.Registry where the PDF parser
+// is configured from the supplied TableOpts AND the operator-tuned
+// leaf-section cap and total-parse timeout (ingest.max_sections,
+// ingest.parse_timeout_seconds). maxSections == 0 / parseTimeout == 0
+// each select the parser's built-in default; a negative value disables
+// that bound. All non-PDF parsers are constructed at their defaults.
+//
+// This is the constructor the engine/server wiring uses so the parse
+// deadline and section cap from config actually reach the parser — the
+// outermost robustness valves for full-feature ingest. Table extraction,
+// the section tree, and the cap all still run; they are merely bounded.
+func RegistryFromIngestParams(opts *parser.TableOpts, maxSections int, parseTimeout time.Duration) *parser.Registry {
 	return parser.NewRegistry(
 		parser.NewMarkdown(),
 		parser.NewHTML(),
 		parser.NewDOCX(),
-		parser.NewPDFWithTables(opts),
+		parser.NewPDFWithConfig(opts, maxSections, parseTimeout),
 		parser.NewText(),
 	)
 }

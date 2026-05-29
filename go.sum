@@ -134,8 +134,8 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.1 h1:X5VWvz21y3gzm9Nw/kaUeku/1+u
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.1/go.mod h1:Zanoh4+gvIgluNqcfMVTJueD4wSS5hT7zTt4Mrutd90=
 github.com/hallelx2/llmgate v0.2.0 h1:x/LNCeHUPZpafn2IXi+LqpnZa7TtEQdLVlpkkJTlzBI=
 github.com/hallelx2/llmgate v0.2.0/go.mod h1:MK2Ol/5CIweTQ2/9eSiTJ5g/KSSuobNZL9TD3s57JxY=
-github.com/hallelx2/pdftable v0.3.0 h1:SwZPu2z4cIR4R30gP+7bpunGh931StjO1vrsxoldiDw=
-github.com/hallelx2/pdftable v0.3.0/go.mod h1:pxNlc4D43wjzis7M6EfgQZvHOsQ4okggm+xqUu+OokI=
+github.com/hallelx2/pdftable v0.3.1 h1:Uqe+9G8s9jrGYwxk8dEMXBCB+SlzvWPmW0Ze5863W1I=
+github.com/hallelx2/pdftable v0.3.1/go.mod h1:pxNlc4D43wjzis7M6EfgQZvHOsQ4okggm+xqUu+OokI=
 github.com/hhrutter/lzw v1.0.0 h1:laL89Llp86W3rRs83LvKbwYRx6INE8gDn0XNb1oXtm0=
 github.com/hhrutter/lzw v1.0.0/go.mod h1:2HC6DJSn/n6iAZfgM3Pg+cP1KxeWc3ezG8bBqW5+WEo=
 github.com/hhrutter/pkcs7 v0.2.2 h1:xMoifoVWah1LNym3C0pomEiLmyJyVIBXt/8oTPyPz+8=

@@ -82,6 +82,38 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Ingest.TOC.TOCCheckPages != 20 {
 		t.Errorf("ingest.toc.toc_check_pages = %d, want 20", cfg.Ingest.TOC.TOCCheckPages)
 	}
+	if cfg.Ingest.ParseTimeoutSeconds != 120 {
+		t.Errorf("ingest.parse_timeout_seconds = %d, want 120", cfg.Ingest.ParseTimeoutSeconds)
+	}
+	if cfg.Ingest.MaxSections != 400 {
+		t.Errorf("ingest.max_sections = %d, want 400", cfg.Ingest.MaxSections)
+	}
+}
+
+// TestIngestParseTimeoutEnvOverride covers VLE_INGEST_PARSE_TIMEOUT_SECONDS
+// — the operator knob that lets a tuned whole-parse deadline reach the
+// parser without a config-file edit.
+func TestIngestParseTimeoutEnvOverride(t *testing.T) {
+	prev := os.Getenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS")
+	defer os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", prev)
+
+	os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", "300")
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Ingest.ParseTimeoutSeconds != 300 {
+		t.Errorf("ingest.parse_timeout_seconds = %d, want 300", cfg.Ingest.ParseTimeoutSeconds)
+	}
+}
+
+// TestIngestParseTimeoutValidate rejects a negative parse timeout — a
+// non-positive deadline would silently disable the bound, which must be
+// an explicit choice, not a typo that slips through Load.
+func TestIngestParseTimeoutValidate(t *testing.T) {
+	cfg := Default()
+	cfg.Ingest.ParseTimeoutSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate should reject a negative ingest.parse_timeout_seconds")
+	}
 }
 
 // TestIngestModeDefault locks the default ingest mode to "full" so the
