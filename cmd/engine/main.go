@@ -172,7 +172,7 @@ func run() error {
 		DB:                     pool,
 		Storage:                store,
 		LLM:                    llmClient,
-		Parsers:                ingest.RegistryFromTableOpts(tableOptsFromConfig(cfg.Ingest.Tables)),
+		Parsers:                ingest.RegistryFromIngestParams(tableOptsFromConfig(cfg.Ingest.Tables), cfg.Ingest.MaxSections, time.Duration(cfg.Ingest.ParseTimeoutSeconds)*time.Second),
 		Logger:                 logger,
 		Mode:                   cfg.Ingest.Mode,
 		HyDEEnabled:            cfg.Ingest.HyDE.Enabled,

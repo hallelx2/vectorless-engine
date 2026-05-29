@@ -64,6 +64,30 @@ type PDF struct {
 	// Zero selects defaultMaxLeafSections. A negative value disables the
 	// cap entirely (escape hatch for callers that want the raw outline).
 	MaxSections int
+
+	// ParseTimeout bounds the ENTIRE Parse of one document — row
+	// extraction, table extraction, section building, and the leaf cap,
+	// end to end. It is the outermost robustness valve.
+	//
+	// Every other time bound inside the parser caps a sub-stage
+	// (tableExtractPageTimeout / tableExtractDocBudget cap table
+	// extraction), but the pure-Go row extractor
+	// (extractPDFRows -> reader.Page(n).Content()) had no bound at all —
+	// and that is exactly where a pathological PDF was observed hanging
+	// 600s+ in `parsing`, even in minimal mode (pre-LLM). ParseTimeout
+	// runs the whole parse on a goroutine and abandons it on deadline,
+	// returning a clear error so ingest fails the document fast instead
+	// of wedging forever.
+	//
+	// Nothing is disabled by this bound: when the parse finishes inside
+	// the deadline the full feature set (tables, the outline/heuristic
+	// section tree, the cap) is produced exactly as before.
+	//
+	// Zero selects defaultParseTimeout (120s). A non-positive value other
+	// than zero (i.e. negative) disables the bound entirely — Parse then
+	// runs synchronously with no deadline (escape hatch / legacy
+	// behaviour for callers that want an unbounded parse).
+	ParseTimeout time.Duration
 }
 
 // TableOpts controls pdftable's table-finding stage. The zero value
@@ -119,11 +143,22 @@ func NewPDFWithTables(opts *TableOpts) *PDF { return &PDF{Tables: opts} }
 
 // NewPDFWithOpts returns a PDF parser using the supplied table-extraction
 // options and an explicit leaf-section cap. maxSections == 0 selects
-// defaultMaxLeafSections; a negative value disables the cap. This is the
-// constructor the engine wiring uses so the cap is operator-tunable via
-// config (ingest.max_sections).
+// defaultMaxLeafSections; a negative value disables the cap. The parse
+// timeout is left at its zero value, which resolves to defaultParseTimeout.
 func NewPDFWithOpts(opts *TableOpts, maxSections int) *PDF {
 	return &PDF{Tables: opts, MaxSections: maxSections}
+}
+
+// NewPDFWithConfig returns a PDF parser with the table options, leaf-
+// section cap, AND total-parse timeout all set explicitly. This is the
+// constructor the engine wiring uses so every parser robustness knob is
+// operator-tunable via config (ingest.max_sections,
+// ingest.parse_timeout_seconds).
+//
+//   - maxSections == 0  → defaultMaxLeafSections; negative disables the cap.
+//   - parseTimeout == 0 → defaultParseTimeout; negative disables the bound.
+func NewPDFWithConfig(opts *TableOpts, maxSections int, parseTimeout time.Duration) *PDF {
+	return &PDF{Tables: opts, MaxSections: maxSections, ParseTimeout: parseTimeout}
 }
 
 // Name implements Parser.
@@ -138,11 +173,87 @@ func (*PDF) Accepts(contentType, filename string) bool {
 }
 
 // Parse implements Parser.
-func (p *PDF) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
+//
+// Parse is a thin timeout wrapper around the real parse work (parseDoc).
+// It bounds the WHOLE parse — row extraction, table extraction, section
+// building, and the leaf cap — by p.resolvedParseTimeout(). The work runs
+// on a goroutine; if it doesn't finish by the deadline (or ctx is
+// cancelled) Parse returns a clear error and abandons the goroutine. The
+// goroutine then finishes on its own (or is GC'd) — its result lands in a
+// buffered channel so it never blocks on send. This is the same
+// abandon-on-deadline pattern safeExtractTables already uses for a single
+// table page, lifted to cover the entire parse so ANY parse pathology
+// (notably the unbounded pure-Go ledongthuc row extractor) fails fast and
+// cleanly instead of hanging ingest forever.
+//
+// A negative ParseTimeout disables the bound and runs parseDoc inline.
+func (p *PDF) Parse(ctx context.Context, r io.Reader) (*ParsedDoc, error) {
+	// Read the bytes up front (outside the deadline goroutine): io.ReadAll
+	// is bounded by the reader/storage layer, not by the PDF pathology we
+	// are guarding against, and reading here keeps the goroutine body a
+	// pure CPU/parse unit.
 	buf, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
+	return runParseWithDeadline(ctx, p.resolvedParseTimeout(), func() (*ParsedDoc, error) {
+		return p.parseDoc(ctx, buf)
+	})
+}
+
+// runParseWithDeadline runs work bounded by timeout. It is the reusable
+// core of the whole-Parse robustness valve, factored out so the
+// deadline/abandon mechanism is unit-testable with an arbitrary work
+// closure (e.g. one that sleeps past the deadline) without needing a
+// pathological real PDF.
+//
+//   - timeout <= 0 runs work inline with NO bound (legacy/unbounded
+//     behaviour; the explicit escape hatch a negative ParseTimeout selects).
+//   - Otherwise work runs on a goroutine and the function selects on the
+//     work result, a time.After(timeout), and ctx cancellation. On
+//     timeout/cancel the goroutine is abandoned: its result lands in a
+//     buffered channel so it can always send and exit (no leak on send),
+//     then runs to completion on its own and is collected. A panic inside
+//     work is recovered and surfaced as an error so a backend bug can
+//     never crash the ingest worker.
+//
+// The timeout/cancel errors are deliberately phrased so the ingest
+// pipeline's existing "parse failed → document failed" path produces a
+// clear, ops-visible message instead of an infinite hang.
+func runParseWithDeadline(ctx context.Context, timeout time.Duration, work func() (*ParsedDoc, error)) (*ParsedDoc, error) {
+	if timeout <= 0 {
+		return work()
+	}
+
+	type result struct {
+		doc *ParsedDoc
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- result{err: fmt.Errorf("pdf: parse panicked: %v", rec)}
+			}
+		}()
+		doc, perr := work()
+		done <- result{doc: doc, err: perr}
+	}()
+
+	select {
+	case res := <-done:
+		return res.doc, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("pdf: parse exceeded %s — document too complex or malformed", timeout)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("pdf: parse cancelled: %w", ctx.Err())
+	}
+}
+
+// parseDoc is the real parse implementation. It is bounded by Parse's
+// deadline wrapper; on its own it has no time bound beyond the per-stage
+// table-extraction budgets.
+func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 
 	// We run TWO PDF backends in parallel here:
 	//
@@ -405,6 +516,24 @@ func (p *PDF) resolvedMaxSections() int {
 		return defaultMaxLeafSections
 	}
 	return p.MaxSections
+}
+
+// defaultParseTimeout is the whole-Parse deadline applied when
+// ParseTimeout is left at its zero value. 120s is comfortably longer than
+// a healthy 300-page filing's parse (seconds to low tens of seconds) yet
+// short enough that a pathological/malformed document — the kind observed
+// hanging 600s+ in pure-Go row extraction — is reaped quickly and the
+// document fails fast instead of wedging ingest.
+const defaultParseTimeout = 120 * time.Second
+
+// resolvedParseTimeout turns the configured ParseTimeout into the value
+// the wrapper actually uses: 0 selects defaultParseTimeout; a negative
+// value disables the bound (Parse runs parseDoc inline with no deadline).
+func (p *PDF) resolvedParseTimeout() time.Duration {
+	if p.ParseTimeout == 0 {
+		return defaultParseTimeout
+	}
+	return p.ParseTimeout
 }
 
 // propagateSectionPages fills internal-node PageStart/PageEnd from the union
