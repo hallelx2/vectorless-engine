@@ -412,6 +412,9 @@ func buildPageIndexStrategy(c config.RetrievalConfig, client llmgate.Client, sto
 	if c.PageIndex.PageContentLimit > 0 {
 		p.PageContentLimit = c.PageIndex.PageContentLimit
 	}
+	if c.PageIndex.MaxCitations > 0 {
+		p.MaxCitations = c.PageIndex.MaxCitations
+	}
 	p.ModelOverride = c.PageIndex.Model
 	return p
 }

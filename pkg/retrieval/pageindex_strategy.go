@@ -73,6 +73,19 @@ type PageIndexStrategy struct {
 	// easily blow past 200K chars otherwise.
 	PageContentLimit int
 
+	// MaxCitations caps how many distinct page ranges the FINAL done
+	// action may cite. Zero means use defaultPageIndexMaxCitations.
+	//
+	// This is a confidence backstop, not a navigation limit: the
+	// model is free to read as many pages as MaxHops allows, but the
+	// citation set it commits to is bounded. FinanceBench data shows
+	// the loss mode is "spray ~5 low-confidence ranges → all miss"
+	// while a single confident pick scores f1=1.0; capping the final
+	// set mechanically tames the spray even when the prompt doesn't
+	// fully. When done returns more ranges than the cap, the top-N
+	// by confidence (ties broken by first-seen order) are kept.
+	MaxCitations int
+
 	// ModelOverride, if non-empty, replaces the budget's ModelName
 	// for every turn. Useful for routing the navigation loop to a
 	// cheaper or faster model than the rest of the engine.
@@ -106,7 +119,13 @@ type PageIndexEvent struct {
 	SectionIDs []tree.SectionID `json:"section_ids,omitempty"`
 	Answer     string           `json:"answer,omitempty"`
 	CitedPages [][2]int         `json:"cited_pages,omitempty"`
-	Note       string           `json:"note,omitempty"`
+	// Confidence is the model's self-reported confidence in the FINAL
+	// answer + citation set, in [0,1]. Populated only on the "done"
+	// event. Surfaced so SSE/trace consumers can show how sure the
+	// agent was — and, downstream, so a low-confidence answer can be
+	// treated more cautiously than a confident one.
+	Confidence float64 `json:"confidence,omitempty"`
+	Note       string  `json:"note,omitempty"`
 }
 
 // defaultPageIndexMaxHops bounds the loop. Eight turns is enough for
@@ -120,6 +139,16 @@ const defaultPageIndexMaxHops = 8
 // any flagship model's context but enough text for a 5-7 page
 // excerpt. Matches PageIndex's reference behaviour.
 const defaultPageContentLimit = 16000
+
+// defaultPageIndexMaxCitations bounds the FINAL cited-range set. Three
+// is generous for the answer-spans-one-place common case (where ONE is
+// ideal) while still allowing a genuinely multi-location answer (e.g. a
+// 10-K figure cross-referenced between the income statement and a
+// footnote) to cite two or three distinct ranges. The FinanceBench
+// signal that motivated the cap: confident single-pick = f1 1.0,
+// 5-range spray = f1 0. Capping at 3 keeps the legitimate multi-range
+// case while removing the long tail of low-confidence noise.
+const defaultPageIndexMaxCitations = 3
 
 // strategyNamePageIndex is the stable identifier for config
 // (retrieval.strategy: pageindex) and telemetry.
@@ -170,6 +199,7 @@ func NewPageIndexStrategy(client llmgate.Client) *PageIndexStrategy {
 		LLM:              client,
 		MaxHops:          defaultPageIndexMaxHops,
 		PageContentLimit: defaultPageContentLimit,
+		MaxCitations:     defaultPageIndexMaxCitations,
 	}
 }
 
@@ -213,6 +243,10 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	pageLimit := s.PageContentLimit
 	if pageLimit <= 0 {
 		pageLimit = defaultPageContentLimit
+	}
+	maxCitations := s.MaxCitations
+	if maxCitations <= 0 {
+		maxCitations = defaultPageIndexMaxCitations
 	}
 
 	// Pre-flatten the tree into an ordinal section list ordered by
@@ -280,17 +314,28 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 		case pageActionDone:
 			finalAnswer = strings.TrimSpace(action.Answer)
 			finalReasoning = strings.TrimSpace(action.Reasoning)
-			citedRanges = normaliseRanges(action.CitedPages, maxPage)
+			// Confidence-gate the final citation set: clamp + dedup the
+			// model's cited ranges, then cap to maxCitations keeping the
+			// highest-confidence (ties → first-seen) ranges. This is the
+			// fix for the "spray 5 low-confidence ranges, hit none"
+			// failure mode — a confident single pick survives untouched,
+			// a spray is collapsed to its best few.
+			citedRanges = selectCitedRanges(action.CitedPages, action.CitedConfidences, maxPage, maxCitations)
+			confidence := clampConfidence(action.Confidence)
 			selectedIDs := sectionsOverlapping(sections, citedRanges)
 			s.emit(PageIndexEvent{
 				Hop:        hopsTaken,
 				Type:       pageActionDone,
 				Reasoning:  finalReasoning,
 				Answer:     finalAnswer,
-				CitedPages: action.CitedPages,
+				CitedPages: rangesToPairs(citedRanges),
+				Confidence: confidence,
 			})
 			return &Result{
 				SelectedIDs: selectedIDs,
+				Confidences: confidenceMap(selectedIDs, confidence),
+				Confidence:  confidence,
+				CitedPages:  rangesToPairs(citedRanges),
 				Reasoning:   finalAnswer, // /v1/answer/pageindex reads this
 				ModelUsed:   model,
 				Usage:       totalUsage,
@@ -373,12 +418,16 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	// ignores the rule, we return whatever pages have been read so
 	// the caller at least sees the navigation footprint and an empty
 	// answer rather than a 500.
-	finalAnswer, finalReasoning, citedRanges = s.forceDone(ctx, &msgs, &totalUsage, &hopsTaken, model, maxPage)
+	var forcedConfidence float64
+	finalAnswer, finalReasoning, citedRanges, forcedConfidence = s.forceDone(ctx, &msgs, &totalUsage, &hopsTaken, model, maxPage, maxCitations)
 	selectedIDs := sectionsOverlapping(sections, citedRanges)
 	log.Printf("retrieval: pageindex strategy hit max_hops=%d; forced done", maxHops)
 	_ = finalReasoning
 	return &Result{
 		SelectedIDs: selectedIDs,
+		Confidences: confidenceMap(selectedIDs, forcedConfidence),
+		Confidence:  forcedConfidence,
+		CitedPages:  rangesToPairs(citedRanges),
 		Reasoning:   finalAnswer,
 		ModelUsed:   model,
 		Usage:       totalUsage,
@@ -544,13 +593,14 @@ func (s *PageIndexStrategy) loadSectionBody(ctx context.Context, sec sectionPage
 
 // forceDone runs one final hop with a hard "emit done NOW" prompt so
 // the loop can exit gracefully on a stubborn model. Returns
-// (answer, reasoning, cited_ranges). When the model still doesn't
-// emit a valid done action, the empty values flow back and the
-// caller sees a hop-capped Result.
-func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Message, totalUsage *Usage, hopsTaken *int, model string, maxPage int) (string, string, []pageRange) {
+// (answer, reasoning, cited_ranges, confidence). When the model still
+// doesn't emit a valid done action, the empty values flow back and the
+// caller sees a hop-capped Result. The forced citation set is gated
+// through the same dedup + cap as the normal done path.
+func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Message, totalUsage *Usage, hopsTaken *int, model string, maxPage, maxCitations int) (string, string, []pageRange, float64) {
 	*msgs = append(*msgs, llmgate.Message{
 		Role:    llmgate.RoleUser,
-		Content: "You have used your tool-call budget. Reply NOW with one JSON object: {\"tool\":\"done\",\"answer\":\"<your best answer\",\"cited_pages\":[[start,end],...],\"reasoning\":\"why\"}. Do not call any more tools. Do not emit prose.",
+		Content: "You have used your tool-call budget. Reply NOW with one JSON object: {\"tool\":\"done\",\"answer\":\"<your best answer\",\"cited_pages\":[[start,end]],\"confidence\":0.0-1.0,\"reasoning\":\"why\"}. Cite the SINGLE best page range unless the answer truly spans more than one. Do not call any more tools. Do not emit prose.",
 	})
 	req := llmgate.Request{
 		Model:       model,
@@ -560,7 +610,7 @@ func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Messa
 	}
 	resp, err := s.LLM.Complete(ctx, req)
 	if err != nil {
-		return "", "", nil
+		return "", "", nil, 0
 	}
 	*hopsTaken++
 	totalUsage.Add(Usage{
@@ -572,9 +622,12 @@ func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Messa
 	})
 	action, err := ParsePageIndexAction(resp.Content)
 	if err != nil || action.Action != pageActionDone {
-		return "", "", nil
+		return "", "", nil, 0
 	}
-	return strings.TrimSpace(action.Answer), strings.TrimSpace(action.Reasoning), normaliseRanges(action.CitedPages, maxPage)
+	return strings.TrimSpace(action.Answer),
+		strings.TrimSpace(action.Reasoning),
+		selectCitedRanges(action.CitedPages, action.CitedConfidences, maxPage, maxCitations),
+		clampConfidence(action.Confidence)
 }
 
 // --- TOC synthesis ---
@@ -757,29 +810,85 @@ func clampRange(start, end, maxPage int) (int, int, bool) {
 	return start, end, true
 }
 
-// normaliseRanges collapses raw model-emitted ranges (which may be
-// flipped, zero-pages, or duplicated) into a sorted, deduplicated
-// list of valid inclusive ranges clamped to [1,maxPage]. Bad ranges
-// are silently dropped — the trace token must compute over a stable
-// canonical form regardless of how the model orders its citations.
-func normaliseRanges(raw [][2]int, maxPage int) []pageRange {
+// selectCitedRanges is the confidence-gated finaliser for a done
+// action's cited pages. It is the single chokepoint every terminal
+// citation set flows through (normal done + forced done), and it does
+// three things in order:
+//
+//  1. Clamp + DEDUP. Each raw [start,end] is clamped to [1,maxPage];
+//     unusable ranges are dropped; exact duplicates collapse to one.
+//     This alone fixes the precision-deflation bug where a model
+//     emitted the same range (and thus the same section id) five
+//     times — the dedup makes "[[3,5],[3,5],[3,5]]" a single citation.
+//
+//  2. CAP to maxCitations. When more distinct ranges survive than the
+//     cap allows, keep the top-N. Ranking key: per-range confidence
+//     when supplied (descending), else the model's own emission order
+//     (it is instructed to list its single best range first). This is
+//     the mechanical backstop against "spraying": even if the prompt
+//     fails to make the model commit, the engine commits for it.
+//
+//  3. Canonicalise. The kept ranges are returned sorted by page so the
+//     trace token (which hashes the range strings) is stable across
+//     runs that cite the same pages in any order.
+//
+// maxCitations <= 0 disables the cap (dedup still applies); callers
+// pass a resolved positive value, so the <=0 escape hatch only matters
+// to direct unit tests of this helper.
+func selectCitedRanges(raw [][2]int, confidences []float64, maxPage, maxCitations int) []pageRange {
 	if len(raw) == 0 {
 		return nil
 	}
-	seen := make(map[pageRange]struct{}, len(raw))
-	out := make([]pageRange, 0, len(raw))
-	for _, r := range raw {
-		s, e, ok := clampRange(r[0], r[1], maxPage)
+	type scored struct {
+		r     pageRange
+		conf  float64
+		order int
+	}
+	seen := make(map[pageRange]int, len(raw)) // range → index in kept
+	kept := make([]scored, 0, len(raw))
+	for i, rr := range raw {
+		s, e, ok := clampRange(rr[0], rr[1], maxPage)
 		if !ok {
 			continue
 		}
 		pr := pageRange{Start: s, End: e}
-		if _, dup := seen[pr]; dup {
+		conf := 0.0
+		if i < len(confidences) {
+			conf = clampConfidence(confidences[i])
+		}
+		if idx, dup := seen[pr]; dup {
+			// Keep the higher confidence for a repeated range so a
+			// dedup never discards the model's strongest signal.
+			if conf > kept[idx].conf {
+				kept[idx].conf = conf
+			}
 			continue
 		}
-		seen[pr] = struct{}{}
-		out = append(out, pr)
+		seen[pr] = len(kept)
+		kept = append(kept, scored{r: pr, conf: conf, order: i})
 	}
+	if len(kept) == 0 {
+		return nil
+	}
+
+	// Cap: when the distinct set overflows, keep the top-N by
+	// confidence, breaking ties by first-seen order so the result is
+	// deterministic and respects the model's own prioritisation.
+	if maxCitations > 0 && len(kept) > maxCitations {
+		sort.SliceStable(kept, func(i, j int) bool {
+			if kept[i].conf != kept[j].conf {
+				return kept[i].conf > kept[j].conf
+			}
+			return kept[i].order < kept[j].order
+		})
+		kept = kept[:maxCitations]
+	}
+
+	out := make([]pageRange, len(kept))
+	for i, k := range kept {
+		out[i] = k.r
+	}
+	// Canonical page order for a stable trace token.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Start != out[j].Start {
 			return out[i].Start < out[j].Start
@@ -787,6 +896,121 @@ func normaliseRanges(raw [][2]int, maxPage int) []pageRange {
 		return out[i].End < out[j].End
 	})
 	return out
+}
+
+// clampConfidence coerces a model-emitted confidence into [0,1]. Out
+// of range or NaN-ish values clamp to the nearest bound; a missing
+// confidence arrives as 0 and stays 0 (treated as "unstated", not
+// "certainly wrong" — the answer is still returned).
+func clampConfidence(c float64) float64 {
+	if c < 0 {
+		return 0
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
+}
+
+// confidenceMap projects a single overall confidence across every
+// selected section ID so the API layer's existing per-pick confidence
+// surface (Result.Confidences) and abstention machinery can read it
+// uniformly with the section-based strategies. Returns nil when there
+// is no signal to surface (no IDs, or confidence unstated) so callers
+// that gate on a non-empty map behave exactly as before for runs that
+// don't carry confidence.
+func confidenceMap(ids []tree.SectionID, confidence float64) map[tree.SectionID]float64 {
+	if len(ids) == 0 || confidence <= 0 {
+		return nil
+	}
+	m := make(map[tree.SectionID]float64, len(ids))
+	for _, id := range ids {
+		m[id] = confidence
+	}
+	return m
+}
+
+// rangesToPairs flattens []pageRange back to the [][2]int wire shape
+// used by PageIndexEvent.CitedPages, so the done event reports the
+// FINAL (deduped, capped) citation set rather than the raw model
+// output. Consumers building citations from the event therefore never
+// see the pre-dedup spray.
+func rangesToPairs(ranges []pageRange) [][2]int {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([][2]int, len(ranges))
+	for i, r := range ranges {
+		out[i] = [2]int{r.Start, r.End}
+	}
+	return out
+}
+
+// CitationSource is one resolved citation the API layer renders into
+// the response's citations[] array. Start/End are the inclusive page
+// range; SectionIDs are the sections whose page range overlaps it
+// (nil when the caller must compute them from the tree). It is the
+// shared shape both /v1/answer/pageindex implementations build from so
+// citation construction stays identical across the two API layers.
+type CitationSource struct {
+	Start      int
+	End        int
+	SectionIDs []tree.SectionID
+}
+
+// CitationSources resolves which page ranges a page-based Result
+// should surface as citations, in render order. It prefers the FINAL
+// cited-range set (res.CitedPages — deduped + capped by the strategy)
+// so a confident single-pick answer yields ONE citation. When nothing
+// was cited (a refusal, or a hop-capped run with no valid done) it
+// falls back to the unique ranges in PagesRead so the caller still
+// sees the navigation footprint rather than an empty citations array.
+//
+// In the cited-ranges path SectionIDs is left nil (the caller resolves
+// it from the tree via SectionIDsOverlapping); in the PagesRead
+// fallback the per-read SectionIDs the strategy already recorded are
+// reused directly.
+func CitationSources(res *Result) []CitationSource {
+	if res == nil {
+		return nil
+	}
+	if len(res.CitedPages) > 0 {
+		out := make([]CitationSource, 0, len(res.CitedPages))
+		seen := make(map[[2]int]struct{}, len(res.CitedPages))
+		for _, p := range res.CitedPages {
+			key := [2]int{p[0], p[1]}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, CitationSource{Start: p[0], End: p[1]})
+		}
+		return out
+	}
+	// Fallback: unique PagesRead ranges, first-seen order.
+	out := make([]CitationSource, 0, len(res.PagesRead))
+	seen := make(map[[2]int]struct{}, len(res.PagesRead))
+	for _, pr := range res.PagesRead {
+		key := [2]int{pr.StartPage, pr.EndPage}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, CitationSource{Start: pr.StartPage, End: pr.EndPage, SectionIDs: pr.SectionIDs})
+	}
+	return out
+}
+
+// SectionIDsOverlapping returns, in document order, the IDs of every
+// section in the tree whose [PageStart,PageEnd] overlaps the inclusive
+// range [start,end]. It is the tree-facing companion to the internal
+// sectionsOverlapping helper, exported so the API layers can resolve a
+// cited page range to its sections without re-flattening logic.
+func SectionIDsOverlapping(t *tree.Tree, start, end int) []tree.SectionID {
+	if t == nil || t.Root == nil {
+		return nil
+	}
+	return sectionsOverlapping(flattenSectionsByPage(t), []pageRange{{Start: start, End: end}})
 }
 
 // sectionsOverlapping returns the IDs of every section whose
@@ -878,6 +1102,24 @@ type PageIndexAction struct {
 	// relies on for a done action. Each entry is [start, end]; a
 	// single page can be expressed as [5,5].
 	CitedPages [][2]int `json:"cited_pages,omitempty"`
+
+	// Confidence is the model's self-reported confidence in the
+	// answer + citation set as a whole, in [0,1]. Optional on a done
+	// action. The loop surfaces it on the Result so callers can see
+	// how sure the agent was. A low overall confidence does NOT
+	// suppress the answer — the agent still returns its single best
+	// pick rather than nothing — it only annotates it.
+	Confidence float64 `json:"confidence,omitempty"`
+
+	// CitedConfidences is an OPTIONAL per-range confidence aligned by
+	// index with CitedPages: CitedConfidences[i] is the model's
+	// confidence in CitedPages[i]. When present and the cited set
+	// exceeds the cap, it drives which ranges are kept (highest
+	// confidence first). When absent, the cap falls back to the
+	// model's own ordering (it is told to list its best range first).
+	// Parsed from the rich cited_pages shape
+	// [{"pages":[5,7],"confidence":0.9}] when the model emits it.
+	CitedConfidences []float64 `json:"-"`
 
 	// Reasoning is the per-call explanation the system prompt
 	// asks the model to emit. Surfaced into the reasoning_trace
@@ -972,21 +1214,52 @@ func ParsePageIndexAction(raw string) (PageIndexAction, error) {
 	if v, ok := fields["reasoning"]; ok {
 		_ = json.Unmarshal(v, &a.Reasoning)
 	}
+	// Overall answer confidence (0-1). Tolerant of a bare number or a
+	// numeric string; anything unparseable leaves it at 0 ("unstated").
+	if v, ok := fields["confidence"]; ok && len(v) > 0 {
+		if err := json.Unmarshal(v, &a.Confidence); err != nil {
+			var cs string
+			if json.Unmarshal(v, &cs) == nil {
+				if f, perr := strconv.ParseFloat(strings.TrimSpace(cs), 64); perr == nil {
+					a.Confidence = f
+				}
+			}
+		}
+	}
 
-	// cited_pages: try the typed shape first ([[1,2],[5,7]]); fall
-	// back to the string-shape (["1-2","5-7"]) when the typed
-	// decode fails or is empty.
+	// cited_pages accepts three shapes, tried most-structured first:
+	//   1. [[1,2],[5,7]]                                  (preferred)
+	//   2. [{"pages":[1,2],"confidence":0.9}, ...]        (rich, per-range conf)
+	//   3. ["1-2","5-7"]                                  (tolerated string form)
+	// The rich shape lets the model attach per-range confidence the
+	// cap can rank on; the other two leave CitedConfidences empty and
+	// the cap falls back to emission order.
 	if v, ok := fields["cited_pages"]; ok && len(v) > 0 {
 		if err := json.Unmarshal(v, &a.CitedPages); err != nil || len(a.CitedPages) == 0 {
 			a.CitedPages = nil
-			var asStrings []string
-			if err := json.Unmarshal(v, &asStrings); err == nil {
-				for _, p := range asStrings {
-					s, e, ok := parsePageRangeString(p)
+			// Rich object form before string form: an array of objects
+			// fails [][2]int decode but carries the most signal.
+			var asObjs []citedRangeObj
+			if err := json.Unmarshal(v, &asObjs); err == nil && len(asObjs) > 0 {
+				for _, o := range asObjs {
+					s, e, ok := o.toRange()
 					if !ok {
 						continue
 					}
 					a.CitedPages = append(a.CitedPages, [2]int{s, e})
+					a.CitedConfidences = append(a.CitedConfidences, o.Confidence)
+				}
+			}
+			if len(a.CitedPages) == 0 {
+				var asStrings []string
+				if err := json.Unmarshal(v, &asStrings); err == nil {
+					for _, p := range asStrings {
+						s, e, ok := parsePageRangeString(p)
+						if !ok {
+							continue
+						}
+						a.CitedPages = append(a.CitedPages, [2]int{s, e})
+					}
 				}
 			}
 		}
@@ -1003,6 +1276,69 @@ func ParsePageIndexAction(raw string) (PageIndexAction, error) {
 	}
 
 	return a, nil
+}
+
+// citedRangeObj is the rich cited_pages element shape:
+// {"pages":[5,7],"confidence":0.9}. It also tolerates explicit
+// start/end keys ({"start":5,"end":7,"confidence":0.9}) and a
+// "pages":"5-7" string, so a model that reaches for any of those
+// keyings still produces a usable range + confidence.
+type citedRangeObj struct {
+	Pages      []int   `json:"pages"`
+	PagesStr   string  `json:"-"`
+	Start      int     `json:"start"`
+	End        int     `json:"end"`
+	Confidence float64 `json:"confidence"`
+}
+
+// UnmarshalJSON lets "pages" be either [5,7] or the "5-7" string form
+// without tripping the array decode. Everything else uses the struct
+// tags via an alias to avoid recursion.
+func (o *citedRangeObj) UnmarshalJSON(b []byte) error {
+	type alias struct {
+		Pages      json.RawMessage `json:"pages"`
+		Start      int             `json:"start"`
+		End        int             `json:"end"`
+		Confidence float64         `json:"confidence"`
+	}
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	o.Start, o.End, o.Confidence = a.Start, a.End, a.Confidence
+	if len(a.Pages) > 0 {
+		if err := json.Unmarshal(a.Pages, &o.Pages); err != nil {
+			// Not an int array — try the "5-7" string form.
+			o.Pages = nil
+			_ = json.Unmarshal(a.Pages, &o.PagesStr)
+		}
+	}
+	return nil
+}
+
+// toRange resolves the object's range, preferring the pages array,
+// then the pages string, then explicit start/end. Returns ok=false
+// when no usable range is present.
+func (o citedRangeObj) toRange() (int, int, bool) {
+	if len(o.Pages) == 1 && o.Pages[0] > 0 {
+		return o.Pages[0], o.Pages[0], true
+	}
+	if len(o.Pages) >= 2 && o.Pages[0] > 0 && o.Pages[1] > 0 {
+		return o.Pages[0], o.Pages[1], true
+	}
+	if o.PagesStr != "" {
+		if s, e, ok := parsePageRangeString(o.PagesStr); ok {
+			return s, e, true
+		}
+	}
+	if o.Start > 0 {
+		end := o.End
+		if end <= 0 {
+			end = o.Start
+		}
+		return o.Start, end, true
+	}
+	return 0, 0, false
 }
 
 // parsePageRangeString parses "5", "5-7", or "5,7" (the loosest
@@ -1057,7 +1393,16 @@ func wrapPageObservation(tool, body string) string {
 //   - Use tight page ranges; never fetch the whole document.
 //   - Emit a one-sentence reason before each tool call.
 //   - Answer only from tool output (no priors).
-//   - End with a done action carrying answer + cited_pages.
+//   - End with a done action carrying answer + cited_pages + confidence.
+//
+// CITATION DISCIPLINE is the load-bearing addition over the reference
+// PageIndex prompt. FinanceBench measurements show the failure mode is
+// not retrieval but commitment: when the model is sure it names ONE
+// page range and scores f1=1.0; when unsure it lists ~5 hedged ranges
+// and misses on all of them. The prompt therefore makes "commit to the
+// single best range" the default and frames listing many uncertain
+// ranges as the WORSE choice, and asks for an explicit confidence so a
+// low-confidence answer is still a single committed pick, not a spray.
 const pageIndexSystemPrompt = `You are a document QA assistant navigating a paginated document.
 
 TOOL USE PROTOCOL:
@@ -1065,19 +1410,28 @@ TOOL USE PROTOCOL:
 - Always call get_document_structure first to see titles + page ranges.
 - Call get_pages with TIGHT page ranges (e.g. {"tool":"get_pages","start_page":5,"end_page":7}). Never fetch the whole document.
 - Before each tool call, populate the "reasoning" field with ONE short sentence explaining why you're calling it.
-- When you have enough evidence, emit done with the natural-language answer, the page ranges you relied on, and a one-line reasoning trace.
+- When you have enough evidence, emit done with the natural-language answer, the page ranges you relied on, a confidence score, and a one-line reasoning trace.
+
+CITATION DISCIPLINE (read carefully — this determines whether your answer scores):
+- Cite the FEWEST page ranges that actually contain the answer. Ideally cite exactly ONE range. Commit to your single best range rather than hedging.
+- Listing many ranges because you are unsure is WORSE than committing to the one best range: every extra low-relevance citation hurts more than it helps. Do NOT pad cited_pages with maybes.
+- Add a second or third range ONLY when the answer genuinely depends on evidence from physically separate parts of the document (e.g. a figure on one page and the footnote that defines it on another). If a single range already supports the answer, cite only that one.
+- Even when your overall confidence is LOW, still return your SINGLE best range — never replace one uncertain pick with five. Report the low confidence in the "confidence" field instead.
+- "confidence" is your honesty signal in [0,1] for how sure you are the answer is correct and grounded on the cited pages. Set it low when unsure; this never penalizes you — it only annotates the answer.
 
 RULES:
 - Answer based ONLY on tool output. Do not invent facts.
 - Cite by page range, not by section title.
 - Be concise. Single-paragraph answers when possible.
-- If nothing in the document answers the query, emit done with answer="The document does not address this query." and an empty cited_pages array.`
+- If nothing in the document answers the query, emit done with answer="The document does not address this query.", an empty cited_pages array, and confidence 0.`
 
 // pageIndexActionHelp is the one-shot reminder appended to the
 // initial user prompt so the model gets concrete examples without us
-// needing to maintain a separate few-shot block.
+// needing to maintain a separate few-shot block. The done example
+// shows the SINGLE-range default (the multi-range form is allowed but
+// deliberately not modelled here, so the example nudges toward one).
 const pageIndexActionHelp = `- {"tool":"get_document_structure","reasoning":"orient by titles"} — fetch the TOC tree (titles + page ranges, no body text)
 - {"tool":"get_pages","start_page":5,"end_page":7,"reasoning":"section on debt"} — fetch text covering pages 5-7
-- {"tool":"done","answer":"...","cited_pages":[[5,7],[12,12]],"reasoning":"the answer is grounded on these pages"} — final answer
+- {"tool":"done","answer":"...","cited_pages":[[5,7]],"confidence":0.9,"reasoning":"the answer is grounded on these pages"} — final answer (cite ONE range when one suffices)
 
 Reply with ONLY the JSON object.`

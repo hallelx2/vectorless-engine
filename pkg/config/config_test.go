@@ -684,6 +684,9 @@ func TestPageIndexDefaults(t *testing.T) {
 	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
 		t.Errorf("page_content_limit = %d, want 16000", cfg.Retrieval.PageIndex.PageContentLimit)
 	}
+	if cfg.Retrieval.PageIndex.MaxCitations != 3 {
+		t.Errorf("max_citations = %d, want 3", cfg.Retrieval.PageIndex.MaxCitations)
+	}
 	if cfg.Retrieval.PageIndex.Model != "" {
 		t.Errorf("model default should be empty (inherit), got %q", cfg.Retrieval.PageIndex.Model)
 	}
@@ -695,17 +698,20 @@ func TestPageIndexEnvOverride(t *testing.T) {
 	prevEnabled := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED")
 	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
 	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
+	prevCits := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
 	prevModel := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL")
 	defer func() {
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", prevEnabled)
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevCits)
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", prevModel)
 	}()
 
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", "false")
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "12")
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "32000")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "5")
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", "gemini-2.0-flash")
 
 	cfg := Default()
@@ -720,8 +726,40 @@ func TestPageIndexEnvOverride(t *testing.T) {
 	if cfg.Retrieval.PageIndex.PageContentLimit != 32000 {
 		t.Errorf("page_content_limit = %d, want 32000", cfg.Retrieval.PageIndex.PageContentLimit)
 	}
+	if cfg.Retrieval.PageIndex.MaxCitations != 5 {
+		t.Errorf("max_citations = %d, want 5", cfg.Retrieval.PageIndex.MaxCitations)
+	}
 	if cfg.Retrieval.PageIndex.Model != "gemini-2.0-flash" {
 		t.Errorf("model = %q, want gemini-2.0-flash", cfg.Retrieval.PageIndex.Model)
+	}
+}
+
+// TestPageIndexMaxCitationsVLSAlias: the VLS_ prefix reaches
+// MaxCitations too (the deploy layer forwards VLS_*), and VLE_ wins
+// when both are set.
+func TestPageIndexMaxCitationsVLSAlias(t *testing.T) {
+	prevVLE := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
+	prevVLS := os.Getenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
+	defer func() {
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevVLE)
+		os.Setenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevVLS)
+	}()
+
+	// VLS_ alone reaches the field.
+	os.Unsetenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
+	os.Setenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "2")
+	cfg := Default()
+	applyEnvOverrides(&cfg)
+	if cfg.Retrieval.PageIndex.MaxCitations != 2 {
+		t.Errorf("VLS_ alias: max_citations = %d, want 2", cfg.Retrieval.PageIndex.MaxCitations)
+	}
+
+	// VLE_ wins when both are set.
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "4")
+	cfg2 := Default()
+	applyEnvOverrides(&cfg2)
+	if cfg2.Retrieval.PageIndex.MaxCitations != 4 {
+		t.Errorf("VLE_ should win over VLS_: max_citations = %d, want 4", cfg2.Retrieval.PageIndex.MaxCitations)
 	}
 }
 
@@ -745,13 +783,16 @@ func TestPageIndexEnvOverrideEnable(t *testing.T) {
 func TestPageIndexEnvOverrideRejectsBad(t *testing.T) {
 	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
 	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
+	prevCits := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
 	defer func() {
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
 		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
+		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevCits)
 	}()
 
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "abc")
 	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "not-a-number")
+	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "lots")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -760,6 +801,9 @@ func TestPageIndexEnvOverrideRejectsBad(t *testing.T) {
 	}
 	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
 		t.Errorf("garbage page_content_limit env should preserve default, got %d", cfg.Retrieval.PageIndex.PageContentLimit)
+	}
+	if cfg.Retrieval.PageIndex.MaxCitations != 3 {
+		t.Errorf("garbage max_citations env should preserve default 3, got %d", cfg.Retrieval.PageIndex.MaxCitations)
 	}
 }
 
@@ -780,10 +824,18 @@ func TestValidatePageIndexNegatives(t *testing.T) {
 		t.Error("negative page_content_limit should fail validation")
 	}
 
+	cfgCits := Default()
+	cfgCits.Database.URL = "postgres://localhost/test"
+	cfgCits.Retrieval.PageIndex.MaxCitations = -1
+	if err := cfgCits.Validate(); err == nil {
+		t.Error("negative max_citations should fail validation")
+	}
+
 	cfg3 := Default()
 	cfg3.Database.URL = "postgres://localhost/test"
 	cfg3.Retrieval.PageIndex.MaxHops = 0
 	cfg3.Retrieval.PageIndex.PageContentLimit = 0
+	cfg3.Retrieval.PageIndex.MaxCitations = 0
 	if err := cfg3.Validate(); err != nil {
 		t.Errorf("zero values should pass (defaults applied at runtime): %v", err)
 	}

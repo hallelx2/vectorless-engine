@@ -286,6 +286,16 @@ retrieval:
     # flagship model's context window. Higher values risk burning
     # context budget on stray full-document fetches.
     page_content_limit: 16000
+    # Cap on how many distinct page ranges the FINAL answer may
+    # cite. A confidence backstop, not a navigation limit: the
+    # model may read as many pages as max_hops allows, but the
+    # citation set it commits to is bounded. FinanceBench data
+    # shows the failure mode is "spray ~5 low-confidence ranges ->
+    # miss all" while a single confident pick scores perfectly;
+    # capping the final set tames the spray. 3 keeps a genuinely
+    # multi-location answer (e.g. a figure + its footnote) while
+    # cutting the low-confidence tail. Env: VLE_/VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS.
+    max_citations: 3
     # Override the navigation-loop model; empty inherits the
     # request's model (which itself falls back to the engine
     # default). Most deployments leave this blank — navigation
