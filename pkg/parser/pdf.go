@@ -605,34 +605,158 @@ func countLeafSections(sections []Section) int {
 	return n
 }
 
-// capLeafSections enforces a ceiling on the total leaf-section count.
-// While the count exceeds maxLeaves it repeatedly merges the two
-// smallest ADJACENT leaf siblings under whichever parent currently has
-// the most leaf children — so the runaway byte-split sections collapse
-// back first, while genuinely distinct top-level sections are left
-// alone. maxLeaves <= 0 disables the cap.
+// capLeafSections enforces a ceiling on the total leaf-section count so a
+// pathological PDF can't shatter into thousands of tiny leaves (each of
+// which costs a summarize + HyDE + multi-axis LLM call at ingest, which
+// is what throttles/stalls the full pipeline). maxLeaves <= 0 disables
+// the cap; a tree already at or under the cap is returned untouched.
 //
-// Merged leaves concatenate their content (blank-line separated), keep
-// the first sibling's title, and union their page ranges. Table
-// sections are attached AFTER this pass (attachTableSections), so their
-// numeric content is never merged away.
+// The reduction is robust to ANY tree shape, which is the fix for the
+// real 10-K explosion: that document is not a flat list of adjacent
+// leaves but hundreds of SINGLE-LEAF PARENTS (heading -> one body leaf),
+// which have no adjacent leaf-sibling pairs at all — so the old
+// adjacent-only merge silently did nothing and a 92-page filing sailed
+// past the cap at 463-1465 leaves. We fix it in two phases:
+//
+//  1. collapseSingleLeafParents flattens every heading -> lone-leaf chain
+//     so the formerly-only-children become adjacent leaf SIBLINGS. This
+//     restructures the tree without changing the leaf count (the parent
+//     absorbs the child and itself becomes the leaf).
+//
+//  2. The merge loop then repeatedly merges the smallest adjacent leaf
+//     pair until the count is back under the cap (a defensive collapse
+//     step covers any pair a table leaf blocked).
+//
+// The invariant: for any tree with > maxLeaves MERGEABLE leaves,
+// capLeafSections drives countLeafSections to <= maxLeaves. The only
+// leaves it will not merge are table sections (Metadata["table"]=="true")
+// — those carry distinct numeric content and must survive verbatim. In
+// the normal parse flow table sections are attached AFTER this pass
+// (attachTableSections), so the cap never sees them; the guard is
+// defensive for any caller that pre-attaches tables.
+//
+// Merged/collapsed leaves concatenate their content (blank-line
+// separated), keep the parent/first-sibling title, and union their page
+// ranges, so no body text is ever dropped.
 func capLeafSections(sections []Section, maxLeaves int) []Section {
 	if maxLeaves <= 0 {
 		return sections
 	}
-	// Guard against pathological loops: at most one merge per excess leaf.
-	for guard := 0; countLeafSections(sections) > maxLeaves && guard < 100000; guard++ {
-		if !mergeOneSmallestAdjacentLeafPair(sections) {
-			break // no mergeable adjacent leaf pair anywhere
+	if countLeafSections(sections) <= maxLeaves {
+		return sections // already under the cap — leave structure untouched
+	}
+
+	// Wrap the top-level sections under a synthetic root. The merge step
+	// shrinks a sibling list in place (it rewrites parent.Children), which
+	// only propagates back to the caller when the mutated list is a struct
+	// FIELD, not a bare slice parameter. The runaway shape we're fixing —
+	// hundreds of single-leaf PARENTS — needs the TOP-level list to shrink,
+	// so we make the top level a nested list (root.Children) and operate on
+	// that; the wrapper itself (length 1) never changes. We return
+	// root.Children at the end.
+	root := []Section{{Children: sections}}
+
+	// Phase 1: flatten single-leaf-parent chains so only-children become
+	// mergeable siblings. Count is unchanged; structure is normalised.
+	root[0].Children = collapseSingleLeafParents(root[0].Children)
+
+	// Phase 2: merge adjacent leaf pairs (smallest first) until under cap.
+	// Each merge removes one leaf and each fallback collapse removes one
+	// internal node — both strictly monotonic — so the loop is bounded;
+	// the guard is belt-and-braces against a logic regression.
+	for guard := 0; countLeafSections(root) > maxLeaves && guard < 1000000; guard++ {
+		if mergeOneSmallestAdjacentLeafPair(root) {
+			continue
+		}
+		// No adjacent mergeable pair left. Try to free one up by
+		// collapsing a remaining single-leaf parent; if that's impossible
+		// too, every remaining leaf is unmergeable (e.g. table sections)
+		// and we stop — there is nothing left we're permitted to merge.
+		if !collapseOneSingleLeafParent(&root) {
+			break
+		}
+	}
+	return root[0].Children
+}
+
+// isTableLeaf reports whether s is a table section that must never be
+// merged or collapsed (its cell content is distinct numeric data).
+func isTableLeaf(s *Section) bool {
+	return s.Metadata != nil && s.Metadata["table"] == "true"
+}
+
+// collapseSingleLeafParents recursively flattens every parent that has
+// exactly one child which is a (non-table) leaf: the parent absorbs the
+// child's content + page range and itself becomes the leaf. Chains
+// (heading -> subheading -> body) collapse fully in one bottom-up pass.
+//
+// Leaf count is preserved (one internal node + one leaf become one leaf);
+// the point is purely to turn only-children into adjacent siblings so the
+// adjacent-pair merge can then reduce the count. Returns the rewritten
+// slice.
+func collapseSingleLeafParents(sections []Section) []Section {
+	for i := range sections {
+		s := &sections[i]
+		if len(s.Children) == 0 {
+			continue
+		}
+		// Bottom-up: collapse within the children first so a chain folds
+		// from the leaf upward.
+		s.Children = collapseSingleLeafParents(s.Children)
+		if len(s.Children) == 1 && len(s.Children[0].Children) == 0 && !isTableLeaf(&s.Children[0]) {
+			absorbChildIntoParent(s, s.Children[0])
+			s.Children = nil
 		}
 	}
 	return sections
 }
 
+// collapseOneSingleLeafParent finds the first parent in the tree with
+// exactly one (non-table) leaf child and collapses it (parent absorbs the
+// leaf, becomes a leaf). Returns false when no such parent exists. Used
+// as a defensive fallback inside the merge loop when an adjacent pair was
+// blocked by a table leaf; the bulk flattening is done up front by
+// collapseSingleLeafParents.
+func collapseOneSingleLeafParent(sections *[]Section) bool {
+	s := *sections
+	for i := range s {
+		n := &s[i]
+		if len(n.Children) == 1 && len(n.Children[0].Children) == 0 && !isTableLeaf(&n.Children[0]) {
+			absorbChildIntoParent(n, n.Children[0])
+			n.Children = nil
+			return true
+		}
+		if len(n.Children) > 0 {
+			if collapseOneSingleLeafParent(&n.Children) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// absorbChildIntoParent folds a leaf child's content and page range up
+// into its parent. The parent keeps its own title (the heading) and
+// gains the child's body; an empty parent body is replaced outright so we
+// don't prefix a stray separator. Page ranges union (min start, max end).
+func absorbChildIntoParent(parent *Section, child Section) {
+	switch {
+	case strings.TrimSpace(parent.Content) == "":
+		parent.Content = child.Content
+	case strings.TrimSpace(child.Content) != "":
+		parent.Content = parent.Content + "\n\n" + child.Content
+	}
+	parent.PageStart = minNonZero(parent.PageStart, child.PageStart)
+	if child.PageEnd > parent.PageEnd {
+		parent.PageEnd = child.PageEnd
+	}
+}
+
 // mergeOneSmallestAdjacentLeafPair finds the adjacent leaf-sibling pair
 // with the smallest combined content length anywhere in the tree and
-// merges it in place. Returns false when no sibling list has two
-// adjacent leaves to merge.
+// merges it in place. Only pairs where BOTH siblings are NON-table leaves
+// are eligible — table sections are never merged. Returns false when no
+// sibling list has two adjacent mergeable leaves.
 func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
 	bestList := (*[]Section)(nil)
 	bestIdx := -1
@@ -642,7 +766,8 @@ func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
 	walk = func(list *[]Section) {
 		s := *list
 		for i := 0; i+1 < len(s); i++ {
-			if len(s[i].Children) == 0 && len(s[i+1].Children) == 0 {
+			if len(s[i].Children) == 0 && len(s[i+1].Children) == 0 &&
+				!isTableLeaf(&s[i]) && !isTableLeaf(&s[i+1]) {
 				size := len(s[i].Content) + len(s[i+1].Content)
 				if bestSize < 0 || size < bestSize {
 					bestSize, bestList, bestIdx = size, list, i
