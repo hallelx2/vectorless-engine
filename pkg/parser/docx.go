@@ -14,9 +14,11 @@ import (
 // DOCX parses Microsoft Word .docx files.
 //
 // A .docx is a ZIP archive; the main payload lives at word/document.xml.
-// Paragraphs with a style name like "Heading 1", "Heading 2", … become
-// section boundaries. Paragraphs with no heading style are body text for
-// the enclosing section.
+// Paragraphs with a heading style ("Heading 1"…) — or, failing that, an
+// explicit outline level — become section boundaries. Non-heading
+// paragraphs are body text for the enclosing section. Tables are preserved
+// as Markdown grids so a cell's number stays bound to its row/column
+// labels, and footnotes are recovered into a trailing section.
 //
 // We use encoding/xml directly (no third-party dependency) because the
 // WordprocessingML subset we care about is small and stable.
@@ -49,117 +51,132 @@ func (*DOCX) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		return nil, fmt.Errorf("docx: not a valid zip: %w", err)
 	}
 
-	var body []byte
-	for _, f := range zr.File {
-		if f.Name == "word/document.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			body, err = io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				return nil, err
-			}
-			break
-		}
-	}
+	body := readZipFile(zr, "word/document.xml")
 	if body == nil {
 		return nil, fmt.Errorf("docx: missing word/document.xml")
 	}
 
-	paras, err := extractParagraphs(body)
+	blocks, err := extractBlocks(body)
 	if err != nil {
 		return nil, err
 	}
 
-	// Group paragraphs into sections. A heading paragraph opens a new
-	// section; non-heading paragraphs append to the current section's body.
-	type flat struct {
+	// Group blocks into sections. A heading paragraph opens a new section;
+	// non-heading paragraphs and tables append to the current section body.
+	type acc struct {
 		level int
 		title string
 		body  []string
 	}
-	flats := []*flat{{level: 0, title: ""}}
-	current := flats[0]
-	for _, p := range paras {
-		text := strings.TrimSpace(p.text)
-		if text == "" {
-			continue
-		}
-		if p.headingLevel > 0 {
-			current = &flat{level: p.headingLevel, title: text}
-			flats = append(flats, current)
-			continue
-		}
-		current.body = append(current.body, text)
-	}
-	if len(flats) > 1 && flats[0].level == 0 && len(flats[0].body) == 0 {
-		flats = flats[1:]
-	}
-
-	var title string
-	for _, f := range flats {
-		if f.level == 1 {
-			title = f.title
-			break
-		}
-	}
-	if title == "" && len(flats) > 0 {
-		title = flats[0].title
-	}
-
-	// Build hierarchy via level stack.
-	rootSec := &Section{Level: 0, Title: title}
-	stack := []*Section{rootSec}
-	for _, f := range flats {
-		sec := Section{
-			Level:   f.level,
-			Title:   f.title,
-			Content: strings.Join(f.body, "\n\n"),
-		}
-		if f.level == 0 {
-			if sec.Content == "" {
+	accs := []*acc{{level: 0}}
+	current := accs[0]
+	for _, blk := range blocks {
+		switch blk.kind {
+		case blockTable:
+			if md := renderTableMarkdown(blk.rows); md != "" {
+				current.body = append(current.body, md)
+			}
+		default: // blockPara
+			text := strings.TrimSpace(blk.text)
+			if text == "" {
 				continue
 			}
-			sec.Level = 1
-			sec.Title = "Introduction"
+			if blk.headingLevel > 0 {
+				current = &acc{level: blk.headingLevel, title: text}
+				accs = append(accs, current)
+				continue
+			}
+			current.body = append(current.body, text)
 		}
-		for len(stack) > 1 && stack[len(stack)-1].Level >= sec.Level {
-			stack = stack[:len(stack)-1]
-		}
-		parent := stack[len(stack)-1]
-		parent.Children = append(parent.Children, sec)
-		tail := &parent.Children[len(parent.Children)-1]
-		stack = append(stack, tail)
+	}
+
+	flats := make([]flatSection, 0, len(accs))
+	for _, a := range accs {
+		flats = append(flats, flatSection{
+			Level:   a.level,
+			Title:   a.title,
+			Content: strings.Join(a.body, "\n\n"),
+		})
+	}
+	flats = dropEmptyPreamble(flats)
+
+	// Derive the title from the document body (before footnotes, so a
+	// "Footnotes" section can't be mistaken for the title).
+	title := deriveTitle(flats)
+
+	// Recover footnotes into a trailing section so their content isn't lost.
+	if fn := extractFootnotes(zr); fn != "" {
+		flats = append(flats, flatSection{Level: 1, Title: "Footnotes", Content: fn})
 	}
 
 	return &ParsedDoc{
 		Title:    title,
-		Sections: rootSec.Children,
+		Sections: buildSections(flats),
 	}, nil
 }
 
-type docxPara struct {
-	headingLevel int
-	text         string
+// readZipFile returns the bytes of the named entry, or nil if absent.
+func readZipFile(zr *zip.Reader, name string) []byte {
+	for _, f := range zr.File {
+		if f.Name == name {
+			rc, err := f.Open()
+			if err != nil {
+				return nil
+			}
+			defer rc.Close()
+			data, err := io.ReadAll(rc)
+			if err != nil {
+				return nil
+			}
+			return data
+		}
+	}
+	return nil
 }
 
-// extractParagraphs streams through document.xml and yields each <w:p>
-// as a (headingLevel, text) pair.
-//
-// Heading detection: a paragraph is a heading if its <w:pStyle w:val>
-// value is "Heading1".."Heading9" or "Heading 1".."Heading 9" (Word
-// writes both spellings). Level is the trailing digit.
-func extractParagraphs(body []byte) ([]docxPara, error) {
+type docxBlockKind int
+
+const (
+	blockPara docxBlockKind = iota
+	blockTable
+)
+
+type docxBlock struct {
+	kind         docxBlockKind
+	headingLevel int        // blockPara: 0 = body, 1-6 = heading
+	text         string     // blockPara
+	rows         [][]string // blockTable
+}
+
+// isWordNS reports whether an XML namespace is the WordprocessingML main
+// namespace (or empty, for decoders that drop the prefix).
+func isWordNS(space string) bool {
+	return space == "" || strings.HasSuffix(space, "wordprocessingml/2006/main")
+}
+
+// extractBlocks streams through document.xml and yields a document-order
+// sequence of paragraph and table blocks. Heading level comes from the
+// paragraph style ("Heading N"/"Title") and falls back to <w:outlineLvl>.
+// Table cells (including the paragraphs inside them) are captured into a
+// rows×cols grid; nested tables collapse into their enclosing cell's text.
+func extractBlocks(body []byte) ([]docxBlock, error) {
 	dec := xml.NewDecoder(bytes.NewReader(body))
-	var out []docxPara
+	var out []docxBlock
+
 	var (
-		inPara    bool
-		level     int
-		textBuf   strings.Builder
-		capturing bool // inside <w:t>
+		tblDepth        int
+		rows            [][]string // current outermost table
+		inRow           bool
+		inCell          bool
+		cellBuf         strings.Builder
+
+		inPara          bool
+		level           int
+		hasStyleHeading bool
+		paraBuf         strings.Builder
+		capturing       bool // inside <w:t>
 	)
+
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -171,17 +188,50 @@ func extractParagraphs(body []byte) ([]docxPara, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "tbl":
+				if tblDepth == 0 {
+					rows = nil
+				}
+				tblDepth++
+			case "tr":
+				if tblDepth == 1 {
+					rows = append(rows, nil)
+					inRow = true
+				}
+			case "tc":
+				if tblDepth == 1 && inRow {
+					inCell = true
+					cellBuf.Reset()
+				}
 			case "p":
-				if t.Name.Space == "" || strings.HasSuffix(t.Name.Space, "wordprocessingml/2006/main") {
+				if isWordNS(t.Name.Space) {
 					inPara = true
 					level = 0
-					textBuf.Reset()
+					hasStyleHeading = false
+					paraBuf.Reset()
 				}
 			case "pStyle":
-				if inPara {
+				if inPara && tblDepth == 0 {
 					for _, a := range t.Attr {
 						if a.Name.Local == "val" {
-							level = headingLevelFromStyle(a.Value)
+							if lv := headingLevelFromStyle(a.Value); lv > 0 {
+								level = lv
+								hasStyleHeading = true
+							}
+						}
+					}
+				}
+			case "outlineLvl":
+				// Fallback heading signal for docs that use outline levels
+				// instead of named heading styles. <w:val> is 0-based.
+				if inPara && tblDepth == 0 && !hasStyleHeading {
+					for _, a := range t.Attr {
+						if a.Name.Local == "val" {
+							if n, e := strconv.Atoi(strings.TrimSpace(a.Value)); e == nil {
+								if lv := n + 1; lv >= 1 && lv <= 6 {
+									level = lv
+								}
+							}
 						}
 					}
 				}
@@ -191,16 +241,16 @@ func extractParagraphs(body []byte) ([]docxPara, error) {
 				}
 			case "tab":
 				if inPara {
-					textBuf.WriteByte('\t')
+					paraBuf.WriteByte('\t')
 				}
 			case "br":
 				if inPara {
-					textBuf.WriteByte('\n')
+					paraBuf.WriteByte('\n')
 				}
 			}
 		case xml.CharData:
 			if capturing {
-				textBuf.Write(t)
+				paraBuf.Write(t)
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
@@ -208,16 +258,150 @@ func extractParagraphs(body []byte) ([]docxPara, error) {
 				capturing = false
 			case "p":
 				if inPara {
-					out = append(out, docxPara{
-						headingLevel: level,
-						text:         textBuf.String(),
-					})
+					text := paraBuf.String()
+					switch {
+					case inCell:
+						// Paragraph inside a table cell: fold into the cell.
+						if cellBuf.Len() > 0 {
+							cellBuf.WriteByte('\n')
+						}
+						cellBuf.WriteString(text)
+					case tblDepth == 0:
+						out = append(out, docxBlock{kind: blockPara, headingLevel: level, text: text})
+					}
 					inPara = false
+				}
+			case "tc":
+				if tblDepth == 1 && inCell {
+					if n := len(rows); n > 0 {
+						rows[n-1] = append(rows[n-1], cellBuf.String())
+					}
+					inCell = false
+				}
+			case "tr":
+				if tblDepth == 1 {
+					inRow = false
+				}
+			case "tbl":
+				if tblDepth == 1 {
+					out = append(out, docxBlock{kind: blockTable, rows: rows})
+					rows = nil
+				}
+				if tblDepth > 0 {
+					tblDepth--
 				}
 			}
 		}
 	}
 	return out, nil
+}
+
+// extractFootnotes pulls the text of every content footnote out of
+// word/footnotes.xml, joined by blank lines. Structural footnotes (the
+// separator / continuation entries, which carry a w:type attribute) are
+// skipped. Returns "" when there are no footnotes.
+func extractFootnotes(zr *zip.Reader) string {
+	data := readZipFile(zr, "word/footnotes.xml")
+	if len(data) == 0 {
+		return ""
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	var notes []string
+	var (
+		inNote    bool
+		skip      bool
+		buf       strings.Builder
+		capturing bool
+	)
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "footnote":
+				inNote = true
+				skip = false
+				buf.Reset()
+				for _, a := range t.Attr {
+					if a.Name.Local == "type" {
+						skip = true // separator / continuationSeparator
+					}
+				}
+			case "t":
+				if inNote && !skip {
+					capturing = true
+				}
+			}
+		case xml.CharData:
+			if capturing {
+				buf.Write(t)
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "t":
+				capturing = false
+			case "footnote":
+				if inNote && !skip {
+					if s := strings.TrimSpace(buf.String()); s != "" {
+						notes = append(notes, s)
+					}
+				}
+				inNote = false
+			}
+		}
+	}
+	return strings.Join(notes, "\n\n")
+}
+
+// renderTableMarkdown serialises a rows×cols grid as a GitHub-flavoured
+// Markdown table. The first row is treated as the header. Cell newlines are
+// flattened to spaces and pipes are escaped so the grid stays well-formed.
+func renderTableMarkdown(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	cols := 0
+	for _, r := range rows {
+		if len(r) > cols {
+			cols = len(r)
+		}
+	}
+	if cols == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	writeRow := func(cells []string) {
+		b.WriteByte('|')
+		for c := 0; c < cols; c++ {
+			v := ""
+			if c < len(cells) {
+				v = strings.TrimSpace(strings.ReplaceAll(cells[c], "\n", " "))
+				v = strings.ReplaceAll(v, "|", "\\|")
+			}
+			b.WriteByte(' ')
+			b.WriteString(v)
+			b.WriteString(" |")
+		}
+		b.WriteByte('\n')
+	}
+
+	writeRow(rows[0])
+	b.WriteByte('|')
+	for c := 0; c < cols; c++ {
+		b.WriteString(" --- |")
+	}
+	b.WriteByte('\n')
+	for _, r := range rows[1:] {
+		writeRow(r)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // headingLevelFromStyle parses the pStyle @val attribute. Word writes:

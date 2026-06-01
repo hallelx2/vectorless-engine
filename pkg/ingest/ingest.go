@@ -1116,6 +1116,8 @@ func DefaultRegistry() *parser.Registry {
 		parser.NewMarkdown(),
 		parser.NewHTML(),
 		parser.NewDOCX(),
+		parser.NewXLSX(),
+		parser.NewCSV(),
 		parser.NewPDF(),
 		parser.NewText(),
 	)
@@ -1150,6 +1152,8 @@ func RegistryFromIngestParams(opts *parser.TableOpts, maxSections int, parseTime
 		parser.NewMarkdown(),
 		parser.NewHTML(),
 		parser.NewDOCX(),
+		parser.NewXLSX(),
+		parser.NewCSV(),
 		parser.NewPDFWithConfig(opts, maxSections, parseTimeout),
 		parser.NewText(),
 	)

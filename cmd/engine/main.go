@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/llmgate/pricing"
 	"github.com/hallelx2/llmgate/provider/anthropic"
 	"github.com/hallelx2/llmgate/provider/gemini"
 	"github.com/hallelx2/llmgate/provider/openai"
@@ -60,6 +61,12 @@ func run() error {
 		"llm_driver", cfg.LLM.Driver,
 		"retrieval_strategy", cfg.Retrieval.Strategy,
 	)
+
+	// Surface any model with no price-book entry: its cost reads $0, which
+	// would otherwise masquerade as "free" in usage/benchmark accounting.
+	pricing.WarnFunc = func(model string) {
+		logger.Warn("llm model not in price book; cost reported as 0", "model", model)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

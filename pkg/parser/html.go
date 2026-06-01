@@ -69,6 +69,19 @@ func (*HTML) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 			flats = append(flats, current)
 			return // don't re-emit the heading text into the body
 		}
+		if n.Type == html.ElementNode && n.DataAtom == atom.Table {
+			// Render the table as a Markdown grid so cell values keep their
+			// row/column labels instead of flattening into loose prose.
+			if md := renderTableMarkdown(htmlTableRows(n)); md != "" {
+				b := current.content.String()
+				if b != "" && !strings.HasSuffix(b, "\n\n") {
+					current.content.WriteString("\n\n")
+				}
+				current.content.WriteString(md)
+				current.content.WriteString("\n\n")
+			}
+			return // handled whole subtree
+		}
 		if n.Type == html.TextNode {
 			t := strings.TrimSpace(n.Data)
 			if t != "" {
@@ -92,53 +105,28 @@ func (*HTML) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 	}
 	walk(content)
 
-	// Drop empty preamble if we found at least one real heading.
-	if len(flats) > 1 && flats[0].level == 0 && strings.TrimSpace(flats[0].content.String()) == "" {
-		flats = flats[1:]
-	}
-
-	// Derive title: prefer <title>, then first H1, then first bucket.
-	title := docTitle
-	if title == "" {
-		for _, f := range flats {
-			if f.level == 1 {
-				title = f.title
-				break
-			}
-		}
-	}
-	if title == "" && len(flats) > 0 {
-		title = flats[0].title
-	}
-
-	// Build the hierarchy via a level stack (same algorithm as Markdown).
-	rootSec := &Section{Level: 0, Title: title}
-	stack := []*Section{rootSec}
+	// Convert to the shared flat representation and build the tree with the
+	// common hierarchy builder (same algorithm as Markdown/DOCX).
+	out := make([]flatSection, 0, len(flats))
 	for _, f := range flats {
-		sec := Section{
+		out = append(out, flatSection{
 			Level:   f.level,
 			Title:   f.title,
 			Content: cleanWhitespace(f.content.String()),
-		}
-		if f.level == 0 {
-			if sec.Content == "" {
-				continue
-			}
-			sec.Level = 1
-			sec.Title = "Introduction"
-		}
-		for len(stack) > 1 && stack[len(stack)-1].Level >= sec.Level {
-			stack = stack[:len(stack)-1]
-		}
-		parent := stack[len(stack)-1]
-		parent.Children = append(parent.Children, sec)
-		tail := &parent.Children[len(parent.Children)-1]
-		stack = append(stack, tail)
+		})
+	}
+	out = dropEmptyPreamble(out)
+
+	// Title: prefer the document <title>, then fall back to the first H1 /
+	// first bucket via the shared heuristic.
+	title := docTitle
+	if title == "" {
+		title = deriveTitle(out)
 	}
 
 	return &ParsedDoc{
 		Title:    title,
-		Sections: rootSec.Children,
+		Sections: buildSections(out),
 	}, nil
 }
 
@@ -190,6 +178,34 @@ func isBlock(n *html.Node) bool {
 		return true
 	}
 	return false
+}
+
+// htmlTableRows extracts a <table> into a rows×cols grid. Each <tr>
+// becomes a row; each <td>/<th> becomes a cell with its descendant text
+// collapsed. Works through <thead>/<tbody>/<tfoot> wrappers.
+func htmlTableRows(table *html.Node) [][]string {
+	var rows [][]string
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == html.ElementNode && n.DataAtom == atom.Tr {
+			var cells []string
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == html.ElementNode && (c.DataAtom == atom.Td || c.DataAtom == atom.Th) {
+					cells = append(cells, cleanWhitespace(textContent(c)))
+				}
+			}
+			rows = append(rows, cells)
+			return // don't descend into nested tables as part of this row
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(table)
+	return rows
 }
 
 // findTitle returns the text of <title> if present.

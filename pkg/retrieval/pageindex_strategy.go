@@ -1396,13 +1396,15 @@ func wrapPageObservation(tool, body string) string {
 //   - End with a done action carrying answer + cited_pages + confidence.
 //
 // CITATION DISCIPLINE is the load-bearing addition over the reference
-// PageIndex prompt. FinanceBench measurements show the failure mode is
-// not retrieval but commitment: when the model is sure it names ONE
-// page range and scores f1=1.0; when unsure it lists ~5 hedged ranges
-// and misses on all of them. The prompt therefore makes "commit to the
-// single best range" the default and frames listing many uncertain
-// ranges as the WORSE choice, and asks for an explicit confidence so a
-// low-confidence answer is still a single committed pick, not a spray.
+// PageIndex prompt. FinanceBench measurements show two opposite failure
+// modes: (1) when unsure the model sprays ~5 hedged ranges and misses on
+// all of them; (2) over-correcting to "always exactly ONE" makes it drop a
+// genuinely-needed second range and commit to the wrong single pick. The
+// prompt therefore targets the MINIMAL SUFFICIENT SET — usually one range,
+// but a second/third whenever the answer truly draws on more than one
+// location — and bans hedging (padding with low-relevance maybes) rather
+// than banning multi-citation per se. Confidence is reported separately so
+// a low-confidence answer is still a committed set, not a spray.
 const pageIndexSystemPrompt = `You are a document QA assistant navigating a paginated document.
 
 TOOL USE PROTOCOL:
@@ -1413,10 +1415,10 @@ TOOL USE PROTOCOL:
 - When you have enough evidence, emit done with the natural-language answer, the page ranges you relied on, a confidence score, and a one-line reasoning trace.
 
 CITATION DISCIPLINE (read carefully — this determines whether your answer scores):
-- Cite the FEWEST page ranges that actually contain the answer. Ideally cite exactly ONE range. Commit to your single best range rather than hedging.
-- Listing many ranges because you are unsure is WORSE than committing to the one best range: every extra low-relevance citation hurts more than it helps. Do NOT pad cited_pages with maybes.
-- Add a second or third range ONLY when the answer genuinely depends on evidence from physically separate parts of the document (e.g. a figure on one page and the footnote that defines it on another). If a single range already supports the answer, cite only that one.
-- Even when your overall confidence is LOW, still return your SINGLE best range — never replace one uncertain pick with five. Report the low confidence in the "confidence" field instead.
+- Cite the MINIMAL SET of page ranges that TOGETHER fully support the answer — neither more nor fewer. Most questions are answered by ONE range; when one range suffices, cite exactly that one and commit to it.
+- Cite a second (or third) range whenever the answer genuinely draws on more than one location — e.g. a value and the note that scopes it, two line items reported in different parts of a statement, or a figure and its defining footnote. Do NOT drop a range the answer actually depends on just to keep the count at one.
+- What you must NOT do is hedge: never pad cited_pages with low-relevance "maybes" to cover uncertainty. Ranges that carry the answer help your score; extra ranges that don't carry it hurt it. Cite the ranges you are actually relying on — no more, no fewer.
+- Even when your overall confidence is LOW, cite the ranges you actually used to answer — do not blow the set up to five guesses. Report the uncertainty in the "confidence" field instead.
 - "confidence" is your honesty signal in [0,1] for how sure you are the answer is correct and grounded on the cited pages. Set it low when unsure; this never penalizes you — it only annotates the answer.
 
 RULES:
@@ -1427,11 +1429,13 @@ RULES:
 
 // pageIndexActionHelp is the one-shot reminder appended to the
 // initial user prompt so the model gets concrete examples without us
-// needing to maintain a separate few-shot block. The done example
-// shows the SINGLE-range default (the multi-range form is allowed but
-// deliberately not modelled here, so the example nudges toward one).
+// needing to maintain a separate few-shot block. Both the one-range
+// (common) and two-range (answer spans separate locations) done forms are
+// modelled so the example doesn't bias the model toward one when two are
+// genuinely needed.
 const pageIndexActionHelp = `- {"tool":"get_document_structure","reasoning":"orient by titles"} — fetch the TOC tree (titles + page ranges, no body text)
 - {"tool":"get_pages","start_page":5,"end_page":7,"reasoning":"section on debt"} — fetch text covering pages 5-7
-- {"tool":"done","answer":"...","cited_pages":[[5,7]],"confidence":0.9,"reasoning":"the answer is grounded on these pages"} — final answer (cite ONE range when one suffices)
+- {"tool":"done","answer":"...","cited_pages":[[5,7]],"confidence":0.9,"reasoning":"grounded on one range"} — final answer when a single range suffices (the common case)
+- {"tool":"done","answer":"...","cited_pages":[[12,12],[31,31]],"confidence":0.8,"reasoning":"value on p12, scoping note on p31"} — final answer when it genuinely draws on two separate locations
 
 Reply with ONLY the JSON object.`

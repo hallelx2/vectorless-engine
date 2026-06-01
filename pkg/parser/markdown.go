@@ -68,57 +68,22 @@ func (m *Markdown) Parse(_ context.Context, r io.Reader) (*ParsedDoc, error) {
 		appendNodeText(&current.content, n, src)
 	}
 
-	// Drop an empty preamble bucket if there's at least one heading.
-	if len(flats) > 1 && flats[0].level == 0 && strings.TrimSpace(flats[0].content.String()) == "" {
-		flats = flats[1:]
-	}
-
-	// Derive document title.
-	var title string
+	// Convert to the shared flat representation, then let the common
+	// hierarchy builder shape the tree (identical across Markdown/HTML/DOCX).
+	out := make([]flatSection, 0, len(flats))
 	for _, f := range flats {
-		if f.level == 1 {
-			title = f.title
-			break
-		}
-	}
-	if title == "" && len(flats) > 0 {
-		title = flats[0].title
-	}
-
-	// Second pass: build the hierarchy using a stack of (level, section)
-	// pointers. The stack's top is always the most recent ancestor.
-	root := &Section{Level: 0, Title: title}
-	stack := []*Section{root}
-
-	for _, f := range flats {
-		sec := Section{
+		out = append(out, flatSection{
 			Level:   f.level,
 			Title:   f.title,
 			Content: strings.TrimSpace(f.content.String()),
-		}
-		if f.level == 0 {
-			// Preamble content (before any heading). Hang it off the root
-			// as a synthetic "Introduction" section.
-			if sec.Content == "" {
-				continue
-			}
-			sec.Level = 1
-			sec.Title = "Introduction"
-		}
-		// Pop until the top of the stack is a strictly shallower level.
-		for len(stack) > 1 && stack[len(stack)-1].Level >= sec.Level {
-			stack = stack[:len(stack)-1]
-		}
-		parent := stack[len(stack)-1]
-		parent.Children = append(parent.Children, sec)
-		// The newly appended child is addressable via the slice tail.
-		tail := &parent.Children[len(parent.Children)-1]
-		stack = append(stack, tail)
+		})
 	}
+	out = dropEmptyPreamble(out)
+	title := deriveTitle(out)
 
 	return &ParsedDoc{
 		Title:    title,
-		Sections: root.Children,
+		Sections: buildSections(out),
 	}, nil
 }
 
