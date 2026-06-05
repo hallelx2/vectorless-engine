@@ -48,7 +48,7 @@ type IngestConfig struct {
 	//                          AND the pdftable table-finding pass, so a
 	//                          document becomes queryable in ~parse-speed
 	//                          (seconds). The page-based retrieval strategy
-	//                          (/v1/answer/pageindex) needs none of the
+	//                          (/v1/answer/treewalk) needs none of the
 	//                          skipped enrichment: it navigates a TOC tree
 	//                          (synthesised from the section tree when
 	//                          documents.toc_tree is NULL) and reads raw
@@ -77,7 +77,7 @@ type IngestConfig struct {
 	// populate it).
 	SummaryAxes SummaryAxesBlock `yaml:"summary_axes"`
 
-	// TOC configures the PageIndex-style LLM-built table-of-contents
+	// TOC configures the TreeWalk-style LLM-built table-of-contents
 	// tree stage. Enabled by default for PDF inputs; the resulting
 	// tree is persisted on documents.toc_tree (JSONB). Failures are
 	// non-fatal — they leave the column NULL and the document fully
@@ -151,7 +151,7 @@ type IngestConfig struct {
 
 // TOCBlock configures the LLM-driven table-of-contents tree
 // builder. The builder reads page-by-page text from a freshly-
-// ingested PDF and emits a hierarchical TOC (PageIndex-style),
+// ingested PDF and emits a hierarchical TOC (TreeWalk-style),
 // persisted on documents.toc_tree (JSONB).
 //
 // Enabled by default for PDF inputs; non-PDF documents skip the
@@ -417,38 +417,38 @@ type RetrievalConfig struct {
 	ReRank      ReRankBlock      `yaml:"rerank"`
 	Replay      ReplayBlock      `yaml:"replay"`
 	Abstain     AbstainBlock     `yaml:"abstain"`
-	PageIndex   PageIndexBlock   `yaml:"pageindex"`
+	TreeWalk   TreeWalkBlock   `yaml:"treewalk"`
 }
 
-// PageIndexBlock configures the PageIndex page-based agentic
-// strategy and its dedicated /v1/answer/pageindex endpoint.
+// TreeWalkBlock configures the TreeWalk page-based agentic
+// strategy and its dedicated /v1/answer/treewalk endpoint.
 //
 // The strategy is registered as a Strategy choice
-// (retrieval.strategy: pageindex) AND is wired into the
-// /v1/answer/pageindex endpoint regardless of which selection
+// (retrieval.strategy: treewalk) AND is wired into the
+// /v1/answer/treewalk endpoint regardless of which selection
 // strategy the server runs by default. The Enabled flag controls
 // the endpoint only — flipping it off does not unregister the
 // strategy, so a deployment that wants the strategy available
 // to /v1/query but not the dedicated answer endpoint can still
 // disable the endpoint here.
 //
-// Defaults are tuned to match the reference PageIndex demo: 8
+// Defaults are tuned to match the reference TreeWalk demo: 8
 // hops covers structure → 3 navigation calls → done + buffer,
 // and 16,000 chars of get_pages content fits a 5-7 page excerpt
 // comfortably under any flagship model's context window.
 //
-// Per-request overrides on /v1/answer/pageindex (max_hops,
+// Per-request overrides on /v1/answer/treewalk (max_hops,
 // max_pages_per_fetch) win over this block; this block is the
 // server-side default.
-type PageIndexBlock struct {
-	// Enabled toggles the /v1/answer/pageindex endpoint. Default:
+type TreeWalkBlock struct {
+	// Enabled toggles the /v1/answer/treewalk endpoint. Default:
 	// true. When false, the endpoint returns 501. The
-	// PageIndexStrategy itself stays registered as a selection
+	// TreeWalkStrategy itself stays registered as a selection
 	// strategy regardless — disabling here only unwires the
 	// dedicated answer surface.
 	Enabled bool `yaml:"enabled"`
 
-	// MaxHops caps the number of LLM turns one /v1/answer/pageindex
+	// MaxHops caps the number of LLM turns one /v1/answer/treewalk
 	// request consumes, including the terminal done turn. Default:
 	// 8. Set to 0 to use the strategy's built-in default.
 	MaxHops int `yaml:"max_hops"`
@@ -472,7 +472,7 @@ type PageIndexBlock struct {
 	// Empty means use the request's model (which itself falls back
 	// to the engine default). Useful when navigation should run on
 	// a fast/cheap model while answering benefits from a stronger
-	// one — though the PageIndex protocol does both in the same
+	// one — though the TreeWalk protocol does both in the same
 	// loop, so most deployments leave this blank.
 	Model string `yaml:"model"`
 }
@@ -749,7 +749,7 @@ func Default() Config {
 				Enabled: true,
 				Below:   0.4,
 			},
-			PageIndex: PageIndexBlock{
+			TreeWalk: TreeWalkBlock{
 				Enabled:          true,
 				MaxHops:          8,
 				PageContentLimit: 16000,
@@ -1001,7 +1001,7 @@ func applyEnvOverrides(c *Config) {
 			c.Ingest.SummaryAxes.MaxNumbers = n
 		}
 	}
-	// LLM-built TOC tree (PageIndex-style). Same truthy-string set
+	// LLM-built TOC tree (TreeWalk-style). Same truthy-string set
 	// as the other ingest toggles; numeric overrides require a
 	// positive int so a typo doesn't silently flip the default.
 	if v := os.Getenv("VLE_INGEST_TOC_ENABLED"); v != "" {
@@ -1125,34 +1125,34 @@ func applyEnvOverrides(c *Config) {
 			c.Retrieval.Abstain.Below = f
 		}
 	}
-	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED"); v != "" {
+	if v := os.Getenv("VLE_RETRIEVAL_TREEWALK_ENABLED"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "1", "true", "yes", "on":
-			c.Retrieval.PageIndex.Enabled = true
+			c.Retrieval.TreeWalk.Enabled = true
 		case "0", "false", "no", "off":
-			c.Retrieval.PageIndex.Enabled = false
+			c.Retrieval.TreeWalk.Enabled = false
 		}
 	}
-	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS"); v != "" {
+	if v := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			c.Retrieval.PageIndex.MaxHops = n
+			c.Retrieval.TreeWalk.MaxHops = n
 		}
 	}
-	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT"); v != "" {
+	if v := os.Getenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			c.Retrieval.PageIndex.PageContentLimit = n
+			c.Retrieval.TreeWalk.PageContentLimit = n
 		}
 	}
 	// MaxCitations accepts both the VLE_ and VLS_ prefixes so the
 	// deploy layer (which forwards VLS_*) and local VLE_* envs both
 	// reach it. A garbled or negative value preserves the default.
-	if v := firstEnv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS"); v != "" {
+	if v := firstEnv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", "VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			c.Retrieval.PageIndex.MaxCitations = n
+			c.Retrieval.TreeWalk.MaxCitations = n
 		}
 	}
-	if v := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL"); v != "" {
-		c.Retrieval.PageIndex.Model = v
+	if v := os.Getenv("VLE_RETRIEVAL_TREEWALK_MODEL"); v != "" {
+		c.Retrieval.TreeWalk.Model = v
 	}
 }
 
@@ -1207,7 +1207,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Retrieval.Strategy {
-	case "single-pass", "chunked-tree", "agentic", "pageindex":
+	case "single-pass", "chunked-tree", "agentic", "treewalk":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
 	}
@@ -1309,14 +1309,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("retrieval.abstain.below must be in [0.0, 1.0], got %v", c.Retrieval.Abstain.Below)
 	}
 
-	if c.Retrieval.PageIndex.MaxHops < 0 {
-		return fmt.Errorf("retrieval.pageindex.max_hops must be >= 0, got %d", c.Retrieval.PageIndex.MaxHops)
+	if c.Retrieval.TreeWalk.MaxHops < 0 {
+		return fmt.Errorf("retrieval.treewalk.max_hops must be >= 0, got %d", c.Retrieval.TreeWalk.MaxHops)
 	}
-	if c.Retrieval.PageIndex.PageContentLimit < 0 {
-		return fmt.Errorf("retrieval.pageindex.page_content_limit must be >= 0, got %d", c.Retrieval.PageIndex.PageContentLimit)
+	if c.Retrieval.TreeWalk.PageContentLimit < 0 {
+		return fmt.Errorf("retrieval.treewalk.page_content_limit must be >= 0, got %d", c.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if c.Retrieval.PageIndex.MaxCitations < 0 {
-		return fmt.Errorf("retrieval.pageindex.max_citations must be >= 0, got %d", c.Retrieval.PageIndex.MaxCitations)
+	if c.Retrieval.TreeWalk.MaxCitations < 0 {
+		return fmt.Errorf("retrieval.treewalk.max_citations must be >= 0, got %d", c.Retrieval.TreeWalk.MaxCitations)
 	}
 
 	return nil

@@ -88,7 +88,7 @@ type Pipeline struct {
 	// pass. Anything else (including the empty Go zero value used by
 	// Pipeline literals in tests) runs the full enrichment pipeline.
 	//
-	// The page-based retrieval strategy (/v1/answer/pageindex) needs none
+	// The page-based retrieval strategy (/v1/answer/treewalk) needs none
 	// of the skipped enrichment — it navigates a synthesised-from-sections
 	// TOC and reads raw section/page text at query time — so a
 	// minimal-ingested document is immediately queryable through it.
@@ -389,7 +389,7 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	}
 	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
 
-	// LLM-built TOC tree (PageIndex-style). PDF-only because it
+	// LLM-built TOC tree (TreeWalk-style). PDF-only because it
 	// relies on the parser's PageStart/PageEnd attribution to
 	// reconstruct per-page text. Non-fatal: a builder failure
 	// leaves documents.toc_tree NULL and the document remains

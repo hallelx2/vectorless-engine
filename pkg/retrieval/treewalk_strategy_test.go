@@ -14,7 +14,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// pageScriptedLLM is a scriptedLLM for the PageIndex strategy.
+// pageScriptedLLM is a scriptedLLM for the TreeWalk strategy.
 // Each Complete call returns the next canned response. When the
 // script is exhausted, loopReply (if set) is returned on every
 // subsequent call — the hop-cap test uses this to simulate a model
@@ -85,7 +85,7 @@ func (pageErroringTOC) GetTOC(ctx context.Context, _ tree.DocumentID) ([]byte, e
 }
 
 // buildPagedTree mirrors buildAgenticTree but stamps page_start /
-// page_end on every section so PageIndexStrategy can navigate. The
+// page_end on every section so TreeWalkStrategy can navigate. The
 // shape:
 //
 //	sec_root → [sec_a (1-4), sec_b (5-9)]
@@ -102,14 +102,14 @@ func buildPagedTree() *tree.Tree {
 	return &tree.Tree{DocumentID: "doc_x", Title: "Atlas", Root: root}
 }
 
-// TestPageIndexHappyPath drives the canonical 3-tool sequence:
+// TestTreeWalkHappyPath drives the canonical 3-tool sequence:
 // structure → get_pages → done. We assert the strategy:
 //   - returns the answer string in Result.Reasoning
 //   - lists the section IDs whose page range overlaps the citation
 //   - records the get_pages call in PagesRead
 //   - tracks HopsTaken correctly
 //   - computes a non-empty TraceToken keyed by the cited pages
-func TestPageIndexHappyPath(t *testing.T) {
+func TestTreeWalkHappyPath(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -127,7 +127,7 @@ func TestPageIndexHappyPath(t *testing.T) {
 		"b2_ref": "Debt registration is in line items A and B.",
 	}}
 
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = loader
 
 	res, err := s.SelectWithCost(context.Background(), tr, "how do I install?", retrieval.ContextBudget{MaxTokens: 100000})
@@ -206,7 +206,7 @@ func buildMinimalIngestedTree() *tree.Tree {
 	return &tree.Tree{DocumentID: "doc_minimal", Title: "Rust", Root: root}
 }
 
-// TestPageIndexMinimalIngestedDoc is the cross-package guarantee for the
+// TestTreeWalkMinimalIngestedDoc is the cross-package guarantee for the
 // minimal ingest mode: a document ingested with NO LLM enrichment (no
 // summaries, no HyDE, NULL toc_tree) is still fully answerable through
 // the page-based strategy. It drives the canonical structure → get_pages
@@ -220,7 +220,7 @@ func buildMinimalIngestedTree() *tree.Tree {
 //
 // No summaries are present anywhere in the tree, so this also proves the
 // strategy does not hard-require a summary to navigate or answer.
-func TestPageIndexMinimalIngestedDoc(t *testing.T) {
+func TestTreeWalkMinimalIngestedDoc(t *testing.T) {
 	t.Parallel()
 
 	tr := buildMinimalIngestedTree()
@@ -237,7 +237,7 @@ func TestPageIndexMinimalIngestedDoc(t *testing.T) {
 		"b1_ref": "Lifetimes ensure references are valid.",
 	}}
 
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = loader
 	// s.TOC intentionally left nil — models the NULL documents.toc_tree
 	// state minimal ingest leaves behind. The strategy must synthesise.
@@ -271,11 +271,11 @@ func TestPageIndexMinimalIngestedDoc(t *testing.T) {
 	}
 }
 
-// TestPageIndexMultiRangeDone covers a done with two cited ranges:
+// TestTreeWalkMultiRangeDone covers a done with two cited ranges:
 // the strategy must surface every section that overlaps EITHER
 // range. This is the FinanceBench-shaped pattern: an answer that
 // pulls evidence from two unrelated parts of a 10-K.
-func TestPageIndexMultiRangeDone(t *testing.T) {
+func TestTreeWalkMultiRangeDone(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -287,7 +287,7 @@ func TestPageIndexMultiRangeDone(t *testing.T) {
 			`{"tool":"done","answer":"Config is X. Debt is Y.","cited_pages":[[3,4],[8,9]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{
 		"a2_ref": "Config keys: VLE_*",
 		"b2_ref": "Debt registration is in line items A and B.",
@@ -325,12 +325,12 @@ func TestPageIndexMultiRangeDone(t *testing.T) {
 	}
 }
 
-// TestPageIndexMaxHopsForcesDone confirms a runaway loop is killed:
+// TestTreeWalkMaxHopsForcesDone confirms a runaway loop is killed:
 // the model emits get_pages on every turn but never done. The
 // strategy must cap at MaxHops, force a done on the last hop, and
 // surface a Result with HopsTaken == MaxHops+1 (the +1 for the
 // forced terminal call).
-func TestPageIndexMaxHopsForcesDone(t *testing.T) {
+func TestTreeWalkMaxHopsForcesDone(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -338,7 +338,7 @@ func TestPageIndexMaxHopsForcesDone(t *testing.T) {
 		// Every loop reply is a fresh get_pages — never done.
 		loopReply: `{"tool":"get_pages","start_page":1,"end_page":2}`,
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{"a1_ref": "install"}}
 	s.MaxHops = 3
 
@@ -362,11 +362,11 @@ func TestPageIndexMaxHopsForcesDone(t *testing.T) {
 	}
 }
 
-// TestPageIndexMaxHopsForceDoneSucceeds covers the recovery path:
+// TestTreeWalkMaxHopsForceDoneSucceeds covers the recovery path:
 // the loop hit MaxHops, but on the forced-done turn the model
 // actually emits a valid done. The strategy must collect the
 // answer + citations from that final turn rather than dropping them.
-func TestPageIndexMaxHopsForceDoneSucceeds(t *testing.T) {
+func TestTreeWalkMaxHopsForceDoneSucceeds(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -378,7 +378,7 @@ func TestPageIndexMaxHopsForceDoneSucceeds(t *testing.T) {
 			`{"tool":"done","answer":"forced answer","cited_pages":[[1,2]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{"a1_ref": "install", "a2_ref": "config"}}
 	s.MaxHops = 2
 
@@ -394,11 +394,11 @@ func TestPageIndexMaxHopsForceDoneSucceeds(t *testing.T) {
 	}
 }
 
-// TestPageIndexTOCFallback exercises the graceful-degradation path:
+// TestTreeWalkTOCFallback exercises the graceful-degradation path:
 // when the persisted TOC provider returns ErrNoTOC (pre-PR-A
 // state), the strategy synthesises a TOC view from the section
 // tree. The model must still receive section titles + page ranges.
-func TestPageIndexTOCFallback(t *testing.T) {
+func TestTreeWalkTOCFallback(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -408,7 +408,7 @@ func TestPageIndexTOCFallback(t *testing.T) {
 			`{"tool":"done","answer":"see structure","cited_pages":[]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 	s.TOC = pageErroringTOC{} // mimic documents.toc_tree IS NULL
 
@@ -434,10 +434,10 @@ func TestPageIndexTOCFallback(t *testing.T) {
 	}
 }
 
-// TestPageIndexTOCFromProvider asserts the persisted TOC wins over
+// TestTreeWalkTOCFromProvider asserts the persisted TOC wins over
 // the synthesised view: when the provider returns bytes, those
 // bytes are surfaced verbatim.
-func TestPageIndexTOCFromProvider(t *testing.T) {
+func TestTreeWalkTOCFromProvider(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -447,7 +447,7 @@ func TestPageIndexTOCFromProvider(t *testing.T) {
 			`{"tool":"done","answer":"from persisted TOC","cited_pages":[]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.TOC = pageStaticTOC{blob: []byte(`[{"title":"OVERRIDDEN","page_start":1,"page_end":99}]`)}
 
 	_, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -465,16 +465,16 @@ func TestPageIndexTOCFromProvider(t *testing.T) {
 	}
 }
 
-// TestPageIndexBadJSONGraceful: persistent prose responses must
+// TestTreeWalkBadJSONGraceful: persistent prose responses must
 // trigger a retry prompt and then bail cleanly at MaxHops.
-func TestPageIndexBadJSONGraceful(t *testing.T) {
+func TestTreeWalkBadJSONGraceful(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
 	llm := &pageScriptedLLM{
 		loopReply: "I think the answer is on page 5.", // never JSON
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 	s.MaxHops = 3
 
@@ -490,10 +490,10 @@ func TestPageIndexBadJSONGraceful(t *testing.T) {
 	}
 }
 
-// TestPageIndexClampInvalidRange: a model that asks for pages past
+// TestTreeWalkClampInvalidRange: a model that asks for pages past
 // the document's end gets a recoverable error observation and can
 // keep going. The strategy must NOT crash on out-of-range input.
-func TestPageIndexClampInvalidRange(t *testing.T) {
+func TestTreeWalkClampInvalidRange(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree() // max page is 9
@@ -503,7 +503,7 @@ func TestPageIndexClampInvalidRange(t *testing.T) {
 			`{"tool":"done","answer":"recovered","cited_pages":[[1,1]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{"a1_ref": "install"}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -523,10 +523,10 @@ func TestPageIndexClampInvalidRange(t *testing.T) {
 	}
 }
 
-// TestPageIndexClampPartialOverlap: a range that overlaps the
+// TestTreeWalkClampPartialOverlap: a range that overlaps the
 // document but extends past the end is silently clamped — the
 // model gets useful content (not an error) for the in-range part.
-func TestPageIndexClampPartialOverlap(t *testing.T) {
+func TestTreeWalkClampPartialOverlap(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree() // max page is 9
@@ -536,7 +536,7 @@ func TestPageIndexClampPartialOverlap(t *testing.T) {
 			`{"tool":"done","answer":"got it","cited_pages":[[8,9]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{"b2_ref": "Debt content."}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -551,12 +551,12 @@ func TestPageIndexClampPartialOverlap(t *testing.T) {
 	}
 }
 
-// TestPageIndexEmptyTree exercises the early-return guard.
-func TestPageIndexEmptyTree(t *testing.T) {
+// TestTreeWalkEmptyTree exercises the early-return guard.
+func TestTreeWalkEmptyTree(t *testing.T) {
 	t.Parallel()
 
 	llm := &pageScriptedLLM{}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 
 	res, err := s.SelectWithCost(context.Background(), &tree.Tree{}, "q", retrieval.ContextBudget{})
 	if err != nil {
@@ -570,10 +570,10 @@ func TestPageIndexEmptyTree(t *testing.T) {
 	}
 }
 
-// TestPageIndexNoLoaderFallback: PageLoader=nil falls back to a
+// TestTreeWalkNoLoaderFallback: PageLoader=nil falls back to a
 // title+summary rendering of get_pages. The model still gets a
 // useful observation so it can keep navigating.
-func TestPageIndexNoLoaderFallback(t *testing.T) {
+func TestTreeWalkNoLoaderFallback(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -583,7 +583,7 @@ func TestPageIndexNoLoaderFallback(t *testing.T) {
 			`{"tool":"done","answer":"titles only","cited_pages":[[1,2]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm) // no PageLoader
+	s := retrieval.NewTreeWalkStrategy(llm) // no PageLoader
 
 	_, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
 	if err != nil {
@@ -598,9 +598,9 @@ func TestPageIndexNoLoaderFallback(t *testing.T) {
 	}
 }
 
-// TestPageIndexContentClippedAtLimit: a get_pages call that would
+// TestTreeWalkContentClippedAtLimit: a get_pages call that would
 // produce more chars than PageContentLimit must be clipped.
-func TestPageIndexContentClippedAtLimit(t *testing.T) {
+func TestTreeWalkContentClippedAtLimit(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -614,7 +614,7 @@ func TestPageIndexContentClippedAtLimit(t *testing.T) {
 			`{"tool":"done","answer":"big","cited_pages":[[1,1]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = loader
 	s.PageContentLimit = 1000
 
@@ -627,11 +627,11 @@ func TestPageIndexContentClippedAtLimit(t *testing.T) {
 	}
 }
 
-// TestPageIndexNoCitationsClearsSelection: an empty cited_pages
+// TestTreeWalkNoCitationsClearsSelection: an empty cited_pages
 // list must produce an empty SelectedIDs (no implicit "default to
 // everything we visited"). This is the "no useful evidence found"
 // path the system prompt prescribes.
-func TestPageIndexNoCitationsClearsSelection(t *testing.T) {
+func TestTreeWalkNoCitationsClearsSelection(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -641,7 +641,7 @@ func TestPageIndexNoCitationsClearsSelection(t *testing.T) {
 			`{"tool":"done","answer":"The document does not address this query.","cited_pages":[]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{"a1_ref": "install"}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -656,9 +656,9 @@ func TestPageIndexNoCitationsClearsSelection(t *testing.T) {
 	}
 }
 
-// TestPageIndexTraceTokenStable: two runs that emit identical
+// TestTreeWalkTraceTokenStable: two runs that emit identical
 // cited_pages produce identical trace tokens. Replay's substrate.
-func TestPageIndexTraceTokenStable(t *testing.T) {
+func TestTreeWalkTraceTokenStable(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -668,7 +668,7 @@ func TestPageIndexTraceTokenStable(t *testing.T) {
 				`{"tool":"done","answer":"X","cited_pages":[[1,2],[8,9]]}`,
 			},
 		}
-		s := retrieval.NewPageIndexStrategy(llm)
+		s := retrieval.NewTreeWalkStrategy(llm)
 		s.PageLoader = pageMapLoader{}
 		res, _ := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{ModelName: "gpt-4o-mini"})
 		return res.TraceToken
@@ -680,15 +680,15 @@ func TestPageIndexTraceTokenStable(t *testing.T) {
 	}
 }
 
-// TestPageIndexTraceTokenOrderInvariant: two runs that cite the
+// TestTreeWalkTraceTokenOrderInvariant: two runs that cite the
 // same pages in different orders must produce identical tokens.
-func TestPageIndexTraceTokenOrderInvariant(t *testing.T) {
+func TestTreeWalkTraceTokenOrderInvariant(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
 	mkRun := func(reply string) string {
 		llm := &pageScriptedLLM{replies: []string{reply}}
-		s := retrieval.NewPageIndexStrategy(llm)
+		s := retrieval.NewTreeWalkStrategy(llm)
 		res, _ := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{ModelName: "gpt-4o-mini"})
 		return res.TraceToken
 	}
@@ -699,7 +699,7 @@ func TestPageIndexTraceTokenOrderInvariant(t *testing.T) {
 	}
 }
 
-// TestParsePageIndexActionTolerance covers the input shapes the
+// TestParseTreeWalkActionTolerance covers the input shapes the
 // parser accepts:
 //   - "tool" key (canonical)
 //   - "action" key (alt)
@@ -707,7 +707,7 @@ func TestPageIndexTraceTokenOrderInvariant(t *testing.T) {
 //   - cited_pages as string list ["5-7","10"]
 //   - markdown fences + prose prefix
 //   - case-insensitive tool tag
-func TestParsePageIndexActionTolerance(t *testing.T) {
+func TestParseTreeWalkActionTolerance(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -779,7 +779,7 @@ func TestParsePageIndexActionTolerance(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := retrieval.ParsePageIndexAction(c.in)
+			got, err := retrieval.ParseTreeWalkAction(c.in)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
@@ -804,14 +804,14 @@ func TestParsePageIndexActionTolerance(t *testing.T) {
 	}
 }
 
-func TestParsePageIndexActionRejectsGarbage(t *testing.T) {
+func TestParseTreeWalkActionRejectsGarbage(t *testing.T) {
 	t.Parallel()
 	for _, in := range []string{
 		"",
 		"I think it's page 5.",
 		`{"reasoning":"no tool field"}`,
 	} {
-		_, err := retrieval.ParsePageIndexAction(in)
+		_, err := retrieval.ParseTreeWalkAction(in)
 		if err == nil {
 			t.Errorf("want error parsing %q", in)
 		}
@@ -841,13 +841,13 @@ func distinctRangeCount(pairs [][2]int) int {
 	return len(seen)
 }
 
-// TestPageIndexDedupCollapsesRepeatedRange is the core regression for
+// TestTreeWalkDedupCollapsesRepeatedRange is the core regression for
 // the FinanceBench "same id ×5" miss (id_00499 returned sec_363... five
 // times). A done that cites the SAME range five times, plus two more
 // distinct ranges, must collapse to distinct ranges only AND respect
 // the MaxCitations cap. With MaxCitations=3 the three distinct ranges
 // survive; the four duplicate repeats are gone.
-func TestPageIndexDedupCollapsesRepeatedRange(t *testing.T) {
+func TestTreeWalkDedupCollapsesRepeatedRange(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree() // pages 1-9
@@ -858,7 +858,7 @@ func TestPageIndexDedupCollapsesRepeatedRange(t *testing.T) {
 			`{"tool":"done","answer":"sprayed","cited_pages":[[1,2],[1,2],[1,2],[1,2],[1,2],[3,4],[8,9]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 	// Default MaxCitations is 3.
 
@@ -901,12 +901,12 @@ func TestPageIndexDedupCollapsesRepeatedRange(t *testing.T) {
 	}
 }
 
-// TestPageIndexCapKeepsHighestConfidence proves the cap is
+// TestTreeWalkCapKeepsHighestConfidence proves the cap is
 // confidence-aware: when more than MaxCitations distinct ranges are
 // cited WITH per-range confidence, the highest-confidence ranges win
 // (not the first-listed). Here five ranges are cited; the cap is 2;
 // the two with the top confidence must be the ones kept.
-func TestPageIndexCapKeepsHighestConfidence(t *testing.T) {
+func TestTreeWalkCapKeepsHighestConfidence(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree() // pages 1-9
@@ -922,7 +922,7 @@ func TestPageIndexCapKeepsHighestConfidence(t *testing.T) {
 				`{"pages":[1,1],"confidence":0.05}]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 	s.MaxCitations = 2
 
@@ -946,11 +946,11 @@ func TestPageIndexCapKeepsHighestConfidence(t *testing.T) {
 	}
 }
 
-// TestPageIndexConfidentSinglePreserved is the happy half of the
+// TestTreeWalkConfidentSinglePreserved is the happy half of the
 // signal: a confident single citation must pass through untouched and
 // the confidence must surface on both Result.Confidence and the
 // per-section Confidences map (so the abstain machinery can read it).
-func TestPageIndexConfidentSinglePreserved(t *testing.T) {
+func TestTreeWalkConfidentSinglePreserved(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -959,7 +959,7 @@ func TestPageIndexConfidentSinglePreserved(t *testing.T) {
 			`{"tool":"done","answer":"Install on pages 1-2.","cited_pages":[[1,2]],"confidence":0.92,"reasoning":"clear"}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "how do I install?", retrieval.ContextBudget{MaxTokens: 100000})
@@ -981,11 +981,11 @@ func TestPageIndexConfidentSinglePreserved(t *testing.T) {
 	}
 }
 
-// TestPageIndexLowConfidenceStillCommitsSingle guards the over-
+// TestTreeWalkLowConfidenceStillCommitsSingle guards the over-
 // suppression risk: even when the model reports LOW confidence, it must
 // still return its single best pick — never an empty citation set. A
 // low confidence annotates the answer; it does not delete it.
-func TestPageIndexLowConfidenceStillCommitsSingle(t *testing.T) {
+func TestTreeWalkLowConfidenceStillCommitsSingle(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -994,7 +994,7 @@ func TestPageIndexLowConfidenceStillCommitsSingle(t *testing.T) {
 			`{"tool":"done","answer":"Probably debt on 8-9.","cited_pages":[[8,9]],"confidence":0.15,"reasoning":"unsure"}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -1012,9 +1012,9 @@ func TestPageIndexLowConfidenceStillCommitsSingle(t *testing.T) {
 	}
 }
 
-// TestPageIndexConfidenceClamped: out-of-range confidence values clamp
+// TestTreeWalkConfidenceClamped: out-of-range confidence values clamp
 // into [0,1] rather than propagating absurd numbers.
-func TestPageIndexConfidenceClamped(t *testing.T) {
+func TestTreeWalkConfidenceClamped(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -1023,7 +1023,7 @@ func TestPageIndexConfidenceClamped(t *testing.T) {
 			`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":7.5}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -1035,9 +1035,9 @@ func TestPageIndexConfidenceClamped(t *testing.T) {
 	}
 }
 
-// TestPageIndexCapConfigurable: a custom MaxCitations is honoured. Six
+// TestTreeWalkCapConfigurable: a custom MaxCitations is honoured. Six
 // distinct ranges cited, cap=1 → exactly one survives.
-func TestPageIndexCapConfigurable(t *testing.T) {
+func TestTreeWalkCapConfigurable(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -1046,7 +1046,7 @@ func TestPageIndexCapConfigurable(t *testing.T) {
 			`{"tool":"done","answer":"x","cited_pages":[[1,1],[2,2],[3,3],[4,4],[5,5],[6,6]]}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 	s.MaxCitations = 1
 
@@ -1064,11 +1064,11 @@ func TestPageIndexCapConfigurable(t *testing.T) {
 	}
 }
 
-// TestPageIndexEmptyCitationsNoConfidence: a refusal (empty cited_pages)
+// TestTreeWalkEmptyCitationsNoConfidence: a refusal (empty cited_pages)
 // leaves CitedPages nil, Confidences nil, and Confidence 0 — so the
 // API layer's abstain check (which fires only on a non-empty
 // Confidences map) behaves exactly as before for refusals.
-func TestPageIndexEmptyCitationsNoConfidence(t *testing.T) {
+func TestTreeWalkEmptyCitationsNoConfidence(t *testing.T) {
 	t.Parallel()
 
 	tr := buildPagedTree()
@@ -1077,7 +1077,7 @@ func TestPageIndexEmptyCitationsNoConfidence(t *testing.T) {
 			`{"tool":"done","answer":"The document does not address this query.","cited_pages":[],"confidence":0}`,
 		},
 	}
-	s := retrieval.NewPageIndexStrategy(llm)
+	s := retrieval.NewTreeWalkStrategy(llm)
 	s.PageLoader = pageMapLoader{data: map[string]string{}}
 
 	res, err := s.SelectWithCost(context.Background(), tr, "q", retrieval.ContextBudget{MaxTokens: 100000})
@@ -1095,14 +1095,14 @@ func TestPageIndexEmptyCitationsNoConfidence(t *testing.T) {
 	}
 }
 
-// TestParsePageIndexConfidenceAndRichCitations covers the new parser
+// TestParseTreeWalkConfidenceAndRichCitations covers the new parser
 // surfaces: a top-level confidence number, and the rich cited_pages
 // object form carrying per-range confidence.
-func TestParsePageIndexConfidenceAndRichCitations(t *testing.T) {
+func TestParseTreeWalkConfidenceAndRichCitations(t *testing.T) {
 	t.Parallel()
 
 	t.Run("top_level_confidence", func(t *testing.T) {
-		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":0.8}`)
+		a, err := retrieval.ParseTreeWalkAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":0.8}`)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
@@ -1112,7 +1112,7 @@ func TestParsePageIndexConfidenceAndRichCitations(t *testing.T) {
 	})
 
 	t.Run("confidence_as_string", func(t *testing.T) {
-		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":"0.6"}`)
+		a, err := retrieval.ParseTreeWalkAction(`{"tool":"done","answer":"x","cited_pages":[[1,2]],"confidence":"0.6"}`)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
@@ -1122,7 +1122,7 @@ func TestParsePageIndexConfidenceAndRichCitations(t *testing.T) {
 	})
 
 	t.Run("rich_cited_pages_objects", func(t *testing.T) {
-		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[{"pages":[5,7],"confidence":0.9},{"pages":[12,12],"confidence":0.4}]}`)
+		a, err := retrieval.ParseTreeWalkAction(`{"tool":"done","answer":"x","cited_pages":[{"pages":[5,7],"confidence":0.9},{"pages":[12,12],"confidence":0.4}]}`)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
@@ -1138,7 +1138,7 @@ func TestParsePageIndexConfidenceAndRichCitations(t *testing.T) {
 	})
 
 	t.Run("rich_cited_pages_start_end", func(t *testing.T) {
-		a, err := retrieval.ParsePageIndexAction(`{"tool":"done","answer":"x","cited_pages":[{"start":3,"end":4,"confidence":0.7}]}`)
+		a, err := retrieval.ParseTreeWalkAction(`{"tool":"done","answer":"x","cited_pages":[{"start":3,"end":4,"confidence":0.7}]}`)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}

@@ -105,41 +105,41 @@ func doQuery(t *testing.T, h *QueryHandler, jsonBody string) (*httptest.Response
 	return rec, resp
 }
 
-// TestHandleQueryStrategyOverrideRoutesToPageIndex is the Task-2
-// acceptance gate: a /v1/query body carrying {"strategy":"pageindex"}
+// TestHandleQueryStrategyOverrideRoutesToTreeWalk is the Task-2
+// acceptance gate: a /v1/query body carrying {"strategy":"treewalk"}
 // must route to the page-based strategy, NOT the configured default.
-func TestHandleQueryStrategyOverrideRoutesToPageIndex(t *testing.T) {
+func TestHandleQueryStrategyOverrideRoutesToTreeWalk(t *testing.T) {
 	t.Parallel()
 
 	def := &labeledStrategy{name: "chunked-tree", picks: []tree.SectionID{"sec_a"}}
-	page := &labeledStrategy{name: "pageindex", picks: []tree.SectionID{"sec_b"}}
+	page := &labeledStrategy{name: "treewalk", picks: []tree.SectionID{"sec_b"}}
 	set := map[string]retrieval.Strategy{
 		"chunked-tree": def,
-		"pageindex":    page,
+		"treewalk":    page,
 	}
 	h := newQueryStrategyHandler(def, set)
 
-	rec, resp := doQuery(t, h, `{"document_id":"doc_x","query":"q","strategy":"pageindex"}`)
+	rec, resp := doQuery(t, h, `{"document_id":"doc_x","query":"q","strategy":"treewalk"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if page.wasCalled() == false {
-		t.Error("pageindex strategy was NOT called for {\"strategy\":\"pageindex\"}")
+		t.Error("treewalk strategy was NOT called for {\"strategy\":\"treewalk\"}")
 	}
 	if def.wasCalled() {
-		t.Error("default (chunked-tree) strategy was called despite a pageindex override")
+		t.Error("default (chunked-tree) strategy was called despite a treewalk override")
 	}
-	if got := resp["strategy"]; got != "pageindex" {
-		t.Errorf("response strategy = %v, want pageindex", got)
+	if got := resp["strategy"]; got != "treewalk" {
+		t.Errorf("response strategy = %v, want treewalk", got)
 	}
-	// The pageindex mock picks sec_b; prove the override's result (not
+	// The treewalk mock picks sec_b; prove the override's result (not
 	// the default's sec_a) is what surfaced.
 	secs, _ := resp["sections"].([]any)
 	if len(secs) != 1 {
-		t.Fatalf("sections = %v, want 1 (sec_b from pageindex)", resp["sections"])
+		t.Fatalf("sections = %v, want 1 (sec_b from treewalk)", resp["sections"])
 	}
 	if id := secs[0].(map[string]any)["id"]; id != "sec_b" {
-		t.Errorf("section id = %v, want sec_b (pageindex's pick)", id)
+		t.Errorf("section id = %v, want sec_b (treewalk's pick)", id)
 	}
 }
 
@@ -149,8 +149,8 @@ func TestHandleQueryDefaultStrategyWhenAbsent(t *testing.T) {
 	t.Parallel()
 
 	def := &labeledStrategy{name: "chunked-tree", picks: []tree.SectionID{"sec_a"}}
-	page := &labeledStrategy{name: "pageindex", picks: []tree.SectionID{"sec_b"}}
-	set := map[string]retrieval.Strategy{"chunked-tree": def, "pageindex": page}
+	page := &labeledStrategy{name: "treewalk", picks: []tree.SectionID{"sec_b"}}
+	set := map[string]retrieval.Strategy{"chunked-tree": def, "treewalk": page}
 	h := newQueryStrategyHandler(def, set)
 
 	rec, resp := doQuery(t, h, `{"document_id":"doc_x","query":"q"}`)
@@ -195,7 +195,7 @@ func TestHandleQueryOverrideWithNilSet(t *testing.T) {
 	def := &labeledStrategy{name: "chunked-tree", picks: []tree.SectionID{"sec_a"}}
 	h := newQueryStrategyHandler(def, nil)
 
-	rec, _ := doQuery(t, h, `{"document_id":"doc_x","query":"q","strategy":"pageindex"}`)
+	rec, _ := doQuery(t, h, `{"document_id":"doc_x","query":"q","strategy":"treewalk"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("nil set + override: status = %d, want 400", rec.Code)
 	}

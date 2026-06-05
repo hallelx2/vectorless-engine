@@ -14,8 +14,8 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// PageIndexStrategy is a page-based agentic retrieval loop modelled on
-// PageIndex's three-tool reasoning protocol.
+// TreeWalkStrategy is a page-based agentic retrieval loop modelled on
+// TreeWalk's three-tool reasoning protocol.
 //
 // The model navigates by PAGE RANGE rather than by section ID. Each
 // turn it emits one of:
@@ -33,20 +33,20 @@ import (
 // loop owns the answer, not just the selection. SelectWithCost
 // surfaces both the picked section IDs (the intersection of every
 // cited page range with the document's section map) and the literal
-// answer string via Result.Reasoning. The /v1/answer/pageindex
+// answer string via Result.Reasoning. The /v1/answer/treewalk
 // endpoint reads the answer; the legacy /v1/query callers still get
 // a section list.
 //
 // # Protocol choice
 //
-// PageIndex's original demo wires the model via the OpenAI Agents
+// TreeWalk's original demo wires the model via the OpenAI Agents
 // SDK's native tool-calling surface. llmgate v0.2.0 declares ToolDef
 // / ToolCall as scaffolding but does not populate ToolCalls on
 // responses, so this strategy uses the same JSON-action text
 // protocol AgenticStrategy already proved (see pkg/retrieval/agentic.go).
 // When llmgate wires native tool calling the surface here is the
 // same — only the request/response plumbing changes.
-type PageIndexStrategy struct {
+type TreeWalkStrategy struct {
 	// LLM is the shared client used for every turn.
 	LLM llmgate.Client
 
@@ -63,7 +63,7 @@ type PageIndexStrategy struct {
 
 	// MaxHops caps the number of LLM turns one Select consumes,
 	// including the terminal "done" turn. Zero means use
-	// defaultPageIndexMaxHops.
+	// defaultTreeWalkMaxHops.
 	MaxHops int
 
 	// PageContentLimit caps how many chars a single get_pages
@@ -74,7 +74,7 @@ type PageIndexStrategy struct {
 	PageContentLimit int
 
 	// MaxCitations caps how many distinct page ranges the FINAL done
-	// action may cite. Zero means use defaultPageIndexMaxCitations.
+	// action may cite. Zero means use defaultTreeWalkMaxCitations.
 	//
 	// This is a confidence backstop, not a navigation limit: the
 	// model is free to read as many pages as MaxHops allows, but the
@@ -92,15 +92,15 @@ type PageIndexStrategy struct {
 	ModelOverride string
 
 	// OnEvent, when non-nil, is invoked synchronously once per
-	// tool call so callers (e.g. the /v1/answer/pageindex SSE
+	// tool call so callers (e.g. the /v1/answer/treewalk SSE
 	// handler) can stream the navigation in real time. The hook
 	// runs inside the loop, after the tool result is computed but
 	// before the next LLM hop. Implementations MUST be cheap and
 	// MUST NOT block; a blocked hook stalls retrieval.
-	OnEvent func(PageIndexEvent)
+	OnEvent func(TreeWalkEvent)
 }
 
-// PageIndexEvent is a single observable step in the strategy's
+// TreeWalkEvent is a single observable step in the strategy's
 // navigation loop. Consumers convert these to whatever wire format
 // they need (SSE, gRPC stream, console log).
 //
@@ -109,7 +109,7 @@ type PageIndexStrategy struct {
 // populated; for done, Answer + CitedPages are populated. The Hop
 // field is the 1-indexed turn number so consumers can interleave
 // hops from concurrent requests.
-type PageIndexEvent struct {
+type TreeWalkEvent struct {
 	Hop        int              `json:"hop"`
 	Type       string           `json:"type"`
 	Reasoning  string           `json:"reasoning,omitempty"`
@@ -128,19 +128,19 @@ type PageIndexEvent struct {
 	Note       string  `json:"note,omitempty"`
 }
 
-// defaultPageIndexMaxHops bounds the loop. Eight turns is enough for
+// defaultTreeWalkMaxHops bounds the loop. Eight turns is enough for
 // structure → 3 get_pages → done with two retry hops on stray bad
 // JSON, while keeping latency and cost predictable. The reference
-// PageIndex demo converges in 3-5 hops on typical questions.
-const defaultPageIndexMaxHops = 8
+// TreeWalk demo converges in 3-5 hops on typical questions.
+const defaultTreeWalkMaxHops = 8
 
 // defaultPageContentLimit is the per-call chars cap. 16,000 chars
 // is roughly 4K tokens at GPT/Claude tokenisers — comfortably below
 // any flagship model's context but enough text for a 5-7 page
-// excerpt. Matches PageIndex's reference behaviour.
+// excerpt. Matches TreeWalk's reference behaviour.
 const defaultPageContentLimit = 16000
 
-// defaultPageIndexMaxCitations bounds the FINAL cited-range set. Three
+// defaultTreeWalkMaxCitations bounds the FINAL cited-range set. Three
 // is generous for the answer-spans-one-place common case (where ONE is
 // ideal) while still allowing a genuinely multi-location answer (e.g. a
 // 10-K figure cross-referenced between the income statement and a
@@ -148,16 +148,16 @@ const defaultPageContentLimit = 16000
 // signal that motivated the cap: confident single-pick = f1 1.0,
 // 5-range spray = f1 0. Capping at 3 keeps the legitimate multi-range
 // case while removing the long tail of low-confidence noise.
-const defaultPageIndexMaxCitations = 3
+const defaultTreeWalkMaxCitations = 3
 
-// strategyNamePageIndex is the stable identifier for config
-// (retrieval.strategy: pageindex) and telemetry.
-const strategyNamePageIndex = "pageindex"
+// strategyNameTreeWalk is the stable identifier for config
+// (retrieval.strategy: treewalk) and telemetry.
+const strategyNameTreeWalk = "treewalk"
 
 // Compile-time interface checks.
 var (
-	_ Strategy     = (*PageIndexStrategy)(nil)
-	_ CostStrategy = (*PageIndexStrategy)(nil)
+	_ Strategy     = (*TreeWalkStrategy)(nil)
+	_ CostStrategy = (*TreeWalkStrategy)(nil)
 )
 
 // TOCProvider returns a JSON document-structure tree for the LLM's
@@ -177,7 +177,7 @@ type TOCProvider interface {
 // keyed by its ContentRef. Strategies that need to materialise text
 // at run-time depend on this rather than on a concrete storage
 // driver — same shape as ContentFetcher; we keep them distinct so
-// the two callers (agentic / pageindex) can be wired independently
+// the two callers (agentic / treewalk) can be wired independently
 // in main.go.
 type PageContentLoader interface {
 	Load(ctx context.Context, ref string) ([]byte, error)
@@ -190,24 +190,24 @@ type PageContentLoader interface {
 // documents.toc_tree) every request will degrade through this path.
 var ErrNoTOC = fmt.Errorf("retrieval: no TOC tree persisted for document")
 
-// NewPageIndexStrategy constructs a PageIndexStrategy with sensible
+// NewTreeWalkStrategy constructs a TreeWalkStrategy with sensible
 // defaults. The TOC + PageLoader are nil here; the engine wires them
 // in main.go from the DB pool + storage backend. Tests pass scripted
 // implementations directly.
-func NewPageIndexStrategy(client llmgate.Client) *PageIndexStrategy {
-	return &PageIndexStrategy{
+func NewTreeWalkStrategy(client llmgate.Client) *TreeWalkStrategy {
+	return &TreeWalkStrategy{
 		LLM:              client,
-		MaxHops:          defaultPageIndexMaxHops,
+		MaxHops:          defaultTreeWalkMaxHops,
 		PageContentLimit: defaultPageContentLimit,
-		MaxCitations:     defaultPageIndexMaxCitations,
+		MaxCitations:     defaultTreeWalkMaxCitations,
 	}
 }
 
 // Name implements Strategy.
-func (s *PageIndexStrategy) Name() string { return strategyNamePageIndex }
+func (s *TreeWalkStrategy) Name() string { return strategyNameTreeWalk }
 
 // Select implements Strategy.
-func (s *PageIndexStrategy) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
+func (s *TreeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
 	r, err := s.SelectWithCost(ctx, t, query, budget)
 	if err != nil {
 		return nil, err
@@ -223,11 +223,11 @@ func (s *PageIndexStrategy) Select(ctx context.Context, t *tree.Tree, query stri
 //     cited page range. This keeps the per-section-id contract for
 //     callers (/v1/query, /v1/answer) that don't yet know about pages.
 //   - Reasoning: the agent's final answer string (the "answer" field
-//     of the done action). /v1/answer/pageindex reads this directly
+//     of the done action). /v1/answer/treewalk reads this directly
 //     and skips synthesis.
 //   - PagesRead: an entry per get_pages call.
 //   - HopsTaken / Usage / TraceToken: standard.
-func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
+func (s *TreeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	if t == nil || t.Root == nil {
 		return &Result{}, nil
 	}
@@ -238,7 +238,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	}
 	maxHops := s.MaxHops
 	if maxHops <= 0 {
-		maxHops = defaultPageIndexMaxHops
+		maxHops = defaultTreeWalkMaxHops
 	}
 	pageLimit := s.PageContentLimit
 	if pageLimit <= 0 {
@@ -246,7 +246,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	}
 	maxCitations := s.MaxCitations
 	if maxCitations <= 0 {
-		maxCitations = defaultPageIndexMaxCitations
+		maxCitations = defaultTreeWalkMaxCitations
 	}
 
 	// Pre-flatten the tree into an ordinal section list ordered by
@@ -256,7 +256,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	maxPage := maxKnownPage(sections)
 
 	msgs := []llmgate.Message{
-		{Role: llmgate.RoleSystem, Content: pageIndexSystemPrompt},
+		{Role: llmgate.RoleSystem, Content: treeWalkSystemPrompt},
 		{Role: llmgate.RoleUser, Content: s.initialUserPrompt(t, query, maxPage)},
 	}
 
@@ -282,7 +282,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 		}
 		resp, err := s.LLM.Complete(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("pageindex hop %d: %w", hop+1, err)
+			return nil, fmt.Errorf("treewalk hop %d: %w", hop+1, err)
 		}
 		hopsTaken++
 		totalUsage.Add(Usage{
@@ -300,12 +300,12 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 			Content: resp.Content,
 		})
 
-		action, parseErr := ParsePageIndexAction(resp.Content)
+		action, parseErr := ParseTreeWalkAction(resp.Content)
 		if parseErr != nil {
-			log.Printf("retrieval: pageindex hop %d action parse failed: %v", hop+1, parseErr)
+			log.Printf("retrieval: treewalk hop %d action parse failed: %v", hop+1, parseErr)
 			msgs = append(msgs, llmgate.Message{
 				Role:    llmgate.RoleUser,
-				Content: pageIndexParseRetryPrompt,
+				Content: treeWalkParseRetryPrompt,
 			})
 			continue
 		}
@@ -323,7 +323,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 			citedRanges = selectCitedRanges(action.CitedPages, action.CitedConfidences, maxPage, maxCitations)
 			confidence := clampConfidence(action.Confidence)
 			selectedIDs := sectionsOverlapping(sections, citedRanges)
-			s.emit(PageIndexEvent{
+			s.emit(TreeWalkEvent{
 				Hop:        hopsTaken,
 				Type:       pageActionDone,
 				Reasoning:  finalReasoning,
@@ -336,12 +336,12 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Confidences: confidenceMap(selectedIDs, confidence),
 				Confidence:  confidence,
 				CitedPages:  rangesToPairs(citedRanges),
-				Reasoning:   finalAnswer, // /v1/answer/pageindex reads this
+				Reasoning:   finalAnswer, // /v1/answer/treewalk reads this
 				ModelUsed:   model,
 				Usage:       totalUsage,
 				HopsTaken:   hopsTaken,
 				PagesRead:   pagesRead,
-				TraceToken:  computePageIndexTraceToken(t.DocumentID, model, citedRanges),
+				TraceToken:  computeTreeWalkTraceToken(t.DocumentID, model, citedRanges),
 			}, nil
 
 		case pageActionStructure:
@@ -350,7 +350,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Role:    llmgate.RoleUser,
 				Content: wrapPageObservation("get_document_structure", obs),
 			})
-			s.emit(PageIndexEvent{
+			s.emit(TreeWalkEvent{
 				Hop:       hopsTaken,
 				Type:      pageActionStructure,
 				Reasoning: action.Reasoning,
@@ -366,7 +366,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 						fmt.Sprintf("invalid range start=%d end=%d (document has %d pages). Pages are 1-indexed inclusive.",
 							action.StartPage, action.EndPage, maxPage)),
 				})
-				s.emit(PageIndexEvent{
+				s.emit(TreeWalkEvent{
 					Hop:       hopsTaken,
 					Type:      pageActionGetPages,
 					Reasoning: action.Reasoning,
@@ -388,7 +388,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Content: wrapPageObservation("get_pages",
 					fmt.Sprintf("pages %d-%d (%d sections, %d chars):\n%s", start, end, len(sectionIDs), len(text), text)),
 			})
-			s.emit(PageIndexEvent{
+			s.emit(TreeWalkEvent{
 				Hop:        hopsTaken,
 				Type:       pageActionGetPages,
 				Reasoning:  action.Reasoning,
@@ -404,7 +404,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 				Content: wrapPageObservation(action.Action,
 					fmt.Sprintf("unsupported tool %q. Use one of: get_document_structure, get_pages, done.", action.Action)),
 			})
-			s.emit(PageIndexEvent{
+			s.emit(TreeWalkEvent{
 				Hop:  hopsTaken,
 				Type: action.Action,
 				Note: "unsupported tool",
@@ -421,7 +421,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 	var forcedConfidence float64
 	finalAnswer, finalReasoning, citedRanges, forcedConfidence = s.forceDone(ctx, &msgs, &totalUsage, &hopsTaken, model, maxPage, maxCitations)
 	selectedIDs := sectionsOverlapping(sections, citedRanges)
-	log.Printf("retrieval: pageindex strategy hit max_hops=%d; forced done", maxHops)
+	log.Printf("retrieval: treewalk strategy hit max_hops=%d; forced done", maxHops)
 	_ = finalReasoning
 	return &Result{
 		SelectedIDs: selectedIDs,
@@ -433,7 +433,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 		Usage:       totalUsage,
 		HopsTaken:   hopsTaken,
 		PagesRead:   pagesRead,
-		TraceToken:  computePageIndexTraceToken(t.DocumentID, model, citedRanges),
+		TraceToken:  computeTreeWalkTraceToken(t.DocumentID, model, citedRanges),
 	}, nil
 }
 
@@ -441,7 +441,7 @@ func (s *PageIndexStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, qu
 // Hooks run synchronously inside the navigation loop and MUST be
 // cheap; callers that need to do I/O should buffer first and write
 // outside the strategy's critical path.
-func (s *PageIndexStrategy) emit(ev PageIndexEvent) {
+func (s *TreeWalkStrategy) emit(ev TreeWalkEvent) {
 	if s.OnEvent != nil {
 		s.OnEvent(ev)
 	}
@@ -451,7 +451,7 @@ func (s *PageIndexStrategy) emit(ev PageIndexEvent) {
 // task, tells the model which page range exists ("the document has N
 // pages"), and reminds it of the action protocol. Mirrors
 // AgenticStrategy.initialUserPrompt.
-func (s *PageIndexStrategy) initialUserPrompt(t *tree.Tree, query string, maxPage int) string {
+func (s *TreeWalkStrategy) initialUserPrompt(t *tree.Tree, query string, maxPage int) string {
 	var b strings.Builder
 	if t.Title != "" {
 		b.WriteString("Document: ")
@@ -466,7 +466,7 @@ func (s *PageIndexStrategy) initialUserPrompt(t *tree.Tree, query string, maxPag
 	b.WriteString("\nUser query:\n")
 	b.WriteString(query)
 	b.WriteString("\n\nReply with a JSON action. The tools you may use are:\n")
-	b.WriteString(pageIndexActionHelp)
+	b.WriteString(treeWalkActionHelp)
 	return b.String()
 }
 
@@ -475,7 +475,7 @@ func (s *PageIndexStrategy) initialUserPrompt(t *tree.Tree, query string, maxPag
 // JSONB); if that's nil or errors, falls back to a synthesised view
 // derived from the section list. The fallback keeps this strategy
 // useful even before PR-A merges.
-func (s *PageIndexStrategy) renderStructure(ctx context.Context, t *tree.Tree) string {
+func (s *TreeWalkStrategy) renderStructure(ctx context.Context, t *tree.Tree) string {
 	if s.TOC != nil {
 		raw, err := s.TOC.GetTOC(ctx, t.DocumentID)
 		if err == nil && len(raw) > 0 {
@@ -483,7 +483,7 @@ func (s *PageIndexStrategy) renderStructure(ctx context.Context, t *tree.Tree) s
 		}
 		// Log and degrade — the strategy must keep going.
 		if err != nil {
-			log.Printf("retrieval: pageindex TOC fetch failed (degrading to synthesised view): %v", err)
+			log.Printf("retrieval: treewalk TOC fetch failed (degrading to synthesised view): %v", err)
 		}
 	}
 	return synthesiseTOC(t)
@@ -495,7 +495,7 @@ func (s *PageIndexStrategy) renderStructure(ctx context.Context, t *tree.Tree) s
 // section IDs that contributed, in page order. SectionIDs feeds back
 // into the PageReadEntry so callers can audit which sections the
 // model actually read.
-func (s *PageIndexStrategy) renderPages(ctx context.Context, sections []sectionPageEntry, start, end, pageLimit int) (string, []tree.SectionID) {
+func (s *TreeWalkStrategy) renderPages(ctx context.Context, sections []sectionPageEntry, start, end, pageLimit int) (string, []tree.SectionID) {
 	if s.PageLoader == nil {
 		// Without a loader we can still emit a useful observation
 		// from titles + summaries, so the model can keep navigating.
@@ -551,7 +551,7 @@ func (s *PageIndexStrategy) renderPages(ctx context.Context, sections []sectionP
 // used when the strategy has no PageLoader (e.g. in tests, or when
 // storage is wired but momentarily unavailable). Titles + summaries
 // still let the model triangulate which range to ask about next.
-func (s *PageIndexStrategy) renderPagesNoLoader(sections []sectionPageEntry, start, end, pageLimit int) (string, []tree.SectionID) {
+func (s *TreeWalkStrategy) renderPagesNoLoader(sections []sectionPageEntry, start, end, pageLimit int) (string, []tree.SectionID) {
 	var (
 		b          strings.Builder
 		sectionIDs []tree.SectionID
@@ -573,7 +573,7 @@ func (s *PageIndexStrategy) renderPagesNoLoader(sections []sectionPageEntry, sta
 	return out, sectionIDs
 }
 
-func (s *PageIndexStrategy) loadSectionBody(ctx context.Context, sec sectionPageEntry) string {
+func (s *TreeWalkStrategy) loadSectionBody(ctx context.Context, sec sectionPageEntry) string {
 	if sec.contentRef == "" {
 		if sec.summary != "" {
 			return fmt.Sprintf("(summary, no content loaded)\n%s", sec.summary)
@@ -582,7 +582,7 @@ func (s *PageIndexStrategy) loadSectionBody(ctx context.Context, sec sectionPage
 	}
 	data, err := s.PageLoader.Load(ctx, sec.contentRef)
 	if err != nil {
-		log.Printf("retrieval: pageindex load failed for section %s: %v", sec.id, err)
+		log.Printf("retrieval: treewalk load failed for section %s: %v", sec.id, err)
 		if sec.summary != "" {
 			return fmt.Sprintf("(content load failed: %v; using summary)\n%s", err, sec.summary)
 		}
@@ -597,7 +597,7 @@ func (s *PageIndexStrategy) loadSectionBody(ctx context.Context, sec sectionPage
 // doesn't emit a valid done action, the empty values flow back and the
 // caller sees a hop-capped Result. The forced citation set is gated
 // through the same dedup + cap as the normal done path.
-func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Message, totalUsage *Usage, hopsTaken *int, model string, maxPage, maxCitations int) (string, string, []pageRange, float64) {
+func (s *TreeWalkStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Message, totalUsage *Usage, hopsTaken *int, model string, maxPage, maxCitations int) (string, string, []pageRange, float64) {
 	*msgs = append(*msgs, llmgate.Message{
 		Role:    llmgate.RoleUser,
 		Content: "You have used your tool-call budget. Reply NOW with one JSON object: {\"tool\":\"done\",\"answer\":\"<your best answer\",\"cited_pages\":[[start,end]],\"confidence\":0.0-1.0,\"reasoning\":\"why\"}. Cite the SINGLE best page range unless the answer truly spans more than one. Do not call any more tools. Do not emit prose.",
@@ -620,7 +620,7 @@ func (s *PageIndexStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Messa
 		CostUSD:      resp.Usage.CostUSD,
 		LLMCalls:     1,
 	})
-	action, err := ParsePageIndexAction(resp.Content)
+	action, err := ParseTreeWalkAction(resp.Content)
 	if err != nil || action.Action != pageActionDone {
 		return "", "", nil, 0
 	}
@@ -703,7 +703,7 @@ type pageRange struct {
 }
 
 // String formats as "start-end" so trace tokens compute over a stable
-// human-readable form. computePageIndexTraceToken sorts these
+// human-readable form. computeTreeWalkTraceToken sorts these
 // strings before hashing.
 func (p pageRange) String() string {
 	if p.Start == p.End {
@@ -931,7 +931,7 @@ func confidenceMap(ids []tree.SectionID, confidence float64) map[tree.SectionID]
 }
 
 // rangesToPairs flattens []pageRange back to the [][2]int wire shape
-// used by PageIndexEvent.CitedPages, so the done event reports the
+// used by TreeWalkEvent.CitedPages, so the done event reports the
 // FINAL (deduped, capped) citation set rather than the raw model
 // output. Consumers building citations from the event therefore never
 // see the pre-dedup spray.
@@ -950,7 +950,7 @@ func rangesToPairs(ranges []pageRange) [][2]int {
 // the response's citations[] array. Start/End are the inclusive page
 // range; SectionIDs are the sections whose page range overlaps it
 // (nil when the caller must compute them from the tree). It is the
-// shared shape both /v1/answer/pageindex implementations build from so
+// shared shape both /v1/answer/treewalk implementations build from so
 // citation construction stays identical across the two API layers.
 type CitationSource struct {
 	Start      int
@@ -1038,8 +1038,8 @@ func sectionsOverlapping(sections []sectionPageEntry, ranges []pageRange) []tree
 	return out
 }
 
-// computePageIndexTraceToken builds the replay token for a
-// PageIndex run. Page-based strategies don't pick section IDs the
+// computeTreeWalkTraceToken builds the replay token for a
+// TreeWalk run. Page-based strategies don't pick section IDs the
 // way agentic/single-pass do, so the token's "identity" inputs are
 // the document, the model, and the sorted cited page ranges. Two
 // runs that cite the same pages (even via different navigation
@@ -1048,7 +1048,7 @@ func sectionsOverlapping(sections []sectionPageEntry, ranges []pageRange) []tree
 //
 // The hashing primitive (sha256, NUL separators, lowercase hex) is
 // reused so /v1/replay handles both shapes uniformly.
-func computePageIndexTraceToken(docID tree.DocumentID, model string, ranges []pageRange) string {
+func computeTreeWalkTraceToken(docID tree.DocumentID, model string, ranges []pageRange) string {
 	strs := make([]string, len(ranges))
 	for i, r := range ranges {
 		strs[i] = r.String()
@@ -1058,23 +1058,23 @@ func computePageIndexTraceToken(docID tree.DocumentID, model string, ranges []pa
 	// rather than section IDs. We feed them through the existing
 	// ComputeTraceToken helper for shape consistency — its
 	// sort-then-hash semantics happens to be exactly what we want
-	// here too. The strategy's stable identifier ("pageindex") is
+	// here too. The strategy's stable identifier ("treewalk") is
 	// folded into the "model" position so a page-based run and a
 	// section-based run on the same doc/model don't collide.
 	tagged := make([]tree.SectionID, len(strs))
 	for i, s := range strs {
 		tagged[i] = tree.SectionID("p:" + s)
 	}
-	return ComputeTraceToken(docID, traceDocVersionV1+"-pages", strategyNamePageIndex+":"+model, tagged)
+	return ComputeTraceToken(docID, traceDocVersionV1+"-pages", strategyNameTreeWalk+":"+model, tagged)
 }
 
 // --- action protocol ---
 
-// PageIndexAction is the LLM-chosen next step in the loop. The model
+// TreeWalkAction is the LLM-chosen next step in the loop. The model
 // emits one of these per turn as a JSON object on the
 // 'tool' tag. The Action field is uppercase-tolerant on input;
-// ParsePageIndexAction lowercases before dispatch.
-type PageIndexAction struct {
+// ParseTreeWalkAction lowercases before dispatch.
+type TreeWalkAction struct {
 	// Action is the dispatch tag (alias: tool). One of:
 	// get_document_structure, get_pages, done.
 	Action string `json:"tool"`
@@ -1091,7 +1091,7 @@ type PageIndexAction struct {
 	EndPage   int `json:"end_page,omitempty"`
 
 	// Pages is an alternate shape some models reach for: a
-	// "5-7"-style string. ParsePageIndexAction splits it into
+	// "5-7"-style string. ParseTreeWalkAction splits it into
 	// StartPage/EndPage when present.
 	Pages string `json:"pages,omitempty"`
 
@@ -1127,7 +1127,7 @@ type PageIndexAction struct {
 	Reasoning string `json:"reasoning,omitempty"`
 }
 
-// Action tag constants. Mirrors PageIndex's reference SDK tool
+// Action tag constants. Mirrors TreeWalk's reference SDK tool
 // names so prompt-engineering work over there translates over.
 const (
 	pageActionStructure = "get_document_structure"
@@ -1135,13 +1135,13 @@ const (
 	pageActionDone      = "done"
 )
 
-// pageIndexParseRetryPrompt nudges the model back onto the
+// treeWalkParseRetryPrompt nudges the model back onto the
 // JSON-action protocol after a parse failure. Aligned with
 // AgenticStrategy's retry path — same wording so behaviour stays
 // consistent.
-const pageIndexParseRetryPrompt = "Your last reply was not a valid JSON tool call. Reply with EXACTLY one JSON object: {\"tool\":\"get_document_structure|get_pages|done\", ...}. No prose, no markdown fences."
+const treeWalkParseRetryPrompt = "Your last reply was not a valid JSON tool call. Reply with EXACTLY one JSON object: {\"tool\":\"get_document_structure|get_pages|done\", ...}. No prose, no markdown fences."
 
-// ParsePageIndexAction is the tolerant JSON decoder for the
+// ParseTreeWalkAction is the tolerant JSON decoder for the
 // page-based protocol. Behaviour mirrors ParseAction (the older
 // agentic protocol's parser): strip code fences, peel prose
 // wrappers, isolate the first balanced JSON object, and
@@ -1153,10 +1153,10 @@ const pageIndexParseRetryPrompt = "Your last reply was not a valid JSON tool cal
 //     start_page/end_page.
 //   - cited_pages can be either [[5,7],[10,10]] (preferred) or
 //     ["5-7","10"] (tolerated).
-func ParsePageIndexAction(raw string) (PageIndexAction, error) {
+func ParseTreeWalkAction(raw string) (TreeWalkAction, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return PageIndexAction{}, fmt.Errorf("empty response")
+		return TreeWalkAction{}, fmt.Errorf("empty response")
 	}
 	if strings.HasPrefix(raw, "```") {
 		if i := strings.Index(raw, "\n"); i >= 0 {
@@ -1182,10 +1182,10 @@ func ParsePageIndexAction(raw string) (PageIndexAction, error) {
 	// invalidate the rest of the JSON.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
-		return PageIndexAction{}, fmt.Errorf("decode pageindex action: %w", err)
+		return TreeWalkAction{}, fmt.Errorf("decode treewalk action: %w", err)
 	}
 
-	var a PageIndexAction
+	var a TreeWalkAction
 	if v, ok := fields["tool"]; ok {
 		_ = json.Unmarshal(v, &a.Action)
 	}
@@ -1196,7 +1196,7 @@ func ParsePageIndexAction(raw string) (PageIndexAction, error) {
 	}
 	a.Action = strings.ToLower(strings.TrimSpace(a.Action))
 	if a.Action == "" {
-		return PageIndexAction{}, fmt.Errorf("missing 'tool' or 'action' field")
+		return TreeWalkAction{}, fmt.Errorf("missing 'tool' or 'action' field")
 	}
 
 	if v, ok := fields["start_page"]; ok {
@@ -1382,9 +1382,9 @@ func wrapPageObservation(tool, body string) string {
 
 // --- system prompt ---
 
-// pageIndexSystemPrompt instructs the model on the navigation loop.
-// The wording is a faithful port of the reference PageIndex demo's
-// AGENT_SYSTEM_PROMPT (see PageIndex/examples/agentic_vectorless_rag_demo.py:44-52),
+// treeWalkSystemPrompt instructs the model on the navigation loop.
+// The wording is a faithful port of the reference TreeWalk demo's
+// AGENT_SYSTEM_PROMPT (see TreeWalk/examples/agentic_vectorless_rag_demo.py:44-52),
 // adapted to the JSON-action protocol vle uses in lieu of native
 // llmgate tool calling.
 //
@@ -1396,7 +1396,7 @@ func wrapPageObservation(tool, body string) string {
 //   - End with a done action carrying answer + cited_pages + confidence.
 //
 // CITATION DISCIPLINE is the load-bearing addition over the reference
-// PageIndex prompt. FinanceBench measurements show two opposite failure
+// TreeWalk prompt. FinanceBench measurements show two opposite failure
 // modes: (1) when unsure the model sprays ~5 hedged ranges and misses on
 // all of them; (2) over-correcting to "always exactly ONE" makes it drop a
 // genuinely-needed second range and commit to the wrong single pick. The
@@ -1405,7 +1405,7 @@ func wrapPageObservation(tool, body string) string {
 // location — and bans hedging (padding with low-relevance maybes) rather
 // than banning multi-citation per se. Confidence is reported separately so
 // a low-confidence answer is still a committed set, not a spray.
-const pageIndexSystemPrompt = `You are a document QA assistant navigating a paginated document.
+const treeWalkSystemPrompt = `You are a document QA assistant navigating a paginated document.
 
 TOOL USE PROTOCOL:
 - Reply with EXACTLY one JSON object per turn. No prose, no markdown fences.
@@ -1427,13 +1427,13 @@ RULES:
 - Be concise. Single-paragraph answers when possible.
 - If nothing in the document answers the query, emit done with answer="The document does not address this query.", an empty cited_pages array, and confidence 0.`
 
-// pageIndexActionHelp is the one-shot reminder appended to the
+// treeWalkActionHelp is the one-shot reminder appended to the
 // initial user prompt so the model gets concrete examples without us
 // needing to maintain a separate few-shot block. Both the one-range
 // (common) and two-range (answer spans separate locations) done forms are
 // modelled so the example doesn't bias the model toward one when two are
 // genuinely needed.
-const pageIndexActionHelp = `- {"tool":"get_document_structure","reasoning":"orient by titles"} — fetch the TOC tree (titles + page ranges, no body text)
+const treeWalkActionHelp = `- {"tool":"get_document_structure","reasoning":"orient by titles"} — fetch the TOC tree (titles + page ranges, no body text)
 - {"tool":"get_pages","start_page":5,"end_page":7,"reasoning":"section on debt"} — fetch text covering pages 5-7
 - {"tool":"done","answer":"...","cited_pages":[[5,7]],"confidence":0.9,"reasoning":"grounded on one range"} — final answer when a single range suffices (the common case)
 - {"tool":"done","answer":"...","cited_pages":[[12,12],[31,31]],"confidence":0.8,"reasoning":"value on p12, scoping note on p31"} — final answer when it genuinely draws on two separate locations

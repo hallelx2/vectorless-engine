@@ -187,8 +187,8 @@ func TestMinimalModeZeroLLMCalls(t *testing.T) {
 //     must return the persisted text.
 //
 // It reconstructs the tree from exactly what runMinimal persisted, so it
-// exercises the real post-ingest shape. The end-to-end PageIndexStrategy
-// loop is covered in pkg/retrieval (TestPageIndexMinimalIngestedDoc).
+// exercises the real post-ingest shape. The end-to-end TreeWalkStrategy
+// loop is covered in pkg/retrieval (TestTreeWalkMinimalIngestedDoc).
 func TestMinimalModeReadyIsQueryable(t *testing.T) {
 	t.Parallel()
 

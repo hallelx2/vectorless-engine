@@ -91,7 +91,7 @@ type Result struct {
 	TraceToken string `json:"trace_token,omitempty"`
 
 	// PagesRead records the page ranges the strategy actually fetched
-	// during navigation. Page-based strategies (e.g. pageindex)
+	// during navigation. Page-based strategies (e.g. treewalk)
 	// populate this; section-by-section strategies leave it nil.
 	// Useful for the API layer's reasoning-trace surfaces and for
 	// cost/coverage debugging: a 10-K answer that read pages 50-55 +

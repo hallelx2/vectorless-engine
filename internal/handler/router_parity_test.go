@@ -10,8 +10,8 @@ import (
 // TestRouterParity is a divergence guard. The deployed cmd/server
 // binary and the standalone cmd/engine binary serve overlapping route
 // sets from two different routers (internal/handler vs internal/api).
-// They have silently diverged before — the PageIndex redesign landed
-// only on cmd/engine, leaving /v1/answer and /v1/answer/pageindex
+// They have silently diverged before — the TreeWalk redesign landed
+// only on cmd/engine, leaving /v1/answer and /v1/answer/treewalk
 // unreachable in production.
 //
 // This test walks the mounted chi router and asserts that the routes
@@ -46,7 +46,7 @@ func TestRouterParity(t *testing.T) {
 	want := []string{
 		"POST /v1/query/",
 		"POST /v1/answer",
-		"POST /v1/answer/pageindex",
+		"POST /v1/answer/treewalk",
 	}
 	for _, route := range want {
 		if !got[route] {
@@ -56,7 +56,7 @@ func TestRouterParity(t *testing.T) {
 }
 
 // TestRouterMountsAnswerEndpoints is the focused assertion the task
-// calls out explicitly: /v1/answer and /v1/answer/pageindex must be
+// calls out explicitly: /v1/answer and /v1/answer/treewalk must be
 // mounted on the deployed router. Kept separate from the broad parity
 // set so a failure points straight at the answer-endpoint regression.
 func TestRouterMountsAnswerEndpoints(t *testing.T) {
@@ -73,7 +73,7 @@ func TestRouterMountsAnswerEndpoints(t *testing.T) {
 		return nil
 	})
 
-	for _, route := range []string{"/v1/answer", "/v1/answer/pageindex"} {
+	for _, route := range []string{"/v1/answer", "/v1/answer/treewalk"} {
 		if !found[route] {
 			t.Errorf("deployed router must mount %q but does not", route)
 		}
