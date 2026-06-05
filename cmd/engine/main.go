@@ -222,23 +222,23 @@ func run() error {
 	}
 
 	deps := api.Deps{
-		Logger:            logger,
-		DB:                pool,
-		Storage:           store,
-		Queue:             q,
-		Strategy:          strategy,
-		Version:           version,
-		MultiDoc:          multiDoc,
-		LLM:               llmClient,
-		LLMModel:          modelFor(cfg.LLM),
-		AnswerSpan:        cfg.Retrieval.AnswerSpan,
-		Answer:            cfg.Retrieval.Answer,
-		Planner:           planner,
-		Planning:          cfg.Retrieval.Planning,
-		ReRanker:          reRanker,
-		ReRank:            cfg.Retrieval.ReRank,
-		Replay:            replayStore,
-		Abstain:           cfg.Retrieval.Abstain,
+		Logger:           logger,
+		DB:               pool,
+		Storage:          store,
+		Queue:            q,
+		Strategy:         strategy,
+		Version:          version,
+		MultiDoc:         multiDoc,
+		LLM:              llmClient,
+		LLMModel:         modelFor(cfg.LLM),
+		AnswerSpan:       cfg.Retrieval.AnswerSpan,
+		Answer:           cfg.Retrieval.Answer,
+		Planner:          planner,
+		Planning:         cfg.Retrieval.Planning,
+		ReRanker:         reRanker,
+		ReRank:           cfg.Retrieval.ReRank,
+		Replay:           replayStore,
+		Abstain:          cfg.Retrieval.Abstain,
 		TreeWalkStrategy: treeWalkStrategy,
 		TreeWalk:         cfg.Retrieval.TreeWalk,
 	}
@@ -395,6 +395,8 @@ func buildStrategy(c config.RetrievalConfig, client llmgate.Client, store storag
 		return a
 	case "treewalk":
 		return buildTreeWalkStrategy(c, client, store)
+	case "auto":
+		return retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store))
 	default:
 		return retrieval.NewChunkedTree(client)
 	}

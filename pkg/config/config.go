@@ -417,7 +417,7 @@ type RetrievalConfig struct {
 	ReRank      ReRankBlock      `yaml:"rerank"`
 	Replay      ReplayBlock      `yaml:"replay"`
 	Abstain     AbstainBlock     `yaml:"abstain"`
-	TreeWalk   TreeWalkBlock   `yaml:"treewalk"`
+	TreeWalk    TreeWalkBlock    `yaml:"treewalk"`
 }
 
 // TreeWalkBlock configures the TreeWalk page-based agentic
@@ -707,7 +707,7 @@ func Default() Config {
 		},
 		LLM: LLMConfig{Driver: "anthropic"},
 		Retrieval: RetrievalConfig{
-			Strategy: "chunked-tree",
+			Strategy: "auto",
 			ChunkedTree: ChunkedTreeBlock{
 				MaxTokensPerCall:         60000,
 				MaxParallelCalls:         8,
@@ -1207,7 +1207,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Retrieval.Strategy {
-	case "single-pass", "chunked-tree", "agentic", "treewalk":
+	case "auto", "single-pass", "chunked-tree", "agentic", "treewalk":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
 	}

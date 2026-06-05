@@ -25,8 +25,8 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.LLM.Driver != "anthropic" {
 		t.Errorf("llm.driver = %q, want anthropic", cfg.LLM.Driver)
 	}
-	if cfg.Retrieval.Strategy != "chunked-tree" {
-		t.Errorf("retrieval.strategy = %q, want chunked-tree", cfg.Retrieval.Strategy)
+	if cfg.Retrieval.Strategy != "auto" {
+		t.Errorf("retrieval.strategy = %q, want auto", cfg.Retrieval.Strategy)
 	}
 	if !cfg.Retrieval.Cache.Enabled {
 		t.Error("retrieval.cache.enabled should be true by default")

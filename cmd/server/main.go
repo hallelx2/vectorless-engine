@@ -250,20 +250,20 @@ func run() error {
 	// Only start the HTTP server in "server" role.
 	if *role == "server" {
 		deps := handler.Deps{
-			Logger:            logger,
-			DB:                pool,
-			Storage:           store,
-			Queue:             q,
-			Strategy:          strategy,
-			MultiDoc:          multiDoc,
-			Version:           version,
-			Config:            cfg,
-			Strategies:        strategies,
-			LLM:               llmClient,
-			LLMModel:          modelFor(cfg.Engine.LLM),
-			AnswerSpan:        cfg.Engine.Retrieval.AnswerSpan,
-			Answer:            cfg.Engine.Retrieval.Answer,
-			Replay:            replayStore,
+			Logger:           logger,
+			DB:               pool,
+			Storage:          store,
+			Queue:            q,
+			Strategy:         strategy,
+			MultiDoc:         multiDoc,
+			Version:          version,
+			Config:           cfg,
+			Strategies:       strategies,
+			LLM:              llmClient,
+			LLMModel:         modelFor(cfg.Engine.LLM),
+			AnswerSpan:       cfg.Engine.Retrieval.AnswerSpan,
+			Answer:           cfg.Engine.Retrieval.Answer,
+			Replay:           replayStore,
 			TreeWalkStrategy: treeWalkStrategy,
 			TreeWalk:         cfg.Engine.Retrieval.TreeWalk,
 		}
@@ -441,6 +441,8 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 		return a
 	case "treewalk":
 		return buildTreeWalkStrategy(c, client, store, pool)
+	case "auto":
+		return retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool))
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
@@ -468,7 +470,8 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, store 
 		"single-pass":  retrieval.NewSinglePass(client),
 		"chunked-tree": retrieval.NewChunkedTree(client),
 		"agentic":      agentic,
-		"treewalk":    buildTreeWalkStrategy(c, client, store, pool),
+		"treewalk":     buildTreeWalkStrategy(c, client, store, pool),
+		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
 }
 
