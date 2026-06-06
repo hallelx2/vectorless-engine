@@ -3,7 +3,6 @@ package middleware
 import (
 	"net/http"
 	"strconv"
-	"strings"
 )
 
 // CORSConfig controls Cross-Origin Resource Sharing behaviour.
@@ -89,12 +88,3 @@ func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
 // patterns in the allowed list. It supports exact matches only; for
 // wildcard sub-domain patterns extend this function.
 //
-//nolint:unused,staticcheck // CORS matcher (staged for wildcard-origin support)
-func originMatches(origin string, patterns []string) bool {
-	for _, p := range patterns {
-		if strings.EqualFold(origin, p) {
-			return true
-		}
-	}
-	return false
-}

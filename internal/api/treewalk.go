@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -479,35 +477,6 @@ func eventToTraceMap(ev retrieval.TreeWalkEvent) map[string]any {
 // kept here rather than exported from the retrieval package so
 // the API layer owns its own input wiring.
 //
-//nolint:unused,staticcheck // trace-token verification helper (staged for response-integrity checks)
-func treeWalkTraceTokenFromCitations(docID tree.DocumentID, model string, ranges [][2]int) string {
-	strs := make([]string, 0, len(ranges))
-	for _, r := range ranges {
-		if r[0] == r[1] {
-			strs = append(strs, fmt.Sprintf("%d", r[0]))
-		} else {
-			strs = append(strs, fmt.Sprintf("%d-%d", r[0], r[1]))
-		}
-	}
-	sort.Strings(strs)
-	h := sha256.New()
-	h.Write([]byte(string(docID)))
-	h.Write([]byte{0})
-	h.Write([]byte("1-pages"))
-	h.Write([]byte{0})
-	h.Write([]byte("treewalk:" + model))
-	h.Write([]byte{0})
-	h.Write([]byte(retrieval.SystemPromptVersion))
-	for i, s := range strs {
-		if i == 0 {
-			h.Write([]byte{0})
-		} else {
-			h.Write([]byte{0})
-		}
-		h.Write([]byte("p:" + s))
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
 
 // Compile-time guard: the TreeWalk strategy must satisfy
 // retrieval.CostStrategy so SelectWithCost works without a

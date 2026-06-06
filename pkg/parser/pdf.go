@@ -1447,16 +1447,6 @@ func hasRepeatedAdjacentChars(s string) bool {
 // ledongthuc/pdf indicates the document is encrypted. The library
 // has no proper error type for this, so we match on the message.
 //
-//nolint:unused,staticcheck // encrypted-PDF detector (staged for OCR/encrypted support, HAL-112)
-func isEncryptedPDFError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "encryption key") ||
-		strings.Contains(msg, "encrypted") ||
-		strings.Contains(msg, "/encrypt")
-}
 
 // decryptPDFWithEmptyPassword strips the encryption dict from a PDF
 // using pdfcpu, assuming an empty user password (the common case for
@@ -1620,7 +1610,12 @@ func safeExtractTables(page pdftable.Page, settings pdftable.TableSettings, page
 				done <- result{}
 			}
 		}()
+		// pdftable mutates package-level state during table extraction too,
+		// not just OpenBytes — serialize it on the same mutex. Stopgap until
+		// pdftable is made concurrency-safe (HAL-118).
+		pdftableOpenMu.Lock()
 		t, err := page.ExtractTables(settings)
+		pdftableOpenMu.Unlock()
 		done <- result{tables: t, err: err}
 	}()
 

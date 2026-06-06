@@ -300,10 +300,6 @@ func completeWithTimeout(ctx context.Context, client llmgate.Client, req llmgate
 // would only multiply the wall-time cost (N retries × the timeout) without
 // changing the outcome, so a timeout is terminal, not retryable.
 //
-//nolint:unused,staticcheck // timeout classifier (staged for retry decisions, HAL-73)
-func isTimeout(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
-}
 
 // acquireGlobalLLM blocks until a global-LLM-concurrency slot is free,
 // or returns false if ctx is canceled first. Returns a release func the
