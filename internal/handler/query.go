@@ -76,8 +76,8 @@ type queryRequest struct {
 	MaxParallelCalls  int             `json:"max_parallel_calls"`
 	MaxSections       int             `json:"max_sections"`
 	// Strategy optionally overrides the configured retrieval strategy
-	// for THIS request only. One of: chunked-tree, treewalk, agentic,
-	// single-pass. Empty uses the server default. This lets a caller
+	// for THIS request only. One of: auto, single-pass, chunked-tree,
+	// agentic, treewalk. Empty uses the server default. This lets a caller
 	// (e.g. the benchmark harness) A/B strategies against the same
 	// running engine without a redeploy. Unknown values return 400.
 	Strategy string `json:"strategy"`

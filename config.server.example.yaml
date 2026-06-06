@@ -105,7 +105,7 @@ engine:
     #            filing.
     #   minimal  parse -> persist -> ready. Skips every LLM enrichment
     #            stage AND table extraction — queryable in seconds. The
-    #            page-based strategy (/v1/answer/pageindex) works on it
+    #            page-based strategy (/v1/answer/treewalk) works on it
     #            unchanged (synthesised TOC + raw page reads).
     # Flip the live service without a secret edit: VLS_INGEST_MODE=minimal.
     mode: "full"

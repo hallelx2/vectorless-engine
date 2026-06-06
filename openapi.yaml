@@ -279,11 +279,11 @@ paths:
         "501":
           description: Endpoint not available — no LLM client configured
 
-  /v1/answer/pageindex:
+  /v1/answer/treewalk:
     post:
       tags: [Query]
-      summary: PageIndex-style page-based agentic answer
-      operationId: answerPageIndex
+      summary: TreeWalk-style page-based agentic answer
+      operationId: answerTreeWalk
       description: |
         Quote-grounded answer endpoint backed by the page-based
         agentic strategy. The model navigates the document via a
@@ -333,7 +333,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PageIndexAnswerRequest"
+              $ref: "#/components/schemas/TreeWalkAnswerRequest"
       responses:
         "200":
           description: |
@@ -344,7 +344,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PageIndexAnswerResponse"
+                $ref: "#/components/schemas/TreeWalkAnswerResponse"
             text/event-stream:
               schema:
                 type: string
@@ -353,7 +353,7 @@ paths:
                   order: `started`, one event per tool call
                   (`get_document_structure`, `get_pages`,
                   `done`), and finally `answer` carrying the
-                  full PageIndexAnswerResponse payload. On
+                  full TreeWalkAnswerResponse payload. On
                   error a single `error` event is emitted.
         "400":
           description: Missing or invalid request body.
@@ -363,8 +363,8 @@ paths:
           description: |
             Endpoint not available. Either the server has no LLM
             client configured, or
-            `retrieval.pageindex.enabled=false`, or the
-            PageIndexStrategy instance was not wired at boot.
+            `retrieval.treewalk.enabled=false`, or the
+            TreeWalkStrategy instance was not wired at boot.
 
   /v1/replay:
     post:
@@ -665,7 +665,7 @@ components:
           type: string
         strategy:
           type: string
-          enum: [single-pass, chunked-tree, agentic, pageindex]
+          enum: [single-pass, chunked-tree, agentic, treewalk]
         model:
           type: string
         sections:
@@ -1035,10 +1035,10 @@ components:
             re-rank ran. Higher means the section is more directly
             relevant to the query.
 
-    PageIndexAnswerRequest:
+    TreeWalkAnswerRequest:
       type: object
       description: |
-        Body for POST /v1/answer/pageindex. The endpoint exposes
+        Body for POST /v1/answer/treewalk. The endpoint exposes
         per-request overrides for the page-based loop's caps
         (max_hops, max_pages_per_fetch) alongside the standard
         document_id / query / model fields.
@@ -1053,14 +1053,14 @@ components:
           type: string
           description: |
             Override the LLM model used by the navigation loop.
-            Falls back to `retrieval.pageindex.model`, then to the
+            Falls back to `retrieval.treewalk.model`, then to the
             engine's default model.
         max_hops:
           type: integer
           description: |
             Cap on the number of LLM turns the loop consumes,
             counting the terminal `done` turn. Overrides
-            `retrieval.pageindex.max_hops` for this request only.
+            `retrieval.treewalk.max_hops` for this request only.
             Default at the server level is 8.
         max_pages_per_fetch:
           type: integer
@@ -1068,7 +1068,7 @@ components:
             Cap on the characters one `get_pages` tool call may
             return. Keeps a stray full-document fetch from
             torching the model's context window. Overrides
-            `retrieval.pageindex.page_content_limit`. Default
+            `retrieval.treewalk.page_content_limit`. Default
             16000.
         stream:
           type: boolean
@@ -1076,7 +1076,7 @@ components:
             When true, the response is Server-Sent Events: one
             event per tool call (get_document_structure /
             get_pages / done) followed by a terminal `answer`
-            event carrying the full PageIndexAnswerResponse
+            event carrying the full TreeWalkAnswerResponse
             payload. Lets the caller WATCH the agent navigate
             in real time rather than waiting for the final
             answer.
@@ -1089,7 +1089,7 @@ components:
             result-chars metadata). Equivalent to the
             `?reasoning=true` query parameter.
 
-    PageIndexAnswerResponse:
+    TreeWalkAnswerResponse:
       type: object
       description: |
         Non-streaming response shape. The `answer` field carries
@@ -1112,10 +1112,10 @@ components:
         citations:
           type: array
           items:
-            $ref: "#/components/schemas/PageIndexCitation"
+            $ref: "#/components/schemas/TreeWalkCitation"
         strategy:
           type: string
-          enum: [pageindex]
+          enum: [treewalk]
         model:
           type: string
         confidence:
@@ -1151,7 +1151,7 @@ components:
           type: string
           description: |
             Deterministic 64-char hex sha256 token over the
-            document, system-prompt version, "pageindex:" model
+            document, system-prompt version, "treewalk:" model
             tag, and sorted cited page ranges (e.g. ["1-2","5-7"]).
             Two runs that cite the same pages — even via
             different navigation paths — collapse to the same
@@ -1170,13 +1170,13 @@ components:
         reasoning_trace:
           type: array
           items:
-            $ref: "#/components/schemas/PageIndexTraceEntry"
+            $ref: "#/components/schemas/TreeWalkTraceEntry"
           description: |
             Per-hop tool calls + arg summaries. Present only
             when the request opted in via `reasoning:true` or
             `?reasoning=true`.
 
-    PageIndexCitation:
+    TreeWalkCitation:
       type: object
       description: |
         One citation behind the agent's answer. The pages
@@ -1239,7 +1239,7 @@ components:
             clipping at `page_content_limit`. Bytes-on-the-wire,
             not bytes-requested.
 
-    PageIndexTraceEntry:
+    TreeWalkTraceEntry:
       type: object
       description: |
         One tool call in the navigation timeline. Lets a

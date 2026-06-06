@@ -50,6 +50,18 @@ func (a *AutoStrategy) Name() string { return "auto" }
 // returns nil as long as both Small and Large are set; if a chosen branch
 // is nil it falls back to the other so a half-configured Auto still runs.
 func (a *AutoStrategy) pick(t *tree.Tree, budget ContextBudget) Strategy {
+	// TreeWalk (the Large branch) navigates by PAGE RANGE, so it only works
+	// when the document carries real page metadata. Non-paged formats
+	// (Markdown / HTML / DOCX / TXT) leave every PageStart/PageEnd at 0, so
+	// routing them to TreeWalk produces a page-navigation loop over a document
+	// with no pages. Force the Small (outline-based) branch in that case.
+	if !hasPageMetadata(t) {
+		if a.Small != nil {
+			return a.Small
+		}
+		return a.Large
+	}
+
 	threshold := a.SinglePassMaxTokens
 	if threshold <= 0 {
 		threshold = budget.Available()
@@ -69,7 +81,13 @@ func (a *AutoStrategy) pick(t *tree.Tree, budget ContextBudget) Strategy {
 
 // Select implements Strategy.
 func (a *AutoStrategy) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
-	return a.pick(t, budget).Select(ctx, t, query, budget)
+	s := a.pick(t, budget)
+	if s == nil {
+		// Misconfigured Auto (both Small and Large nil): an empty selection
+		// is safer than a nil-pointer panic.
+		return nil, nil
+	}
+	return s.Select(ctx, t, query, budget)
 }
 
 // SelectWithCost implements CostStrategy. It delegates to the chosen
@@ -77,6 +95,9 @@ func (a *AutoStrategy) Select(ctx context.Context, t *tree.Tree, query string, b
 // through, and falls back to Select otherwise.
 func (a *AutoStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	s := a.pick(t, budget)
+	if s == nil {
+		return &Result{}, nil
+	}
 	if cs, ok := s.(CostStrategy); ok {
 		return cs.SelectWithCost(ctx, t, query, budget)
 	}
@@ -102,4 +123,20 @@ func sumLeafTokens(t *tree.Tree) int {
 		}
 	}
 	return total
+}
+
+// hasPageMetadata reports whether any section in the tree carries a non-zero
+// page range. TreeWalk navigation is only meaningful for paged documents;
+// non-paged formats (Markdown / HTML / DOCX / TXT) leave PageStart/PageEnd at
+// 0, so Auto must not route them to TreeWalk.
+func hasPageMetadata(t *tree.Tree) bool {
+	if t == nil {
+		return false
+	}
+	for _, sv := range t.BuildView().Sections {
+		if sv.PageStart > 0 || sv.PageEnd > 0 {
+			return true
+		}
+	}
+	return false
 }

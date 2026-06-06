@@ -652,7 +652,7 @@ func TestValidateLLMDrivers(t *testing.T) {
 
 func TestValidateRetrievalStrategy(t *testing.T) {
 	t.Parallel()
-	for _, s := range []string{"single-pass", "chunked-tree", "agentic", "treewalk"} {
+	for _, s := range []string{"auto", "single-pass", "chunked-tree", "agentic", "treewalk"} {
 		cfg := Default()
 		cfg.Database.URL = "postgres://localhost/test"
 		cfg.Retrieval.Strategy = s
