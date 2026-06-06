@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hallelx2/pdftable"
@@ -250,6 +251,22 @@ func runParseWithDeadline(ctx context.Context, timeout time.Duration, work func(
 	}
 }
 
+// pdftableOpenMu serializes pdftable.OpenBytes. pdftable mutates package-level
+// state while opening a document and is not safe for concurrent callers — the
+// race detector flags concurrent OpenBytes calls, and this is real in
+// production because ingest workers parse documents in parallel. Serializing
+// just the open (the only racing call) keeps correctness at a small cost.
+// Stopgap: the proper fix is to make pdftable itself concurrency-safe
+// (tracked in the Foundational Libraries project).
+var pdftableOpenMu sync.Mutex
+
+// openPDFBytes is the concurrency-safe wrapper around pdftable.OpenBytes.
+func openPDFBytes(b []byte) (pdftable.Document, error) {
+	pdftableOpenMu.Lock()
+	defer pdftableOpenMu.Unlock()
+	return pdftable.OpenBytes(b)
+}
+
 // parseDoc is the real parse implementation. It is bounded by Parse's
 // deadline wrapper; on its own it has no time bound beyond the per-stage
 // table-extraction budgets.
@@ -274,7 +291,7 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 	// (empty password) and retry — this is the path that lets us index
 	// "owner-password" PDFs whose only restriction is print/copy.
 	docBytes := buf
-	pdoc, err := pdftable.OpenBytes(docBytes)
+	pdoc, err := openPDFBytes(docBytes)
 	if err != nil {
 		if isPdftableEncryptedErr(err) {
 			cleaned, decErr := decryptPDFWithEmptyPassword(buf)
@@ -282,7 +299,7 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 				return nil, fmt.Errorf("pdf: open: encrypted and could not be unlocked with empty password: %w", decErr)
 			}
 			docBytes = cleaned
-			pdoc, err = pdftable.OpenBytes(docBytes)
+			pdoc, err = openPDFBytes(docBytes)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("pdf: open: %w", err)
@@ -1430,7 +1447,7 @@ func hasRepeatedAdjacentChars(s string) bool {
 // ledongthuc/pdf indicates the document is encrypted. The library
 // has no proper error type for this, so we match on the message.
 //
-//lint:ignore U1000 encrypted-PDF detector (staged for OCR/encrypted support, HAL-112)
+//nolint:unused,staticcheck // encrypted-PDF detector (staged for OCR/encrypted support, HAL-112)
 func isEncryptedPDFError(err error) bool {
 	if err == nil {
 		return false

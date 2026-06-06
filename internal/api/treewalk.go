@@ -479,7 +479,7 @@ func eventToTraceMap(ev retrieval.TreeWalkEvent) map[string]any {
 // kept here rather than exported from the retrieval package so
 // the API layer owns its own input wiring.
 //
-//lint:ignore U1000 trace-token verification helper (staged for response-integrity checks)
+//nolint:unused,staticcheck // trace-token verification helper (staged for response-integrity checks)
 func treeWalkTraceTokenFromCitations(docID tree.DocumentID, model string, ranges [][2]int) string {
 	strs := make([]string, 0, len(ranges))
 	for _, r := range ranges {
