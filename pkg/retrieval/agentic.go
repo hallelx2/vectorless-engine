@@ -36,7 +36,7 @@ type ContentFetcher interface {
 // trees that don't fit in any single context window, with reading
 // behaviour that adapts to each query.
 //
-// Protocol choice
+// # Protocol choice
 //
 // The strategy uses a JSON-action text protocol rather than llmgate's
 // Tools field. The provider adapters in llmgate v0.2.0 declare

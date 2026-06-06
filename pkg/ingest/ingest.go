@@ -88,7 +88,7 @@ type Pipeline struct {
 	// pass. Anything else (including the empty Go zero value used by
 	// Pipeline literals in tests) runs the full enrichment pipeline.
 	//
-	// The page-based retrieval strategy (/v1/answer/pageindex) needs none
+	// The page-based retrieval strategy (/v1/answer/treewalk) needs none
 	// of the skipped enrichment — it navigates a synthesised-from-sections
 	// TOC and reads raw section/page text at query time — so a
 	// minimal-ingested document is immediately queryable through it.
@@ -299,9 +299,7 @@ func completeWithTimeout(ctx context.Context, client llmgate.Client, req llmgate
 // stop retrying immediately on a timeout: re-issuing a call that just hung
 // would only multiply the wall-time cost (N retries × the timeout) without
 // changing the outcome, so a timeout is terminal, not retryable.
-func isTimeout(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
-}
+//
 
 // acquireGlobalLLM blocks until a global-LLM-concurrency slot is free,
 // or returns false if ctx is canceled first. Returns a release func the
@@ -389,7 +387,7 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	}
 	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
 
-	// LLM-built TOC tree (PageIndex-style). PDF-only because it
+	// LLM-built TOC tree (TreeWalk-style). PDF-only because it
 	// relies on the parser's PageStart/PageEnd attribution to
 	// reconstruct per-page text. Non-fatal: a builder failure
 	// leaves documents.toc_tree NULL and the document remains
@@ -546,7 +544,7 @@ func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Paylo
 	if err != nil {
 		return nil, fmt.Errorf("fetch source: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
 }
 
@@ -836,7 +834,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 		if err != nil {
 			return nil, err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }() // best-effort close
 		raw, err := io.ReadAll(io.LimitReader(rc, int64(p.SummaryMaxChars)))
 		if err != nil {
 			return nil, err

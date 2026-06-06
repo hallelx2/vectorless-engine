@@ -64,7 +64,7 @@ func TestRiverIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new river: %v", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	done := make(chan Job, 1)
 	q.Register(KindIngestDocument, func(_ context.Context, j Job) error {

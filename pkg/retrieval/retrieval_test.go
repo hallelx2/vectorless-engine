@@ -536,7 +536,7 @@ func TestSinglePassStampsTraceToken(t *testing.T) {
 		t.Fatalf("trace_token must be 64 chars, got %d (%q)", len(res.TraceToken), res.TraceToken)
 	}
 	for _, r := range res.TraceToken {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			t.Fatalf("trace_token must be lowercase hex, got %q", res.TraceToken)
 		}
 	}

@@ -54,13 +54,13 @@ type costStrategyAdapter struct {
 }
 
 func (c *costStrategyAdapter) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget retrieval.ContextBudget) (*retrieval.Result, error) {
-	ids, err := c.scriptedStrategy.Select(ctx, t, query, budget)
+	ids, err := c.Select(ctx, t, query, budget)
 	if err != nil {
 		return nil, err
 	}
 	return &retrieval.Result{
 		SelectedIDs: ids,
-		Usage:       c.scriptedStrategy.usage,
+		Usage:       c.usage,
 	}, nil
 }
 
@@ -161,9 +161,9 @@ func TestDecomposerPerSubQuestionDispatch(t *testing.T) {
 	tr := buildTree()
 	s := &scriptedStrategy{
 		picks: map[string][]tree.SectionID{
-			"What is the setup?":  {"sec_a"},
-			"What is the usage?":  {"sec_b"},
-			"What's in the FAQ?":  {"sec_c"},
+			"What is the setup?": {"sec_a"},
+			"What is the usage?": {"sec_b"},
+			"What's in the FAQ?": {"sec_c"},
 		},
 		usage: retrieval.Usage{InputTokens: 10, OutputTokens: 4, TotalTokens: 14, LLMCalls: 1, CostUSD: 0.001},
 	}

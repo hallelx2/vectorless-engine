@@ -137,7 +137,7 @@ func (q *QStash) Enqueue(ctx context.Context, j Job) error {
 	if err != nil {
 		return fmt.Errorf("qstash publish: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("qstash publish: status=%d body=%s", resp.StatusCode, string(b))

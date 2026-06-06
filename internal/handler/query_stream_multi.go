@@ -127,7 +127,7 @@ func (h *QueryStreamMultiHandler) HandleQueryStreamMulti(w http.ResponseWriter, 
 		}
 
 		data, _ := json.Marshal(sse)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data) // best-effort stream write
 		if canFlush {
 			flusher.Flush()
 		}

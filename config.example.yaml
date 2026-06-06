@@ -95,7 +95,7 @@ llm:
     reasoning_model: "gemini-2.5-pro"
 
 retrieval:
-  # strategy: single-pass | chunked-tree | agentic | pageindex
+  # strategy: single-pass | chunked-tree | agentic | treewalk
   #
   #   single-pass:  whole tree in one LLM call; fastest, smallest docs.
   #   chunked-tree: split the tree, reason over slices in parallel, merge.
@@ -103,7 +103,7 @@ retrieval:
   #                 context for parallelism.
   #   agentic:      iterative outline → expand → read → done loop.
   #                 Picks per-section IDs via a tool-using model.
-  #   pageindex:    PageIndex-style page-based agentic loop. Three
+  #   treewalk:    TreeWalk-style page-based agentic loop. Three
   #                 tools (get_document_structure / get_pages / done);
   #                 the model navigates by INCLUSIVE PAGE RANGE
   #                 rather than by section ID. Best for paginated
@@ -245,8 +245,8 @@ retrieval:
     # audit flows may bump this; tight memory budgets shrink it.
     ttl_seconds: 86400
 
-  # pageindex: PageIndex-style page-based agentic strategy and its
-  # dedicated POST /v1/answer/pageindex endpoint.
+  # treewalk: TreeWalk-style page-based agentic strategy and its
+  # dedicated POST /v1/answer/treewalk endpoint.
   #
   # The strategy runs a three-tool loop:
   #   1. get_document_structure() — returns the TOC tree (titles +
@@ -267,17 +267,17 @@ retrieval:
   #
   # OPT-OUT. Default enabled. Disable to unwire the endpoint
   # (returns 501); the strategy itself can still be selected by
-  # setting `retrieval.strategy: pageindex` even when this block
+  # setting `retrieval.strategy: treewalk` even when this block
   # is disabled.
   #
   # Works WITHOUT a persisted TOC tree (pre-PR-A state) — the
   # strategy synthesises a TOC view from the section list when
   # documents.toc_tree is NULL. No request fails because of a
   # missing TOC.
-  pageindex:
+  treewalk:
     enabled: true
     # Cap on LLM turns per request, including the terminal done
-    # turn. The reference PageIndex demo converges in 3-5 hops on
+    # turn. The reference TreeWalk demo converges in 3-5 hops on
     # typical questions; 8 leaves buffer for retries on parse
     # failures and the occasional extra get_pages call.
     max_hops: 8
@@ -294,7 +294,7 @@ retrieval:
     # miss all" while a single confident pick scores perfectly;
     # capping the final set tames the spray. 3 keeps a genuinely
     # multi-location answer (e.g. a figure + its footnote) while
-    # cutting the low-confidence tail. Env: VLE_/VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS.
+    # cutting the low-confidence tail. Env: VLE_/VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS.
     max_citations: 3
     # Override the navigation-loop model; empty inherits the
     # request's model (which itself falls back to the engine
@@ -317,7 +317,7 @@ ingest:
   #            per-section LLM enrichment (summarize, HyDE, multi-axis,
   #            TOC build) AND the pdftable table-extraction pass, so a
   #            document becomes queryable in ~parse-speed (seconds).
-  #            The page-based strategy (/v1/answer/pageindex) needs none
+  #            The page-based strategy (/v1/answer/treewalk) needs none
   #            of the skipped work: it navigates a TOC synthesised from
   #            the section tree (documents.toc_tree is left NULL) and
   #            reads raw section/page text at query time — and that raw
@@ -428,7 +428,7 @@ ingest:
     max_entities: 8
     max_numbers: 6
 
-  # LLM-built table-of-contents tree (PageIndex-style). Runs after
+  # LLM-built table-of-contents tree (TreeWalk-style). Runs after
   # summarize+HyDE on PDF inputs and persists a hierarchical TOC on
   # documents.toc_tree (JSONB). The tree is small (a few KB even
   # for 300-page filings) and is intended as a higher-level map
@@ -449,7 +449,7 @@ ingest:
     # (one call per leaf node).
     concurrency: 4
     # The detector scans the first N pages for a table of
-    # contents. PageIndex defaults this to 20 — financial filings
+    # contents. TreeWalk defaults this to 20 — financial filings
     # put their TOC inside the first dozen pages and a document
     # without one by page 20 almost never has one further in.
     toc_check_pages: 20

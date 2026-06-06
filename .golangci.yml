@@ -30,6 +30,11 @@ linters:
         - (net/http.ResponseWriter).Write
         - (github.com/jackc/pgx/v5.Tx).Rollback
         - (github.com/hallelx2/vectorless-engine/pkg/queue.Queue).Close
+    misspell:
+      # "strat" is our abbreviation for "strategy" (variable + key names),
+      # not a misspelling of "start".
+      ignore-rules:
+        - strat
   exclusions:
     rules:
       - path: _test\.go

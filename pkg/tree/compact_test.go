@@ -15,8 +15,8 @@ func buildLargeTestTree() *Tree {
 					ID: "ch1", ParentID: "root", Title: "Chapter 1",
 					Children: []*Section{
 						{ID: "ch1a", ParentID: "ch1", Title: "Section 1A", TokenCount: 200, ContentRef: "a.txt"},
-						{ID: "ch1b", ParentID: "ch1", Title: "Section 1B", TokenCount: 30, ContentRef: "b.txt"},  // small
-						{ID: "ch1c", ParentID: "ch1", Title: "Section 1C", TokenCount: 10, ContentRef: "c.txt"},  // tiny
+						{ID: "ch1b", ParentID: "ch1", Title: "Section 1B", TokenCount: 30, ContentRef: "b.txt"}, // small
+						{ID: "ch1c", ParentID: "ch1", Title: "Section 1C", TokenCount: 10, ContentRef: "c.txt"}, // tiny
 					},
 				},
 				{
@@ -92,7 +92,7 @@ func TestCompactMaxDepth(t *testing.T) {
 	compacted := tr.Compact(CompactOpts{
 		MinTokens:        0, // no pruning
 		MergeSingleChild: false,
-		MaxDepth:          2, // root(0) + chapters(1) only
+		MaxDepth:         2, // root(0) + chapters(1) only
 	})
 
 	// All sections at depth >= 2 should be flattened.

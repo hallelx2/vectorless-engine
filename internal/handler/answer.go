@@ -169,7 +169,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 			rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
 			if getErr == nil {
 				raw, _ := io.ReadAll(rc)
-				rc.Close()
+				_ = rc.Close() // best-effort close
 				content = string(raw)
 			}
 		}

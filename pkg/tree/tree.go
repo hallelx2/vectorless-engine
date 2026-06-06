@@ -114,10 +114,10 @@ func (s *Section) IsLeaf() bool {
 // persisted on Document.toc_tree. Distinct from Section because
 // it represents the document's logical outline (headings the LLM
 // recovered or invented from body text) rather than the parser's
-// chunked content tree. Used by the PageIndex-style retrieval
+// chunked content tree. Used by the TreeWalk-style retrieval
 // strategy that reasons over the TOC before drilling into sections.
 //
-// Structure carries the PageIndex-style hierarchical index ("1",
+// Structure carries the TreeWalk-style hierarchical index ("1",
 // "1.1", "1.1.2"). Title is the original heading verbatim (spacing
 // fixed). StartPage is 1-indexed and refers to the source PDF's
 // physical page. EndPage is derived from the next sibling's
@@ -125,7 +125,7 @@ func (s *Section) IsLeaf() bool {
 // and downstream readers should treat the node as running until
 // either the next sibling at the same depth or the document end.
 //
-// The shape mirrors PageIndex's tree-output JSON (start_page /
+// The shape mirrors TreeWalk's tree-output JSON (start_page /
 // end_page / nodes) so external tooling that expects that
 // vocabulary can interop without translation.
 type TOCNode struct {

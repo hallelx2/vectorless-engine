@@ -326,14 +326,14 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_INGEST_MODE", "VLE_INGEST_MODE"); v != "" {
 		c.Engine.Ingest.Mode = v
 	}
-	// PageIndex final-citation cap. Forwarded so the spray backstop can
+	// TreeWalk final-citation cap. Forwarded so the spray backstop can
 	// be tuned on the live server without a config edit (e.g. tighten
 	// to 1 to force single-citation answers, or relax for a doc set
 	// with many genuinely multi-location questions). VLS_ wins over
 	// VLE_; a garbled or negative value leaves the engine default (3).
-	if v := firstEnv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS"); v != "" {
+	if v := firstEnv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS", "VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			c.Engine.Retrieval.PageIndex.MaxCitations = n
+			c.Engine.Retrieval.TreeWalk.MaxCitations = n
 		}
 	}
 	// Total-parse timeout (seconds). Forwarded so the deployed server

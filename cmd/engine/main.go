@@ -90,7 +90,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	llmClient, err := buildLLM(cfg.LLM)
 	if err != nil {
@@ -206,41 +206,41 @@ func run() error {
 	}
 	q.Register(queue.KindIngestDocument, pipeline.Handler())
 
-	// /v1/answer/pageindex gets its OWN PageIndexStrategy instance,
+	// /v1/answer/treewalk gets its OWN TreeWalkStrategy instance,
 	// independent of whatever selection strategy is configured in
 	// retrieval.strategy. This way the endpoint is always available
-	// (gated by retrieval.pageindex.enabled), even on a deployment
+	// (gated by retrieval.treewalk.enabled), even on a deployment
 	// using chunked-tree as its default selection path.
-	var pageIndexStrategy *retrieval.PageIndexStrategy
-	if cfg.Retrieval.PageIndex.Enabled && llmClient != nil {
-		pageIndexStrategy = buildPageIndexStrategy(cfg.Retrieval, llmClient, store)
-		logger.Info("retrieval: pageindex answer endpoint enabled",
-			"max_hops", pageIndexStrategy.MaxHops,
-			"page_content_limit", pageIndexStrategy.PageContentLimit,
-			"model_override", cfg.Retrieval.PageIndex.Model,
+	var treeWalkStrategy *retrieval.TreeWalkStrategy
+	if cfg.Retrieval.TreeWalk.Enabled && llmClient != nil {
+		treeWalkStrategy = buildTreeWalkStrategy(cfg.Retrieval, llmClient, store)
+		logger.Info("retrieval: treewalk answer endpoint enabled",
+			"max_hops", treeWalkStrategy.MaxHops,
+			"page_content_limit", treeWalkStrategy.PageContentLimit,
+			"model_override", cfg.Retrieval.TreeWalk.Model,
 		)
 	}
 
 	deps := api.Deps{
-		Logger:            logger,
-		DB:                pool,
-		Storage:           store,
-		Queue:             q,
-		Strategy:          strategy,
-		Version:           version,
-		MultiDoc:          multiDoc,
-		LLM:               llmClient,
-		LLMModel:          modelFor(cfg.LLM),
-		AnswerSpan:        cfg.Retrieval.AnswerSpan,
-		Answer:            cfg.Retrieval.Answer,
-		Planner:           planner,
-		Planning:          cfg.Retrieval.Planning,
-		ReRanker:          reRanker,
-		ReRank:            cfg.Retrieval.ReRank,
-		Replay:            replayStore,
-		Abstain:           cfg.Retrieval.Abstain,
-		PageIndexStrategy: pageIndexStrategy,
-		PageIndex:         cfg.Retrieval.PageIndex,
+		Logger:           logger,
+		DB:               pool,
+		Storage:          store,
+		Queue:            q,
+		Strategy:         strategy,
+		Version:          version,
+		MultiDoc:         multiDoc,
+		LLM:              llmClient,
+		LLMModel:         modelFor(cfg.LLM),
+		AnswerSpan:       cfg.Retrieval.AnswerSpan,
+		Answer:           cfg.Retrieval.Answer,
+		Planner:          planner,
+		Planning:         cfg.Retrieval.Planning,
+		ReRanker:         reRanker,
+		ReRank:           cfg.Retrieval.ReRank,
+		Replay:           replayStore,
+		Abstain:          cfg.Retrieval.Abstain,
+		TreeWalkStrategy: treeWalkStrategy,
+		TreeWalk:         cfg.Retrieval.TreeWalk,
 	}
 
 	srv := &http.Server{
@@ -393,36 +393,38 @@ func buildStrategy(c config.RetrievalConfig, client llmgate.Client, store storag
 		}
 		a.ModelOverride = c.Agentic.Model
 		return a
-	case "pageindex":
-		return buildPageIndexStrategy(c, client, store)
+	case "treewalk":
+		return buildTreeWalkStrategy(c, client, store)
+	case "auto":
+		return retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store))
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
 }
 
-// buildPageIndexStrategy constructs the page-based agentic
+// buildTreeWalkStrategy constructs the page-based agentic
 // strategy with the storage-backed PageLoader and the configured
-// caps. Used by buildStrategy when retrieval.strategy=pageindex AND
-// by the /v1/answer/pageindex endpoint setup (which wires its own
+// caps. Used by buildStrategy when retrieval.strategy=treewalk AND
+// by the /v1/answer/treewalk endpoint setup (which wires its own
 // instance regardless of the selection strategy).
 //
 // The TOCProvider is left nil here. PR-A (toc-tree-builder) adds
 // documents.toc_tree + a DB-backed provider; until it lands the
 // strategy degrades to its synthesised view, which is the
 // documented fallback path.
-func buildPageIndexStrategy(c config.RetrievalConfig, client llmgate.Client, store storage.Storage) *retrieval.PageIndexStrategy {
-	p := retrieval.NewPageIndexStrategy(client)
+func buildTreeWalkStrategy(c config.RetrievalConfig, client llmgate.Client, store storage.Storage) *retrieval.TreeWalkStrategy {
+	p := retrieval.NewTreeWalkStrategy(client)
 	p.PageLoader = storagePageLoader{s: store}
-	if c.PageIndex.MaxHops > 0 {
-		p.MaxHops = c.PageIndex.MaxHops
+	if c.TreeWalk.MaxHops > 0 {
+		p.MaxHops = c.TreeWalk.MaxHops
 	}
-	if c.PageIndex.PageContentLimit > 0 {
-		p.PageContentLimit = c.PageIndex.PageContentLimit
+	if c.TreeWalk.PageContentLimit > 0 {
+		p.PageContentLimit = c.TreeWalk.PageContentLimit
 	}
-	if c.PageIndex.MaxCitations > 0 {
-		p.MaxCitations = c.PageIndex.MaxCitations
+	if c.TreeWalk.MaxCitations > 0 {
+		p.MaxCitations = c.TreeWalk.MaxCitations
 	}
-	p.ModelOverride = c.PageIndex.Model
+	p.ModelOverride = c.TreeWalk.Model
 	return p
 }
 
@@ -437,14 +439,14 @@ func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 
 // storagePageLoader adapts a storage.Storage to
 // retrieval.PageContentLoader. Mirrors storageFetcher but lives
 // behind a separate interface so the two callers (agentic /
-// pageindex) can be wired independently. The PageIndex strategy
+// treewalk) can be wired independently. The TreeWalk strategy
 // materialises section bodies once per get_pages observation, so
 // reading the full reader into a []byte is the right shape.
 type storagePageLoader struct{ s storage.Storage }
@@ -454,7 +456,7 @@ func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 

@@ -22,15 +22,15 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// AnswerPageIndexHandler implements POST /v1/answer/pageindex: it runs
-// the PageIndex agentic loop end-to-end and returns the model's answer
+// AnswerTreeWalkHandler implements POST /v1/answer/treewalk: it runs
+// the TreeWalk agentic loop end-to-end and returns the model's answer
 // plus page-grounded citations in one round-trip. Unlike /v1/answer,
 // the loop owns the answer — there is no separate synthesis call.
 //
-// Ported from cmd/engine's internal/api.handleAnswerPageIndex, adapted
+// Ported from cmd/engine's internal/api.handleAnswerTreeWalk, adapted
 // to the deployed server's multi-tenant model (org + store from
 // headers).
-type AnswerPageIndexHandler struct {
+type AnswerTreeWalkHandler struct {
 	logger     *slog.Logger
 	db         *db.Pool
 	storage    storage.Storage
@@ -38,8 +38,8 @@ type AnswerPageIndexHandler struct {
 	llmModel   string
 	answerSpan enginecfg.AnswerSpanBlock
 	replay     retrieval.ReplayStore
-	strategy   *retrieval.PageIndexStrategy
-	pageIndex  enginecfg.PageIndexBlock
+	strategy   *retrieval.TreeWalkStrategy
+	treeWalk   enginecfg.TreeWalkBlock
 
 	// treeLoader is a test seam overriding how the handler resolves
 	// the document tree. Nil routes through the org-scoped DB lookup
@@ -49,10 +49,10 @@ type AnswerPageIndexHandler struct {
 	treeLoader func(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error)
 }
 
-// NewAnswerPageIndexHandler creates an AnswerPageIndexHandler. llm,
+// NewAnswerTreeWalkHandler creates an AnswerTreeWalkHandler. llm,
 // replay, and strategy may be nil; a nil llm or strategy (or
-// PageIndex.Enabled=false) makes the endpoint return 501.
-func NewAnswerPageIndexHandler(
+// TreeWalk.Enabled=false) makes the endpoint return 501.
+func NewAnswerTreeWalkHandler(
 	logger *slog.Logger,
 	pool *db.Pool,
 	store storage.Storage,
@@ -60,10 +60,10 @@ func NewAnswerPageIndexHandler(
 	llmModel string,
 	answerSpan enginecfg.AnswerSpanBlock,
 	replay retrieval.ReplayStore,
-	strategy *retrieval.PageIndexStrategy,
-	pageIndex enginecfg.PageIndexBlock,
-) *AnswerPageIndexHandler {
-	return &AnswerPageIndexHandler{
+	strategy *retrieval.TreeWalkStrategy,
+	treeWalk enginecfg.TreeWalkBlock,
+) *AnswerTreeWalkHandler {
+	return &AnswerTreeWalkHandler{
 		logger:     logger,
 		db:         pool,
 		storage:    store,
@@ -72,21 +72,21 @@ func NewAnswerPageIndexHandler(
 		answerSpan: answerSpan,
 		replay:     replay,
 		strategy:   strategy,
-		pageIndex:  pageIndex,
+		treeWalk:   treeWalk,
 	}
 }
 
-// loadTree resolves the document tree for the pageindex answer
+// loadTree resolves the document tree for the treewalk answer
 // endpoint, routing through the test seam when set.
-func (h *AnswerPageIndexHandler) loadTree(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error) {
+func (h *AnswerTreeWalkHandler) loadTree(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error) {
 	if h.treeLoader != nil {
 		return h.treeLoader(ctx, orgID, storeID, docID)
 	}
 	return h.db.LoadTree(ctx, docID, orgID, storeID)
 }
 
-// pageIndexAnswerRequest is the body shape for /v1/answer/pageindex.
-type pageIndexAnswerRequest struct {
+// treeWalkAnswerRequest is the body shape for /v1/answer/treewalk.
+type treeWalkAnswerRequest struct {
 	DocumentID       tree.DocumentID `json:"document_id"`
 	Query            string          `json:"query"`
 	Model            string          `json:"model"`
@@ -96,25 +96,25 @@ type pageIndexAnswerRequest struct {
 	IncludeReasoning bool            `json:"reasoning"`
 }
 
-// HandleAnswerPageIndex runs the PageIndex agentic loop and returns
+// HandleAnswerTreeWalk runs the TreeWalk agentic loop and returns
 // the answer + page-grounded citations. Supports an SSE streaming
 // variant (stream=true) and an opt-in reasoning trace
 // (reasoning=true, or ?reasoning=true).
-func (h *AnswerPageIndexHandler) HandleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
+func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrgID(w, r)
 	if !ok {
 		return
 	}
 	if h.llm == nil {
-		writeErr(w, http.StatusNotImplemented, "answer/pageindex endpoint requires an LLM client")
+		writeErr(w, http.StatusNotImplemented, "answer/treewalk endpoint requires an LLM client")
 		return
 	}
-	if h.strategy == nil || !h.pageIndex.Enabled {
-		writeErr(w, http.StatusNotImplemented, "pageindex strategy not configured on this server (retrieval.pageindex.enabled=false)")
+	if h.strategy == nil || !h.treeWalk.Enabled {
+		writeErr(w, http.StatusNotImplemented, "treewalk strategy not configured on this server (retrieval.treewalk.enabled=false)")
 		return
 	}
 
-	var body pageIndexAnswerRequest
+	var body treeWalkAnswerRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -177,17 +177,17 @@ func (h *AnswerPageIndexHandler) HandleAnswerPageIndex(w http.ResponseWriter, r 
 		trace   []map[string]any
 	)
 	if body.IncludeReasoning {
-		perReq.OnEvent = func(ev retrieval.PageIndexEvent) {
+		perReq.OnEvent = func(ev retrieval.TreeWalkEvent) {
 			traceMu.Lock()
 			defer traceMu.Unlock()
-			trace = append(trace, pageIndexEventToTraceMap(ev))
+			trace = append(trace, treeWalkEventToTraceMap(ev))
 		}
 	}
 
 	res, err := perReq.SelectWithCost(r.Context(), t, body.Query, budget)
 	if err != nil {
-		h.logger.Error("answer/pageindex: strategy failed", "err", err, "document_id", body.DocumentID)
-		writeErr(w, http.StatusInternalServerError, "pageindex strategy failed: "+err.Error())
+		h.logger.Error("answer/treewalk: strategy failed", "err", err, "document_id", body.DocumentID)
+		writeErr(w, http.StatusInternalServerError, "treewalk strategy failed: "+err.Error())
 		return
 	}
 
@@ -234,7 +234,7 @@ func (h *AnswerPageIndexHandler) HandleAnswerPageIndex(w http.ResponseWriter, r 
 // serveStream handles the stream=true SSE variant. Each tool call
 // emits one event so the caller can watch navigation in real time;
 // the final "answer" event carries the full JSON response.
-func (h *AnswerPageIndexHandler) serveStream(w http.ResponseWriter, r *http.Request, strat *retrieval.PageIndexStrategy, t *tree.Tree, body pageIndexAnswerRequest, budget retrieval.ContextBudget, started time.Time) {
+func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Request, strat *retrieval.TreeWalkStrategy, t *tree.Tree, body treeWalkAnswerRequest, budget retrieval.ContextBudget, started time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming requires http.Flusher; response writer does not support it")
@@ -253,11 +253,11 @@ func (h *AnswerPageIndexHandler) serveStream(w http.ResponseWriter, r *http.Requ
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 		flusher.Flush()
 	}
 
-	strat.OnEvent = func(ev retrieval.PageIndexEvent) {
+	strat.OnEvent = func(ev retrieval.TreeWalkEvent) {
 		emitSSE(ev.Type, ev)
 	}
 
@@ -305,7 +305,7 @@ func (h *AnswerPageIndexHandler) serveStream(w http.ResponseWriter, r *http.Requ
 // extracted from the cited content. Falls back to the PagesRead
 // footprint when nothing was cited (refusal / hop-capped run) so the
 // caller still sees where the model looked.
-func (h *AnswerPageIndexHandler) buildCitations(ctx context.Context, t *tree.Tree, res *retrieval.Result, query, requestModel string) []map[string]any {
+func (h *AnswerTreeWalkHandler) buildCitations(ctx context.Context, t *tree.Tree, res *retrieval.Result, query, requestModel string) []map[string]any {
 	if res == nil {
 		return nil
 	}
@@ -353,7 +353,7 @@ func (h *AnswerPageIndexHandler) buildCitations(ctx context.Context, t *tree.Tre
 // materialiseCitedContent loads + concatenates every cited section's
 // content (capped at 16K chars), used for answer-span extraction over
 // the pages the model relied on.
-func (h *AnswerPageIndexHandler) materialiseCitedContent(ctx context.Context, t *tree.Tree, sectionIDs []tree.SectionID) string {
+func (h *AnswerTreeWalkHandler) materialiseCitedContent(ctx context.Context, t *tree.Tree, sectionIDs []tree.SectionID) string {
 	if len(sectionIDs) == 0 {
 		return ""
 	}
@@ -394,7 +394,7 @@ func (h *AnswerPageIndexHandler) materialiseCitedContent(ctx context.Context, t 
 
 // spanExtractor builds a SpanExtractor for citation quoting, using the
 // same model fall-through as the /v1/answer handler.
-func (h *AnswerPageIndexHandler) spanExtractor(requestModel string) *retrieval.SpanExtractor {
+func (h *AnswerTreeWalkHandler) spanExtractor(requestModel string) *retrieval.SpanExtractor {
 	model := h.answerSpan.Model
 	if model == "" {
 		model = requestModel
@@ -409,9 +409,9 @@ func (h *AnswerPageIndexHandler) spanExtractor(requestModel string) *retrieval.S
 	return ext
 }
 
-// pageIndexEventToTraceMap converts a PageIndexEvent into the
+// treeWalkEventToTraceMap converts a TreeWalkEvent into the
 // reasoning_trace entry shape. Only documented fields ship.
-func pageIndexEventToTraceMap(ev retrieval.PageIndexEvent) map[string]any {
+func treeWalkEventToTraceMap(ev retrieval.TreeWalkEvent) map[string]any {
 	args := map[string]any{}
 	switch ev.Type {
 	case "get_pages":

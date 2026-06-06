@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,28 +19,28 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// loadTreeForPageIndex resolves the document tree for the
-// pageindex answer endpoint. Routes through the optional
-// PageIndexTreeLoader hook when set (tests), otherwise falls
+// loadTreeForTreeWalk resolves the document tree for the
+// treewalk answer endpoint. Routes through the optional
+// TreeWalkTreeLoader hook when set (tests), otherwise falls
 // through to the real DB.
 //
 // Kept here rather than inlined in the handler so the test seam is
 // obvious: production code path goes straight to d.DB.LoadTree;
-// tests set d.PageIndexTreeLoader to an in-memory function.
-func (d Deps) loadTreeForPageIndex(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
-	if d.PageIndexTreeLoader != nil {
-		return d.PageIndexTreeLoader(ctx, docID)
+// tests set d.TreeWalkTreeLoader to an in-memory function.
+func (d Deps) loadTreeForTreeWalk(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
+	if d.TreeWalkTreeLoader != nil {
+		return d.TreeWalkTreeLoader(ctx, docID)
 	}
 	return d.DB.LoadTree(ctx, docID, standaloneOrgID, "")
 }
 
-// pageIndexAnswerRequest is the body shape for /v1/answer/pageindex.
+// treeWalkAnswerRequest is the body shape for /v1/answer/treewalk.
 //
 // The endpoint mirrors /v1/answer's shape but exposes the
 // page-based loop's specific knobs (max_hops, max_pages_per_fetch)
 // plus a streaming variant. Per-request fields override the
-// PageIndexBlock config when present.
-type pageIndexAnswerRequest struct {
+// TreeWalkBlock config when present.
+type treeWalkAnswerRequest struct {
 	DocumentID       tree.DocumentID `json:"document_id"`
 	Query            string          `json:"query"`
 	Model            string          `json:"model"`
@@ -52,7 +50,7 @@ type pageIndexAnswerRequest struct {
 	IncludeReasoning bool            `json:"reasoning"`
 }
 
-// handleAnswerPageIndex runs the PageIndex agentic loop end-to-end
+// handleAnswerTreeWalk runs the TreeWalk agentic loop end-to-end
 // and returns the model's answer + page-grounded citations in one
 // round-trip.
 //
@@ -74,23 +72,23 @@ type pageIndexAnswerRequest struct {
 //
 // Body shape (canonical, non-streaming):
 //
-//	POST /v1/answer/pageindex
+//	POST /v1/answer/treewalk
 //	{ "document_id": "...", "query": "...", "model"?: "...",
 //	  "max_hops"?: 8, "max_pages_per_fetch"?: 16000,
 //	  "stream"?: false, "reasoning"?: false }
 //
-// Response: see pageIndexAnswerResponse below.
-func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
+// Response: see treeWalkAnswerResponse below.
+func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 	if d.LLM == nil {
-		writeErr(w, http.StatusNotImplemented, "answer/pageindex endpoint requires an LLM client")
+		writeErr(w, http.StatusNotImplemented, "answer/treewalk endpoint requires an LLM client")
 		return
 	}
-	if d.PageIndexStrategy == nil || !d.PageIndex.Enabled {
-		writeErr(w, http.StatusNotImplemented, "pageindex strategy not configured on this server (retrieval.pageindex.enabled=false)")
+	if d.TreeWalkStrategy == nil || !d.TreeWalk.Enabled {
+		writeErr(w, http.StatusNotImplemented, "treewalk strategy not configured on this server (retrieval.treewalk.enabled=false)")
 		return
 	}
 
-	var body pageIndexAnswerRequest
+	var body treeWalkAnswerRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -106,7 +104,7 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 		body.IncludeReasoning = true
 	}
 
-	t, err := d.loadTreeForPageIndex(r.Context(), body.DocumentID)
+	t, err := d.loadTreeForTreeWalk(r.Context(), body.DocumentID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "document not found")
@@ -117,11 +115,11 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build a per-request strategy that wraps the engine's
-	// configured PageIndexStrategy. We do this because per-request
+	// configured TreeWalkStrategy. We do this because per-request
 	// overrides (max_hops, max_pages_per_fetch, model, OnEvent for
 	// streaming) must NOT mutate the shared Deps instance — Deps
 	// is read by many goroutines concurrently.
-	perReq := *d.PageIndexStrategy
+	perReq := *d.TreeWalkStrategy
 	if body.MaxHops > 0 {
 		perReq.MaxHops = body.MaxHops
 	}
@@ -141,7 +139,7 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 	// Stream variant: hijack the response writer for SSE and emit
 	// one event per tool call.
 	if body.Stream {
-		d.serveAnswerPageIndexStream(w, r, &perReq, t, body, budget, started)
+		d.serveAnswerTreeWalkStream(w, r, &perReq, t, body, budget, started)
 		return
 	}
 
@@ -152,7 +150,7 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 		trace   []map[string]any
 	)
 	if body.IncludeReasoning {
-		perReq.OnEvent = func(ev retrieval.PageIndexEvent) {
+		perReq.OnEvent = func(ev retrieval.TreeWalkEvent) {
 			traceMu.Lock()
 			defer traceMu.Unlock()
 			trace = append(trace, eventToTraceMap(ev))
@@ -161,12 +159,12 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 
 	res, err := perReq.SelectWithCost(r.Context(), t, body.Query, budget)
 	if err != nil {
-		d.Logger.Error("answer/pageindex: strategy failed", "err", err, "document_id", body.DocumentID)
-		writeErr(w, http.StatusInternalServerError, "pageindex strategy failed: "+err.Error())
+		d.Logger.Error("answer/treewalk: strategy failed", "err", err, "document_id", body.DocumentID)
+		writeErr(w, http.StatusInternalServerError, "treewalk strategy failed: "+err.Error())
 		return
 	}
 
-	citations := d.buildPageIndexCitations(r.Context(), t, res, body.Query, body.Model)
+	citations := d.buildTreeWalkCitations(r.Context(), t, res, body.Query, body.Model)
 
 	resp := map[string]any{
 		"document_id": body.DocumentID,
@@ -209,14 +207,14 @@ func (d Deps) handleAnswerPageIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveAnswerPageIndexStream handles the stream=true SSE variant.
+// serveAnswerTreeWalkStream handles the stream=true SSE variant.
 // Each tool call emits one `event:` line so the caller can watch
 // the navigation in real time. The final event ("answer") carries
 // the full JSON response so the client doesn't need to make a
 // second request.
 //
 // SSE format: `event: <type>\ndata: <json>\n\n` per the W3C spec.
-func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request, strat *retrieval.PageIndexStrategy, t *tree.Tree, body pageIndexAnswerRequest, budget retrieval.ContextBudget, started time.Time) {
+func (d Deps) serveAnswerTreeWalkStream(w http.ResponseWriter, r *http.Request, strat *retrieval.TreeWalkStrategy, t *tree.Tree, body treeWalkAnswerRequest, budget retrieval.ContextBudget, started time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming requires http.Flusher; response writer does not support it")
@@ -239,11 +237,11 @@ func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request,
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 		flusher.Flush()
 	}
 
-	strat.OnEvent = func(ev retrieval.PageIndexEvent) {
+	strat.OnEvent = func(ev retrieval.TreeWalkEvent) {
 		emitSSE(ev.Type, ev)
 	}
 
@@ -261,7 +259,7 @@ func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	citations := d.buildPageIndexCitations(r.Context(), t, res, body.Query, body.Model)
+	citations := d.buildTreeWalkCitations(r.Context(), t, res, body.Query, body.Model)
 	final := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
@@ -285,7 +283,7 @@ func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request,
 	emitSSE("answer", final)
 }
 
-// buildPageIndexCitations transforms the strategy's PagesRead +
+// buildTreeWalkCitations transforms the strategy's PagesRead +
 // the section tree into the response's citations array.
 //
 // One citation per cited page range (deduplicated). Each citation
@@ -296,7 +294,7 @@ func (d Deps) serveAnswerPageIndexStream(w http.ResponseWriter, r *http.Request,
 //   - quote / quote_start / quote_end: pulled via the existing
 //     SpanExtractor over the concatenated cited-page content. If the
 //     extractor finds no match the quote field is empty (offsets -1).
-func (d Deps) buildPageIndexCitations(ctx context.Context, t *tree.Tree, res *retrieval.Result, query, requestModel string) []map[string]any {
+func (d Deps) buildTreeWalkCitations(ctx context.Context, t *tree.Tree, res *retrieval.Result, query, requestModel string) []map[string]any {
 	if res == nil {
 		return nil
 	}
@@ -330,7 +328,7 @@ func (d Deps) buildPageIndexCitations(ctx context.Context, t *tree.Tree, res *re
 		if d.LLM != nil {
 			content := d.materialiseCitedContent(ctx, t, sectionIDs)
 			if strings.TrimSpace(content) != "" {
-				ext := d.pageIndexSpanExtractor(requestModel)
+				ext := d.treeWalkSpanExtractor(requestModel)
 				span, _, err := ext.Extract(ctx, content, query)
 				if err == nil && span != nil && span.Text != "" {
 					c["quote"] = span.Text
@@ -404,11 +402,11 @@ func (d Deps) materialiseCitedContent(ctx context.Context, t *tree.Tree, section
 	return b.String()
 }
 
-// pageIndexSpanExtractor builds a SpanExtractor configured for the
-// /v1/answer/pageindex endpoint. Same fall-through pattern as the
+// treeWalkSpanExtractor builds a SpanExtractor configured for the
+// /v1/answer/treewalk endpoint. Same fall-through pattern as the
 // existing spanExtractor helper (config override → request model →
 // engine default).
-func (d Deps) pageIndexSpanExtractor(requestModel string) *retrieval.SpanExtractor {
+func (d Deps) treeWalkSpanExtractor(requestModel string) *retrieval.SpanExtractor {
 	model := d.AnswerSpan.Model
 	if model == "" {
 		model = requestModel
@@ -423,10 +421,10 @@ func (d Deps) pageIndexSpanExtractor(requestModel string) *retrieval.SpanExtract
 	return ext
 }
 
-// eventToTraceMap converts a PageIndexEvent into the
+// eventToTraceMap converts a TreeWalkEvent into the
 // reasoning_trace entry shape. Only documented fields ship —
 // nothing internal leaks via the trace.
-func eventToTraceMap(ev retrieval.PageIndexEvent) map[string]any {
+func eventToTraceMap(ev retrieval.TreeWalkEvent) map[string]any {
 	args := map[string]any{}
 	switch ev.Type {
 	case "get_pages":
@@ -469,8 +467,8 @@ func eventToTraceMap(ev retrieval.PageIndexEvent) map[string]any {
 	return entry
 }
 
-// pageIndexTraceTokenFromCitations exposes the same hash a
-// PageIndexStrategy emits to callers who want to recompute the
+// treeWalkTraceTokenFromCitations exposes the same hash a
+// TreeWalkStrategy emits to callers who want to recompute the
 // token client-side. The page-range string form mirrors the one
 // the strategy uses internally so the two stay in lock-step.
 //
@@ -478,39 +476,12 @@ func eventToTraceMap(ev retrieval.PageIndexEvent) map[string]any {
 // the in-response trace_token against the canonical input set —
 // kept here rather than exported from the retrieval package so
 // the API layer owns its own input wiring.
-func pageIndexTraceTokenFromCitations(docID tree.DocumentID, model string, ranges [][2]int) string {
-	strs := make([]string, 0, len(ranges))
-	for _, r := range ranges {
-		if r[0] == r[1] {
-			strs = append(strs, fmt.Sprintf("%d", r[0]))
-		} else {
-			strs = append(strs, fmt.Sprintf("%d-%d", r[0], r[1]))
-		}
-	}
-	sort.Strings(strs)
-	h := sha256.New()
-	h.Write([]byte(string(docID)))
-	h.Write([]byte{0})
-	h.Write([]byte("1-pages"))
-	h.Write([]byte{0})
-	h.Write([]byte("pageindex:" + model))
-	h.Write([]byte{0})
-	h.Write([]byte(retrieval.SystemPromptVersion))
-	for i, s := range strs {
-		if i == 0 {
-			h.Write([]byte{0})
-		} else {
-			h.Write([]byte{0})
-		}
-		h.Write([]byte("p:" + s))
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
+//
 
-// Compile-time guard: the PageIndex strategy must satisfy
+// Compile-time guard: the TreeWalk strategy must satisfy
 // retrieval.CostStrategy so SelectWithCost works without a
 // type-assert dance.
-var _ retrieval.CostStrategy = (*retrieval.PageIndexStrategy)(nil)
+var _ retrieval.CostStrategy = (*retrieval.TreeWalkStrategy)(nil)
 
 // Compile-time check that the Deps fields the handler reads are
 // the only API-layer dependencies it pulls in. If a future edit

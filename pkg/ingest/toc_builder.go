@@ -28,21 +28,21 @@ type PageText struct {
 }
 
 // TOCBuilder builds an LLM-derived table-of-contents tree for a
-// document. The shape mirrors PageIndex's three-phase pipeline:
+// document. The shape mirrors TreeWalk's three-phase pipeline:
 //
 //  1. detect    — scan the first TOCCheckPages pages and ask the LLM
-//                 whether any of them looks like a real TOC.
+//     whether any of them looks like a real TOC.
 //  2. extract   — if a TOC page was found, ask the LLM to parse it
-//                 into structured nodes; otherwise call the no-TOC
-//                 path that generates a TOC straight from body
-//                 text (the LLM is given the full page text tagged
-//                 with <physical_index_X> markers it copies back as
-//                 the start page).
+//     into structured nodes; otherwise call the no-TOC
+//     path that generates a TOC straight from body
+//     text (the LLM is given the full page text tagged
+//     with <physical_index_X> markers it copies back as
+//     the start page).
 //  3. verify    — concurrently re-check each leaf node: does its
-//                 title actually appear at the start of the claimed
-//                 page? Mismatches are repaired by clearing the
-//                 page back to zero; downstream readers treat zero
-//                 as "open / unknown" rather than a wrong answer.
+//     title actually appear at the start of the claimed
+//     page? Mismatches are repaired by clearing the
+//     page back to zero; downstream readers treat zero
+//     as "open / unknown" rather than a wrong answer.
 //
 // EndPage is derived from sibling ordering once verification is
 // done. The builder is deliberately tolerant of LLM parse blips
@@ -62,7 +62,7 @@ type TOCBuilder struct {
 	Concurrency int
 
 	// TOCCheckPages bounds the prefix the detector scans for a
-	// table of contents. PageIndex defaults this to 20 — financial
+	// table of contents. TreeWalk defaults this to 20 — financial
 	// filings put their TOC inside the first dozen pages and a
 	// document with no TOC by page 20 almost never has one
 	// further in. Default: 20.
@@ -163,12 +163,12 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 }
 
 // detectTOCPages scans the first tocCheck pages with the
-// PageIndex-style single-page detector. Returns the 1-indexed page
+// TreeWalk-style single-page detector. Returns the 1-indexed page
 // numbers (in order) the LLM judged as table-of-contents pages.
 //
 // Detection failures (transport / parse) silently fall back to
 // "no TOC found here" so the caller transitions to the no-TOC path.
-// This matches the PageIndex contract — the no-TOC generator is
+// This matches the TreeWalk contract — the no-TOC generator is
 // strictly more general than the TOC-extraction path.
 func (b *TOCBuilder) detectTOCPages(ctx context.Context, pages []PageText, tocCheck int, usage *Usage) []int {
 	limit := tocCheck
@@ -199,7 +199,7 @@ func (b *TOCBuilder) detectTOCPages(ctx context.Context, pages []PageText, tocCh
 }
 
 // runTOCDetector asks the LLM whether the supplied page text reads
-// like a table of contents. Mirrors PageIndex's
+// like a table of contents. Mirrors TreeWalk's
 // toc_detector_single_page.
 func (b *TOCBuilder) runTOCDetector(ctx context.Context, pageText string, usage *Usage) (bool, error) {
 	prompt := fmt.Sprintf(`Your job is to detect if there is a table of contents provided in the given text.
@@ -289,7 +289,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 	return assembleHierarchy(flat), nil
 }
 
-// generateNoTOC is the PageIndex-style process_no_toc driver: when
+// generateNoTOC is the TreeWalk-style process_no_toc driver: when
 // no TOC page was found, page content (tagged with
 // <physical_index_X> markers) is fed to the LLM with instructions
 // to emit a TOC straight from headings in the body.
@@ -327,7 +327,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 	return assembleHierarchy(flat), nil
 }
 
-// verifyTitlesConcurrent runs PageIndex's check_title_appearance_in_start
+// verifyTitlesConcurrent runs TreeWalk's check_title_appearance_in_start
 // over every node whose StartPage is set, with bounded concurrency.
 // Mismatches set StartPage back to zero — the downstream contract
 // is "zero means unknown / open" — so a misclaimed page never
@@ -370,7 +370,18 @@ func (b *TOCBuilder) verifyTitlesConcurrent(ctx context.Context, nodes []tree.TO
 			case <-gctx.Done():
 				return nil
 			}
-			startsHere, err := b.runVerifyTitleAtPageStart(gctx, n.Title, pageText, &localUse)
+			// Accumulate this call's usage into a goroutine-local Usage,
+			// then fold it into the shared total under the lock — passing
+			// &localUse directly would race (concurrent usage.add writes).
+			var u Usage
+			startsHere, err := b.runVerifyTitleAtPageStart(gctx, n.Title, pageText, &u)
+			mu.Lock()
+			localUse.InputTokens += u.InputTokens
+			localUse.OutputTokens += u.OutputTokens
+			localUse.TotalTokens += u.TotalTokens
+			localUse.CostUSD += u.CostUSD
+			localUse.LLMCalls += u.LLMCalls
+			mu.Unlock()
 			if err != nil {
 				// Transport / stub LLM — treat as "not verified" but
 				// don't clear the page; the LLM never weighed in.
@@ -403,7 +414,7 @@ func (b *TOCBuilder) verifyTitlesConcurrent(ctx context.Context, nodes []tree.TO
 	}
 }
 
-// runVerifyTitleAtPageStart mirrors PageIndex's
+// runVerifyTitleAtPageStart mirrors TreeWalk's
 // check_title_appearance_in_start: does this section's title appear
 // at the beginning of the supplied page?
 func (b *TOCBuilder) runVerifyTitleAtPageStart(ctx context.Context, title, pageText string, usage *Usage) (bool, error) {
@@ -454,18 +465,18 @@ Directly return the final JSON structure. Do not output anything else.`, title, 
 // --- prompt + schema constants ---
 
 const (
-	tocDetectorSystemPrompt   = "You are a precise document-structure analyser. Decide whether a single page of text is a table of contents."
-	tocExtractorSystemPrompt  = "You are an expert in extracting hierarchical tree structures from documents. You output strict JSON only."
-	tocVerifySystemPrompt     = "You are a precise verifier. Decide whether a section title starts a page's text."
-	defaultTOCRetries         = 2
-	tocDetectorMaxChars       = 12000
-	tocExtractorMaxChars      = 16000
-	tocExtractorMaxBody       = 60000
-	noTOCMaxBody              = 80000
-	verifyMaxChars            = 4000
-	tocDetectorJSONSchema     = `{"type":"object","properties":{"thinking":{"type":"string"},"toc_detected":{"type":"string"}},"required":["toc_detected"]}`
-	tocVerifyJSONSchema       = `{"type":"object","properties":{"thinking":{"type":"string"},"start_begin":{"type":"string"}},"required":["start_begin"]}`
-	tocNodesJSONSchema        = `{"type":"object","properties":{"nodes":{"type":"array","items":{"type":"object","properties":{"structure":{"type":"string"},"title":{"type":"string"},"physical_index":{"type":["string","null"]}},"required":["title"]}}},"required":["nodes"]}`
+	tocDetectorSystemPrompt  = "You are a precise document-structure analyser. Decide whether a single page of text is a table of contents."
+	tocExtractorSystemPrompt = "You are an expert in extracting hierarchical tree structures from documents. You output strict JSON only."
+	tocVerifySystemPrompt    = "You are a precise verifier. Decide whether a section title starts a page's text."
+	defaultTOCRetries        = 2
+	tocDetectorMaxChars      = 12000
+	tocExtractorMaxChars     = 16000
+	tocExtractorMaxBody      = 60000
+	noTOCMaxBody             = 80000
+	verifyMaxChars           = 4000
+	tocDetectorJSONSchema    = `{"type":"object","properties":{"thinking":{"type":"string"},"toc_detected":{"type":"string"}},"required":["toc_detected"]}`
+	tocVerifyJSONSchema      = `{"type":"object","properties":{"thinking":{"type":"string"},"start_begin":{"type":"string"}},"required":["start_begin"]}`
+	tocNodesJSONSchema       = `{"type":"object","properties":{"nodes":{"type":"array","items":{"type":"object","properties":{"structure":{"type":"string"},"title":{"type":"string"},"physical_index":{"type":["string","null"]}},"required":["title"]}}},"required":["nodes"]}`
 )
 
 // --- JSON payload types ---

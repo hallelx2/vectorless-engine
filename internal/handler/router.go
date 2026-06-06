@@ -34,12 +34,12 @@ type Deps struct {
 	// Strategies is the pre-built set of selectable retrieval
 	// strategies keyed by config name. It backs the per-request
 	// "strategy" override on /v1/query (the benchmark uses it to A/B
-	// chunked-tree vs pageindex against one running engine). Nil
+	// chunked-tree vs treewalk against one running engine). Nil
 	// disables the override — every /v1/query uses Strategy.
 	Strategies map[string]retrieval.Strategy
 
 	// LLM is the shared llmgate client used by the answer endpoints
-	// (/v1/answer, /v1/answer/pageindex) for span extraction and
+	// (/v1/answer, /v1/answer/treewalk) for span extraction and
 	// synthesis. Nil makes those endpoints return 501.
 	LLM llmgate.Client
 
@@ -52,19 +52,19 @@ type Deps struct {
 	Answer     enginecfg.AnswerBlock
 
 	// Replay is the replay-trace store. Every /v1/answer and
-	// /v1/answer/pageindex response is stamped with a trace_token and
+	// /v1/answer/treewalk response is stamped with a trace_token and
 	// persisted here. Nil skips replay capture for those endpoints.
 	Replay retrieval.ReplayStore
 
-	// PageIndexStrategy is the dedicated page-based agentic strategy
-	// instance used by /v1/answer/pageindex, independent of whichever
+	// TreeWalkStrategy is the dedicated page-based agentic strategy
+	// instance used by /v1/answer/treewalk, independent of whichever
 	// selection strategy retrieval.strategy chose. Nil (or
-	// PageIndex.Enabled=false) makes the endpoint return 501.
-	PageIndexStrategy *retrieval.PageIndexStrategy
+	// TreeWalk.Enabled=false) makes the endpoint return 501.
+	TreeWalkStrategy *retrieval.TreeWalkStrategy
 
-	// PageIndex carries the page-based answer endpoint's config. The
+	// TreeWalk carries the page-based answer endpoint's config. The
 	// per-request max_hops / max_pages_per_fetch fields override it.
-	PageIndex enginecfg.PageIndexBlock
+	TreeWalk enginecfg.TreeWalkBlock
 }
 
 // Router builds the chi router with all v1 routes and the full
@@ -146,7 +146,7 @@ func Router(d Deps) http.Handler {
 	queryMulti := NewQueryMultiHandler(d.Logger, d.Storage, d.Strategy, d.MultiDoc)
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
 	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay)
-	answerPageIndex := NewAnswerPageIndexHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.PageIndexStrategy, d.PageIndex)
+	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
 
 	// ── Connect-RPC Handlers (generated stubs, three-transport) ───
@@ -200,10 +200,10 @@ func Router(d Deps) http.Handler {
 		})
 
 		// Answer: retrieval + synthesis in one round-trip. /answer
-		// uses the configured selection strategy; /answer/pageindex
+		// uses the configured selection strategy; /answer/treewalk
 		// runs the page-based agentic loop end-to-end.
 		r.Post("/answer", answer.HandleAnswer)
-		r.Post("/answer/pageindex", answerPageIndex.HandleAnswerPageIndex)
+		r.Post("/answer/treewalk", answerTreeWalk.HandleAnswerTreeWalk)
 	})
 
 	// Internal: queue webhook (QStash).

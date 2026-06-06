@@ -72,7 +72,7 @@ func TestAsynqNewValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer a.Close()
+	defer func() { _ = a.Close() }() // best-effort close
 
 	if a.cfg.Concurrency != 20 {
 		t.Errorf("default concurrency: got %d, want 20", a.cfg.Concurrency)
@@ -87,7 +87,7 @@ func TestAsynqConcurrencyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer a.Close()
+	defer func() { _ = a.Close() }() // best-effort close
 
 	if a.cfg.Concurrency != 50 {
 		t.Errorf("concurrency: got %d, want 50", a.cfg.Concurrency)
@@ -115,7 +115,7 @@ func TestAsynqIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new asynq: %v", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	done := make(chan Job, 1)
 	q.Register(KindIngestDocument, func(_ context.Context, j Job) error {

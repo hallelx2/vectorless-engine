@@ -31,8 +31,7 @@ type cachedResponse struct {
 
 // idempotencyCache is a thread-safe TTL map backed by sync.Map.
 type idempotencyCache struct {
-	mu      sync.Mutex // guards reap; reads/writes use sync.Map
-	entries sync.Map   // key -> *cachedResponse
+	entries sync.Map // key -> *cachedResponse
 }
 
 // get returns the cached response if it exists and has not expired.
@@ -134,7 +133,7 @@ func Idempotency(cfg IdempotencyConfig) func(http.Handler) http.Handler {
 			if cr, ok := cache.get(key); ok {
 				w.Header().Set("X-Idempotency-Replayed", "true")
 				w.WriteHeader(cr.statusCode)
-				w.Write(cr.body) //nolint:errcheck
+				_, _ = w.Write(cr.body) //nolint:errcheck // best-effort write to response
 				return
 			}
 

@@ -198,8 +198,8 @@ func TestKeyDeterministic(t *testing.T) {
 
 func TestKeyDiffersOnInput(t *testing.T) {
 	t.Parallel()
-	k1 := Key("doc1", "query", "strat", "model")
-	k2 := Key("doc2", "query", "strat", "model")
+	k1 := Key("doc1", "query", "strategy", "model")
+	k2 := Key("doc2", "query", "strategy", "model")
 	if k1 == k2 {
 		t.Error("different doc IDs should produce different keys")
 	}

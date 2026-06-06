@@ -22,7 +22,7 @@ type QueryHandler struct {
 	storage  storage.Storage
 	strategy retrieval.Strategy
 	// strategies is the pre-built set of selectable strategies keyed
-	// by config name (chunked-tree, pageindex, agentic, single-pass).
+	// by config name (chunked-tree, treewalk, agentic, single-pass).
 	// A per-request "strategy" field selects one of these; an absent
 	// or empty field falls back to the configured default (strategy).
 	// Nil/empty disables the override entirely — every request uses
@@ -76,8 +76,8 @@ type queryRequest struct {
 	MaxParallelCalls  int             `json:"max_parallel_calls"`
 	MaxSections       int             `json:"max_sections"`
 	// Strategy optionally overrides the configured retrieval strategy
-	// for THIS request only. One of: chunked-tree, pageindex, agentic,
-	// single-pass. Empty uses the server default. This lets a caller
+	// for THIS request only. One of: auto, single-pass, chunked-tree,
+	// agentic, treewalk. Empty uses the server default. This lets a caller
 	// (e.g. the benchmark harness) A/B strategies against the same
 	// running engine without a redeploy. Unknown values return 400.
 	Strategy string `json:"strategy"`
@@ -200,7 +200,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
 			if getErr == nil {
 				raw, _ := io.ReadAll(rc)
-				rc.Close()
+				_ = rc.Close() // best-effort close
 				content = string(raw)
 			}
 		}

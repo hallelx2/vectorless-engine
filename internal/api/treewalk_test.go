@@ -24,15 +24,15 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// pageIndexScriptedLLM is the same shape as the strategy test's
+// treeWalkScriptedLLM is the same shape as the strategy test's
 // scripted LLM but mirrored here so the api package's tests don't
 // reach into pkg/retrieval's test file.
-type pageIndexScriptedLLM struct {
+type treeWalkScriptedLLM struct {
 	replies []string
 	calls   int32
 }
 
-func (p *pageIndexScriptedLLM) Complete(ctx context.Context, req llmgate.Request) (*llmgate.Response, error) {
+func (p *treeWalkScriptedLLM) Complete(ctx context.Context, req llmgate.Request) (*llmgate.Response, error) {
 	i := int(atomic.AddInt32(&p.calls, 1)) - 1
 	if i >= len(p.replies) {
 		return nil, fmt.Errorf("scripted LLM exhausted at call %d", i+1)
@@ -40,12 +40,12 @@ func (p *pageIndexScriptedLLM) Complete(ctx context.Context, req llmgate.Request
 	return &llmgate.Response{Content: p.replies[i]}, nil
 }
 
-func (p *pageIndexScriptedLLM) CountTokens(ctx context.Context, t string) (int, error) {
+func (p *treeWalkScriptedLLM) CountTokens(ctx context.Context, t string) (int, error) {
 	return len(t) / 4, nil
 }
 
 // inMemoryStorage is a minimal storage.Storage backed by a map.
-// Only Get is meaningful for the pageindex handler tests.
+// Only Get is meaningful for the treewalk handler tests.
 type inMemoryStorage struct {
 	data map[string][]byte
 }
@@ -81,20 +81,20 @@ func (m *inMemoryStorage) SignedURL(ctx context.Context, key string, expiry time
 	return "", nil
 }
 
-// pageIndexHandlerRouter wires only the endpoint under test. We
+// treeWalkHandlerRouter wires only the endpoint under test. We
 // don't want middleware noise interfering with the assertion path.
-func pageIndexHandlerRouter(d Deps) http.Handler {
+func treeWalkHandlerRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
-		r.Post("/answer/pageindex", d.handleAnswerPageIndex)
+		r.Post("/answer/treewalk", d.handleAnswerTreeWalk)
 	})
 	return r
 }
 
-// buildPageIndexTestTree mirrors the strategy tests' tree so
+// buildTreeWalkTestTree mirrors the strategy tests' tree so
 // assertions about which section IDs surface in citations stay
 // consistent across the two suites.
-func buildPageIndexTestTree() *tree.Tree {
+func buildTreeWalkTestTree() *tree.Tree {
 	a1 := &tree.Section{ID: "sec_a1", ParentID: "sec_a", Title: "Install", Summary: "install steps", ContentRef: "a1_ref", PageStart: 1, PageEnd: 2}
 	a2 := &tree.Section{ID: "sec_a2", ParentID: "sec_a", Title: "Config", Summary: "config keys", ContentRef: "a2_ref", PageStart: 3, PageEnd: 4}
 	b1 := &tree.Section{ID: "sec_b1", ParentID: "sec_b", Title: "Querying", Summary: "how to query", ContentRef: "b1_ref", PageStart: 5, PageEnd: 7}
@@ -105,41 +105,41 @@ func buildPageIndexTestTree() *tree.Tree {
 	return &tree.Tree{DocumentID: "doc_x", Title: "Atlas", Root: root}
 }
 
-// newTestDeps wires the minimum surface for the pageindex handler
+// newTestDeps wires the minimum surface for the treewalk handler
 // to run end-to-end against httptest. The strategy is constructed
 // directly (no DB / cache wrapper) so per-test LLM scripting
 // drives behaviour deterministically.
-func newTestDeps(t *testing.T, replies ...string) (Deps, *pageIndexScriptedLLM, *inMemoryStorage) {
+func newTestDeps(t *testing.T, replies ...string) (Deps, *treeWalkScriptedLLM, *inMemoryStorage) {
 	t.Helper()
 
-	llm := &pageIndexScriptedLLM{replies: replies}
+	llm := &treeWalkScriptedLLM{replies: replies}
 	store := &inMemoryStorage{data: map[string][]byte{
 		"a1_ref": []byte("Install steps: run vle ingest..."),
 		"a2_ref": []byte("Config keys: VLE_FOO, VLE_BAR."),
 		"b1_ref": []byte("How to query the API."),
 		"b2_ref": []byte("Debt registration is in line items A and B."),
 	}}
-	strat := retrieval.NewPageIndexStrategy(llm)
+	strat := retrieval.NewTreeWalkStrategy(llm)
 	strat.PageLoader = pageStorageLoader{s: store}
 
 	deps := Deps{
-		Logger:            slog.Default(),
-		Storage:           store,
-		LLM:               llm,
-		LLMModel:          "test-model",
-		Strategy:          strat, // unrelated to /v1/answer/pageindex; populated for sanity
-		PageIndexStrategy: strat,
-		PageIndex:         config.PageIndexBlock{Enabled: true, MaxHops: 8, PageContentLimit: 16000},
-		AnswerSpan:        config.AnswerSpanBlock{Enabled: false},
+		Logger:           slog.Default(),
+		Storage:          store,
+		LLM:              llm,
+		LLMModel:         "test-model",
+		Strategy:         strat, // unrelated to /v1/answer/treewalk; populated for sanity
+		TreeWalkStrategy: strat,
+		TreeWalk:         config.TreeWalkBlock{Enabled: true, MaxHops: 8, PageContentLimit: 16000},
+		AnswerSpan:       config.AnswerSpanBlock{Enabled: false},
 		Replay: retrieval.NewLRUReplayStore(retrieval.LRUReplayConfig{
 			MaxEntries: 16,
 			TTL:        5 * time.Minute,
 		}),
-		PageIndexTreeLoader: func(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
+		TreeWalkTreeLoader: func(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
 			if docID != "doc_x" {
 				return nil, fmt.Errorf("unknown document %q (test loader only knows doc_x)", docID)
 			}
-			return buildPageIndexTestTree(), nil
+			return buildTreeWalkTestTree(), nil
 		},
 	}
 	return deps, llm, store
@@ -160,13 +160,13 @@ func (l pageStorageLoader) Load(ctx context.Context, ref string) ([]byte, error)
 	return io.ReadAll(rc)
 }
 
-// TestHandleAnswerPageIndexHappyPath: the canonical 3-tool
+// TestHandleAnswerTreeWalkHappyPath: the canonical 3-tool
 // sequence ends with a JSON response carrying answer, citations,
 // hops_taken, trace_token, pages_read, and a usage block. The
 // LLM is NOT called for span extraction in this test path because
 // AnswerSpan.Enabled is false at the config-block level — but the
 // citations still surface section_ids and page ranges.
-func TestHandleAnswerPageIndexHappyPath(t *testing.T) {
+func TestHandleAnswerTreeWalkHappyPath(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
@@ -176,9 +176,9 @@ func TestHandleAnswerPageIndexHappyPath(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"how do I install?","model":"test-model"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
@@ -190,8 +190,8 @@ func TestHandleAnswerPageIndexHappyPath(t *testing.T) {
 	if resp["answer"].(string) != "Run vle ingest." {
 		t.Errorf("answer = %v, want \"Run vle ingest.\"", resp["answer"])
 	}
-	if resp["strategy"].(string) != "pageindex" {
-		t.Errorf("strategy = %v, want pageindex", resp["strategy"])
+	if resp["strategy"].(string) != "treewalk" {
+		t.Errorf("strategy = %v, want treewalk", resp["strategy"])
 	}
 	if resp["hops_taken"].(float64) != 3 {
 		t.Errorf("hops_taken = %v, want 3", resp["hops_taken"])
@@ -218,10 +218,10 @@ func TestHandleAnswerPageIndexHappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexReasoningTrace: with reasoning=true,
+// TestHandleAnswerTreeWalkReasoningTrace: with reasoning=true,
 // the response carries a reasoning_trace array describing each
 // tool call. Each entry must have hop + tool + (optional) args.
-func TestHandleAnswerPageIndexReasoningTrace(t *testing.T) {
+func TestHandleAnswerTreeWalkReasoningTrace(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
@@ -231,9 +231,9 @@ func TestHandleAnswerPageIndexReasoningTrace(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"config?","reasoning":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -261,14 +261,14 @@ func TestHandleAnswerPageIndexReasoningTrace(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexDedupAndCapCitations is the end-to-end
+// TestHandleAnswerTreeWalkDedupAndCapCitations is the end-to-end
 // proof of the bench-facing fix: a done that sprays the SAME range
 // five times plus extras must produce a citations[] array that is
 // deduped and capped at MaxCitations — no duplicate page ranges, no
 // repeated section ids across citations, and confidence surfaced.
 // This is the API-layer mirror of the strategy's dedup test and the
 // reason precision@5 stops deflating.
-func TestHandleAnswerPageIndexDedupAndCapCitations(t *testing.T) {
+func TestHandleAnswerTreeWalkDedupAndCapCitations(t *testing.T) {
 	t.Parallel()
 
 	// Read one range, then a done that cites [1,2] five times plus
@@ -279,9 +279,9 @@ func TestHandleAnswerPageIndexDedupAndCapCitations(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -321,12 +321,12 @@ func TestHandleAnswerPageIndexDedupAndCapCitations(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexConfidentSingleCitation is the happy half
+// TestHandleAnswerTreeWalkConfidentSingleCitation is the happy half
 // at the API layer: a confident single-range done — even after the
 // model skimmed several pages — surfaces exactly ONE citation. This
 // is the f1=1.0 commit case, and the fix that stops a multi-page
 // navigation footprint from leaking into citations[].
-func TestHandleAnswerPageIndexConfidentSingleCitation(t *testing.T) {
+func TestHandleAnswerTreeWalkConfidentSingleCitation(t *testing.T) {
 	t.Parallel()
 
 	// The model reads pages 1-2 AND 8-9 while searching, but commits
@@ -338,9 +338,9 @@ func TestHandleAnswerPageIndexConfidentSingleCitation(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"debt?"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -362,10 +362,10 @@ func TestHandleAnswerPageIndexConfidentSingleCitation(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexReasoningTraceQueryParam: the
+// TestHandleAnswerTreeWalkReasoningTraceQueryParam: the
 // ?reasoning=true query param is an alternative to the body field.
 // Some clients prefer it for GET-friendliness when prototyping.
-func TestHandleAnswerPageIndexReasoningTraceQueryParam(t *testing.T) {
+func TestHandleAnswerTreeWalkReasoningTraceQueryParam(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
@@ -373,9 +373,9 @@ func TestHandleAnswerPageIndexReasoningTraceQueryParam(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex?reasoning=true", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk?reasoning=true", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -384,9 +384,9 @@ func TestHandleAnswerPageIndexReasoningTraceQueryParam(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexBadRequest: missing document_id /
+// TestHandleAnswerTreeWalkBadRequest: missing document_id /
 // query → 400.
-func TestHandleAnswerPageIndexBadRequest(t *testing.T) {
+func TestHandleAnswerTreeWalkBadRequest(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t)
@@ -397,89 +397,89 @@ func TestHandleAnswerPageIndexBadRequest(t *testing.T) {
 		`{"query":"q"}`,           // missing document_id
 		`not-json`,
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", strings.NewReader(body))
 		rec := httptest.NewRecorder()
-		pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+		treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("body %q: status = %d, want 400", body, rec.Code)
 		}
 	}
 }
 
-// TestHandleAnswerPageIndexDocumentNotFound: a tree-loader that
+// TestHandleAnswerTreeWalkDocumentNotFound: a tree-loader that
 // returns ErrNotFound bubbles up as 404. The test loader rejects
 // unknown doc IDs.
-func TestHandleAnswerPageIndexDocumentNotFound(t *testing.T) {
+func TestHandleAnswerTreeWalkDocumentNotFound(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t)
 	// Re-wire the loader to return ErrNotFound for the right error
 	// path. The default test loader returns a generic error
 	// (different status — also valid but less specific).
-	deps.PageIndexTreeLoader = func(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
+	deps.TreeWalkTreeLoader = func(ctx context.Context, docID tree.DocumentID) (*tree.Tree, error) {
 		return nil, dbNotFoundError()
 	}
 
 	body := strings.NewReader(`{"document_id":"missing","query":"q"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 
-// TestHandleAnswerPageIndexDisabled: when PageIndex.Enabled=false
-// or PageIndexStrategy is nil, the endpoint returns 501. Two
+// TestHandleAnswerTreeWalkDisabled: when TreeWalk.Enabled=false
+// or TreeWalkStrategy is nil, the endpoint returns 501. Two
 // failure modes, both must produce the same status.
-func TestHandleAnswerPageIndexDisabled(t *testing.T) {
+func TestHandleAnswerTreeWalkDisabled(t *testing.T) {
 	t.Parallel()
 
 	// Mode 1: config disabled.
 	deps, _, _ := newTestDeps(t)
-	deps.PageIndex.Enabled = false
+	deps.TreeWalk.Enabled = false
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("config disabled: status = %d, want 501", rec.Code)
 	}
 
 	// Mode 2: strategy nil.
 	deps2, _, _ := newTestDeps(t)
-	deps2.PageIndexStrategy = nil
+	deps2.TreeWalkStrategy = nil
 
 	body = strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
-	req = httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req = httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec = httptest.NewRecorder()
-	pageIndexHandlerRouter(deps2).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps2).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("strategy nil: status = %d, want 501", rec.Code)
 	}
 }
 
-// TestHandleAnswerPageIndexNoLLM: no LLM client → 501.
-func TestHandleAnswerPageIndexNoLLM(t *testing.T) {
+// TestHandleAnswerTreeWalkNoLLM: no LLM client → 501.
+func TestHandleAnswerTreeWalkNoLLM(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t)
 	deps.LLM = nil
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", rec.Code)
 	}
 }
 
-// TestHandleAnswerPageIndexReplayPersisted: the response is
+// TestHandleAnswerTreeWalkReplayPersisted: the response is
 // stored in the replay store under its trace_token, and the
 // existing /v1/replay handler returns the byte-identical body.
-func TestHandleAnswerPageIndexReplayPersisted(t *testing.T) {
+func TestHandleAnswerTreeWalkReplayPersisted(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
@@ -487,9 +487,9 @@ func TestHandleAnswerPageIndexReplayPersisted(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"replay-me"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first call: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -514,7 +514,7 @@ func TestHandleAnswerPageIndexReplayPersisted(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("replay status = %d, body = %s", rec2.Code, rec2.Body.String())
 	}
-	// The original /v1/answer/pageindex response carries a trailing
+	// The original /v1/answer/treewalk response carries a trailing
 	// newline from marshalJSONForReplay; the replay path returns
 	// the exact stored bytes, so we compare with the newline.
 	if !bytes.Equal(originalBody, rec2.Body.Bytes()) {
@@ -522,10 +522,10 @@ func TestHandleAnswerPageIndexReplayPersisted(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexStreaming: with stream=true, the
+// TestHandleAnswerTreeWalkStreaming: with stream=true, the
 // response is SSE with one event per tool call plus a started +
 // answer event. The data payloads are JSON.
-func TestHandleAnswerPageIndexStreaming(t *testing.T) {
+func TestHandleAnswerTreeWalkStreaming(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
@@ -535,9 +535,9 @@ func TestHandleAnswerPageIndexStreaming(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q","stream":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stream status = %d", rec.Code)
 	}
@@ -558,13 +558,13 @@ func TestHandleAnswerPageIndexStreaming(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexPerRequestOverrides: max_hops and
+// TestHandleAnswerTreeWalkPerRequestOverrides: max_hops and
 // max_pages_per_fetch on the body override the engine's config.
 // We can't measure max_pages_per_fetch from outside (it shapes
 // content size, not response shape), but we can verify max_hops
 // caps the loop. Set max_hops=1 and a script that emits
 // 5 turns — the strategy must stop after 1.
-func TestHandleAnswerPageIndexPerRequestOverrides(t *testing.T) {
+func TestHandleAnswerTreeWalkPerRequestOverrides(t *testing.T) {
 	t.Parallel()
 
 	// 6 replies but max_hops=1 → only the first runs as a normal
@@ -580,9 +580,9 @@ func TestHandleAnswerPageIndexPerRequestOverrides(t *testing.T) {
 	)
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"q","max_hops":1}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -596,25 +596,25 @@ func TestHandleAnswerPageIndexPerRequestOverrides(t *testing.T) {
 	}
 }
 
-// TestHandleAnswerPageIndexTOCFallback: with a tree that has
+// TestHandleAnswerTreeWalkTOCFallback: with a tree that has
 // page metadata but no persisted TOC, the synthesised TOC drives
 // the get_document_structure tool. This test runs end-to-end and
 // asserts the response shape; the strategy-level test covers the
 // synthesis logic directly.
-func TestHandleAnswerPageIndexTOCFallback(t *testing.T) {
+func TestHandleAnswerTreeWalkTOCFallback(t *testing.T) {
 	t.Parallel()
 
 	deps, _, _ := newTestDeps(t,
 		`{"tool":"get_document_structure"}`,
 		`{"tool":"done","answer":"saw the toc","cited_pages":[]}`,
 	)
-	// PageIndexStrategy.TOC is left nil — the synthesised path is
+	// TreeWalkStrategy.TOC is left nil — the synthesised path is
 	// the default for any deployment without PR-A merged.
 
 	body := strings.NewReader(`{"document_id":"doc_x","query":"what is in the doc?"}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/answer/pageindex", body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/answer/treewalk", body)
 	rec := httptest.NewRecorder()
-	pageIndexHandlerRouter(deps).ServeHTTP(rec, req)
+	treeWalkHandlerRouter(deps).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}

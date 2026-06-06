@@ -134,7 +134,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	// ── LLM + retrieval strategy ──────────────────────────────────
 	llmClient, err := buildLLM(cfg.Engine.LLM)
@@ -164,13 +164,13 @@ func run() error {
 
 	// Pre-built set of selectable strategies, keyed by config name.
 	// Backs the per-request "strategy" override on /v1/query so the
-	// benchmark can A/B chunked-tree vs pageindex against this same
+	// benchmark can A/B chunked-tree vs treewalk against this same
 	// running engine without a redeploy. Built from the raw client so
 	// each override behaves identically to booting with that strategy
 	// as the default (no shared cache wrapper across overrides).
 	strategies := buildStrategySet(cfg.Engine.Retrieval, llmClient, store, pool)
 
-	// Replay store: every /v1/answer and /v1/answer/pageindex response
+	// Replay store: every /v1/answer and /v1/answer/treewalk response
 	// is stamped with a deterministic trace_token and its body bytes
 	// persisted here so /v1/replay can return them verbatim. On by
 	// default; operators opt out via retrieval.replay.enabled=false.
@@ -186,17 +186,17 @@ func run() error {
 		)
 	}
 
-	// /v1/answer/pageindex gets its OWN PageIndexStrategy instance,
+	// /v1/answer/treewalk gets its OWN TreeWalkStrategy instance,
 	// independent of whatever selection strategy retrieval.strategy
 	// chose, so the endpoint is always available (gated by
-	// retrieval.pageindex.enabled) even on a chunked-tree deployment.
-	var pageIndexStrategy *retrieval.PageIndexStrategy
-	if cfg.Engine.Retrieval.PageIndex.Enabled && llmClient != nil {
-		pageIndexStrategy = buildPageIndexStrategy(cfg.Engine.Retrieval, llmClient, store, pool)
-		logger.Info("retrieval: pageindex answer endpoint enabled",
-			"max_hops", pageIndexStrategy.MaxHops,
-			"page_content_limit", pageIndexStrategy.PageContentLimit,
-			"model_override", cfg.Engine.Retrieval.PageIndex.Model,
+	// retrieval.treewalk.enabled) even on a chunked-tree deployment.
+	var treeWalkStrategy *retrieval.TreeWalkStrategy
+	if cfg.Engine.Retrieval.TreeWalk.Enabled && llmClient != nil {
+		treeWalkStrategy = buildTreeWalkStrategy(cfg.Engine.Retrieval, llmClient, store, pool)
+		logger.Info("retrieval: treewalk answer endpoint enabled",
+			"max_hops", treeWalkStrategy.MaxHops,
+			"page_content_limit", treeWalkStrategy.PageContentLimit,
+			"model_override", cfg.Engine.Retrieval.TreeWalk.Model,
 		)
 	}
 
@@ -250,22 +250,22 @@ func run() error {
 	// Only start the HTTP server in "server" role.
 	if *role == "server" {
 		deps := handler.Deps{
-			Logger:            logger,
-			DB:                pool,
-			Storage:           store,
-			Queue:             q,
-			Strategy:          strategy,
-			MultiDoc:          multiDoc,
-			Version:           version,
-			Config:            cfg,
-			Strategies:        strategies,
-			LLM:               llmClient,
-			LLMModel:          modelFor(cfg.Engine.LLM),
-			AnswerSpan:        cfg.Engine.Retrieval.AnswerSpan,
-			Answer:            cfg.Engine.Retrieval.Answer,
-			Replay:            replayStore,
-			PageIndexStrategy: pageIndexStrategy,
-			PageIndex:         cfg.Engine.Retrieval.PageIndex,
+			Logger:           logger,
+			DB:               pool,
+			Storage:          store,
+			Queue:            q,
+			Strategy:         strategy,
+			MultiDoc:         multiDoc,
+			Version:          version,
+			Config:           cfg,
+			Strategies:       strategies,
+			LLM:              llmClient,
+			LLMModel:         modelFor(cfg.Engine.LLM),
+			AnswerSpan:       cfg.Engine.Retrieval.AnswerSpan,
+			Answer:           cfg.Engine.Retrieval.Answer,
+			Replay:           replayStore,
+			TreeWalkStrategy: treeWalkStrategy,
+			TreeWalk:         cfg.Engine.Retrieval.TreeWalk,
 		}
 
 		srv := &http.Server{
@@ -383,7 +383,7 @@ func buildQueue(c enginecfg.QueueConfig, dbURL string) (queue.Queue, error) {
 
 // modelFor returns the configured chat/general-purpose model name for
 // the selected LLM driver. Used as the engine-default fallback when an
-// API request omits an explicit model (answer + answer/pageindex).
+// API request omits an explicit model (answer + answer/treewalk).
 func modelFor(c enginecfg.LLMConfig) string {
 	switch c.Driver {
 	case "anthropic":
@@ -424,7 +424,7 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 
 // buildStrategy constructs the retrieval strategy named by
 // retrieval.strategy. The DB pool is threaded through so the
-// pageindex strategy can wire a TOC provider that reads
+// treewalk strategy can wire a TOC provider that reads
 // documents.toc_tree (the other strategies ignore it).
 func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) retrieval.Strategy {
 	switch c.Strategy {
@@ -439,8 +439,10 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 		}
 		a.ModelOverride = c.Agentic.Model
 		return a
-	case "pageindex":
-		return buildPageIndexStrategy(c, client, store, pool)
+	case "treewalk":
+		return buildTreeWalkStrategy(c, client, store, pool)
+	case "auto":
+		return retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool))
 	default:
 		return retrieval.NewChunkedTree(client)
 	}
@@ -451,9 +453,9 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 // uses this map to honour a per-request "strategy" override without
 // rebuilding a strategy on the hot path: selection is a map lookup.
 //
-// This is what lets the benchmark A/B chunked-tree vs pageindex
+// This is what lets the benchmark A/B chunked-tree vs treewalk
 // against the SAME running engine — no redeploy, no config flip. The
-// caps (agentic max-hops, pageindex page limits, model overrides) come
+// caps (agentic max-hops, treewalk page limits, model overrides) come
 // from the same config blocks the default builder reads, so an
 // override behaves identically to booting with that strategy as the
 // default.
@@ -468,44 +470,45 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, store 
 		"single-pass":  retrieval.NewSinglePass(client),
 		"chunked-tree": retrieval.NewChunkedTree(client),
 		"agentic":      agentic,
-		"pageindex":    buildPageIndexStrategy(c, client, store, pool),
+		"treewalk":     buildTreeWalkStrategy(c, client, store, pool),
+		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
 }
 
-// buildPageIndexStrategy constructs the page-based agentic strategy
+// buildTreeWalkStrategy constructs the page-based agentic strategy
 // with the storage-backed PageLoader, a DB-backed TOC provider, and
 // the configured caps. Ported from cmd/engine so the DEPLOYED
-// cmd/server binary can serve retrieval.strategy=pageindex AND the
-// /v1/answer/pageindex endpoint.
+// cmd/server binary can serve retrieval.strategy=treewalk AND the
+// /v1/answer/treewalk endpoint.
 //
 // The TOC provider reads documents.toc_tree via the worker-scoped
 // document lookup. The strategy degrades to its synthesised view
 // (built from the loaded section tree) whenever the column is NULL or
 // the read errors, so a document ingested before the TOC builder ran
 // still navigates cleanly.
-func buildPageIndexStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) *retrieval.PageIndexStrategy {
-	p := retrieval.NewPageIndexStrategy(client)
+func buildTreeWalkStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) *retrieval.TreeWalkStrategy {
+	p := retrieval.NewTreeWalkStrategy(client)
 	p.PageLoader = storagePageLoader{s: store}
 	if pool != nil {
 		p.TOC = dbTOCProvider{db: pool}
 	}
-	if c.PageIndex.MaxHops > 0 {
-		p.MaxHops = c.PageIndex.MaxHops
+	if c.TreeWalk.MaxHops > 0 {
+		p.MaxHops = c.TreeWalk.MaxHops
 	}
-	if c.PageIndex.PageContentLimit > 0 {
-		p.PageContentLimit = c.PageIndex.PageContentLimit
+	if c.TreeWalk.PageContentLimit > 0 {
+		p.PageContentLimit = c.TreeWalk.PageContentLimit
 	}
-	if c.PageIndex.MaxCitations > 0 {
-		p.MaxCitations = c.PageIndex.MaxCitations
+	if c.TreeWalk.MaxCitations > 0 {
+		p.MaxCitations = c.TreeWalk.MaxCitations
 	}
-	p.ModelOverride = c.PageIndex.Model
+	p.ModelOverride = c.TreeWalk.Model
 	return p
 }
 
 // storagePageLoader adapts a storage.Storage to
 // retrieval.PageContentLoader. Mirrors storageFetcher but lives behind
-// a separate interface so the two callers (agentic / pageindex) can be
-// wired independently. The PageIndex strategy materialises section
+// a separate interface so the two callers (agentic / treewalk) can be
+// wired independently. The TreeWalk strategy materialises section
 // bodies once per get_pages observation, so reading the full reader
 // into a []byte is the right shape.
 type storagePageLoader struct{ s storage.Storage }
@@ -515,7 +518,7 @@ func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 
@@ -556,7 +559,7 @@ func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 

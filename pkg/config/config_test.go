@@ -25,8 +25,8 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.LLM.Driver != "anthropic" {
 		t.Errorf("llm.driver = %q, want anthropic", cfg.LLM.Driver)
 	}
-	if cfg.Retrieval.Strategy != "chunked-tree" {
-		t.Errorf("retrieval.strategy = %q, want chunked-tree", cfg.Retrieval.Strategy)
+	if cfg.Retrieval.Strategy != "auto" {
+		t.Errorf("retrieval.strategy = %q, want auto", cfg.Retrieval.Strategy)
 	}
 	if !cfg.Retrieval.Cache.Enabled {
 		t.Error("retrieval.cache.enabled should be true by default")
@@ -95,9 +95,9 @@ func TestDefaultValues(t *testing.T) {
 // parser without a config-file edit.
 func TestIngestParseTimeoutEnvOverride(t *testing.T) {
 	prev := os.Getenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS")
-	defer os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", prev)
+	defer func() { _ = os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", prev) }() // best-effort setenv
 
-	os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", "300")
+	_ = os.Setenv("VLE_INGEST_PARSE_TIMEOUT_SECONDS", "300")
 	cfg := Default()
 	applyEnvOverrides(&cfg)
 	if cfg.Ingest.ParseTimeoutSeconds != 300 {
@@ -131,9 +131,9 @@ func TestIngestModeDefault(t *testing.T) {
 // single env var that flips the engine into fast/minimal ingest.
 func TestIngestModeEnvOverride(t *testing.T) {
 	prev := os.Getenv("VLE_INGEST_MODE")
-	defer os.Setenv("VLE_INGEST_MODE", prev)
+	defer func() { _ = os.Setenv("VLE_INGEST_MODE", prev) }() // best-effort setenv
 
-	os.Setenv("VLE_INGEST_MODE", "minimal")
+	_ = os.Setenv("VLE_INGEST_MODE", "minimal")
 	cfg := Default()
 	applyEnvOverrides(&cfg)
 	if cfg.Ingest.Mode != "minimal" {
@@ -176,14 +176,14 @@ func TestTOCEnvOverride(t *testing.T) {
 	}
 	defer func() {
 		for k, v := range prev {
-			os.Setenv(k, v)
+			_ = os.Setenv(k, v)
 		}
 	}()
 
-	os.Setenv("VLE_INGEST_TOC_ENABLED", "false")
-	os.Setenv("VLE_INGEST_TOC_MODEL", "gemini-2.5-pro")
-	os.Setenv("VLE_INGEST_TOC_CONCURRENCY", "12")
-	os.Setenv("VLE_INGEST_TOC_TOC_CHECK_PAGES", "30")
+	_ = os.Setenv("VLE_INGEST_TOC_ENABLED", "false")
+	_ = os.Setenv("VLE_INGEST_TOC_MODEL", "gemini-2.5-pro")
+	_ = os.Setenv("VLE_INGEST_TOC_CONCURRENCY", "12")
+	_ = os.Setenv("VLE_INGEST_TOC_TOC_CHECK_PAGES", "30")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -207,12 +207,12 @@ func TestAbstainEnvOverride(t *testing.T) {
 	prevEnabled := os.Getenv("VLE_RETRIEVAL_ABSTAIN_ENABLED")
 	prevBelow := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prevEnabled)
-		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prevBelow)
+		_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prevBelow)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "false")
-	os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", "0.6")
+	_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "false")
+	_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", "0.6")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -228,11 +228,11 @@ func TestAbstainEnvOverride(t *testing.T) {
 func TestAbstainEnvOverrideEnable(t *testing.T) {
 	// Toggle on via env from an explicitly-disabled starting state.
 	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_ENABLED")
-	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prev)
+	defer func() { _ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", prev) }() // best-effort setenv
 
 	cfg := Default()
 	cfg.Retrieval.Abstain.Enabled = false
-	os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "true")
+	_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_ENABLED", "true")
 	applyEnvOverrides(&cfg)
 	if !cfg.Retrieval.Abstain.Enabled {
 		t.Error("VLE_RETRIEVAL_ABSTAIN_ENABLED=true should enable abstention even when previously disabled")
@@ -245,11 +245,11 @@ func TestAbstainEnvOverrideEnable(t *testing.T) {
 // (Below must be in [0,1]).
 func TestAbstainEnvOverrideRejectsBad(t *testing.T) {
 	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
-	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev)
+	defer func() { _ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev) }() // best-effort setenv
 
 	cases := []string{"not-a-float", "1.5", "-0.1", "abc"}
 	for _, v := range cases {
-		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", v)
+		_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", v)
 		cfg := Default()
 		applyEnvOverrides(&cfg)
 		if cfg.Retrieval.Abstain.Below != 0.4 {
@@ -264,7 +264,7 @@ func TestAbstainEnvOverrideRejectsBad(t *testing.T) {
 // be accepted.
 func TestAbstainEnvOverrideParsesEdgeCases(t *testing.T) {
 	prev := os.Getenv("VLE_RETRIEVAL_ABSTAIN_BELOW")
-	defer os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev)
+	defer func() { _ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", prev) }() // best-effort setenv
 
 	cases := map[string]float64{
 		"0":   0.0,
@@ -274,7 +274,7 @@ func TestAbstainEnvOverrideParsesEdgeCases(t *testing.T) {
 		"0.5": 0.5,
 	}
 	for raw, want := range cases {
-		os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", raw)
+		_ = os.Setenv("VLE_RETRIEVAL_ABSTAIN_BELOW", raw)
 		cfg := Default()
 		applyEnvOverrides(&cfg)
 		if cfg.Retrieval.Abstain.Below != want {
@@ -317,14 +317,14 @@ func TestReplayEnvOverride(t *testing.T) {
 	prevMax := os.Getenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES")
 	prevTTL := os.Getenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prevEnabled)
-		os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
-		os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
+		_ = os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
+		_ = os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "false")
-	os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "256")
-	os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "3600")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "false")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "256")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "3600")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -343,11 +343,11 @@ func TestReplayEnvOverride(t *testing.T) {
 func TestReplayEnvOverrideEnable(t *testing.T) {
 	// Toggle on via env from an explicitly-disabled starting state.
 	prev := os.Getenv("VLE_RETRIEVAL_REPLAY_ENABLED")
-	defer os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prev)
+	defer func() { _ = os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", prev) }() // best-effort setenv
 
 	cfg := Default()
 	cfg.Retrieval.Replay.Enabled = false
-	os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "true")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_ENABLED", "true")
 	applyEnvOverrides(&cfg)
 	if !cfg.Retrieval.Replay.Enabled {
 		t.Error("VLE_RETRIEVAL_REPLAY_ENABLED=true should enable replay even when disabled in YAML")
@@ -358,12 +358,12 @@ func TestReplayEnvOverrideRejectsBad(t *testing.T) {
 	prevMax := os.Getenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES")
 	prevTTL := os.Getenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
-		os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
+		_ = os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", prevMax)
+		_ = os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", prevTTL)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "not-a-number")
-	os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "wat")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_MAX_ENTRIES", "not-a-number")
+	_ = os.Setenv("VLE_RETRIEVAL_REPLAY_TTL_SECONDS", "wat")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -408,16 +408,16 @@ func TestReRankEnvOverride(t *testing.T) {
 	prevMax := os.Getenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS")
 	prevTopK := os.Getenv("VLE_RETRIEVAL_RERANK_TOP_K")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prevEnabled)
-		os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", prevModel)
-		os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
-		os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", prevModel)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "true")
-	os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", "gemini-2.0-flash")
-	os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "1500")
-	os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "3")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "true")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_MODEL", "gemini-2.0-flash")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "1500")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "3")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -441,11 +441,11 @@ func TestReRankEnvOverrideDisable(t *testing.T) {
 	// then set =false explicitly; verify the path executes (not just
 	// that the default value is preserved).
 	prev := os.Getenv("VLE_RETRIEVAL_RERANK_ENABLED")
-	defer os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prev)
+	defer func() { _ = os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", prev) }() // best-effort setenv
 
 	cfg := Default()
 	cfg.Retrieval.ReRank.Enabled = true // simulate a YAML-set true
-	os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "false")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_ENABLED", "false")
 	applyEnvOverrides(&cfg)
 	if cfg.Retrieval.ReRank.Enabled {
 		t.Error("VLE_RETRIEVAL_RERANK_ENABLED=false should disable rerank even when YAML set it true")
@@ -457,12 +457,12 @@ func TestReRankEnvOverrideRejectsBad(t *testing.T) {
 	prevMax := os.Getenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS")
 	prevTopK := os.Getenv("VLE_RETRIEVAL_RERANK_TOP_K")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
-		os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", prevMax)
+		_ = os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", prevTopK)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "not-a-number")
-	os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "abc")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_MAX_CONTENT_CHARS", "not-a-number")
+	_ = os.Setenv("VLE_RETRIEVAL_RERANK_TOP_K", "abc")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -511,16 +511,16 @@ func TestPlanningEnvOverride(t *testing.T) {
 	prevCache := os.Getenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE")
 	prevDecompose := os.Getenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", prevEnabled)
-		os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", prevModel)
-		os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", prevCache)
-		os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", prevDecompose)
+		_ = os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", prevModel)
+		_ = os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", prevCache)
+		_ = os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", prevDecompose)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", "true")
-	os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", "gemini-2.0-flash")
-	os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", "256")
-	os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", "false")
+	_ = os.Setenv("VLE_RETRIEVAL_PLANNING_ENABLED", "true")
+	_ = os.Setenv("VLE_RETRIEVAL_PLANNING_MODEL", "gemini-2.0-flash")
+	_ = os.Setenv("VLE_RETRIEVAL_PLANNING_CACHE_SIZE", "256")
+	_ = os.Setenv("VLE_RETRIEVAL_PLANNING_DECOMPOSE", "false")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -652,7 +652,7 @@ func TestValidateLLMDrivers(t *testing.T) {
 
 func TestValidateRetrievalStrategy(t *testing.T) {
 	t.Parallel()
-	for _, s := range []string{"single-pass", "chunked-tree", "agentic", "pageindex"} {
+	for _, s := range []string{"auto", "single-pass", "chunked-tree", "agentic", "treewalk"} {
 		cfg := Default()
 		cfg.Database.URL = "postgres://localhost/test"
 		cfg.Retrieval.Strategy = s
@@ -669,173 +669,173 @@ func TestValidateRetrievalStrategy(t *testing.T) {
 	}
 }
 
-// TestPageIndexDefaults locks in the PageIndex block's defaults so
+// TestTreeWalkDefaults locks in the TreeWalk block's defaults so
 // a regression on shipping values is loud. Endpoint enabled by
 // default, 8 hops, 16K char limit.
-func TestPageIndexDefaults(t *testing.T) {
+func TestTreeWalkDefaults(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
-	if !cfg.Retrieval.PageIndex.Enabled {
-		t.Error("retrieval.pageindex.enabled should default to true (opt-out)")
+	if !cfg.Retrieval.TreeWalk.Enabled {
+		t.Error("retrieval.treewalk.enabled should default to true (opt-out)")
 	}
-	if cfg.Retrieval.PageIndex.MaxHops != 8 {
-		t.Errorf("max_hops = %d, want 8", cfg.Retrieval.PageIndex.MaxHops)
+	if cfg.Retrieval.TreeWalk.MaxHops != 8 {
+		t.Errorf("max_hops = %d, want 8", cfg.Retrieval.TreeWalk.MaxHops)
 	}
-	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
-		t.Errorf("page_content_limit = %d, want 16000", cfg.Retrieval.PageIndex.PageContentLimit)
+	if cfg.Retrieval.TreeWalk.PageContentLimit != 16000 {
+		t.Errorf("page_content_limit = %d, want 16000", cfg.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if cfg.Retrieval.PageIndex.MaxCitations != 3 {
-		t.Errorf("max_citations = %d, want 3", cfg.Retrieval.PageIndex.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 3 {
+		t.Errorf("max_citations = %d, want 3", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
-	if cfg.Retrieval.PageIndex.Model != "" {
-		t.Errorf("model default should be empty (inherit), got %q", cfg.Retrieval.PageIndex.Model)
+	if cfg.Retrieval.TreeWalk.Model != "" {
+		t.Errorf("model default should be empty (inherit), got %q", cfg.Retrieval.TreeWalk.Model)
 	}
 }
 
-// TestPageIndexEnvOverride exercises every env knob the PageIndex
+// TestTreeWalkEnvOverride exercises every env knob the TreeWalk
 // block exposes.
-func TestPageIndexEnvOverride(t *testing.T) {
-	prevEnabled := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED")
-	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
-	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
-	prevCits := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
-	prevModel := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MODEL")
+func TestTreeWalkEnvOverride(t *testing.T) {
+	prevEnabled := os.Getenv("VLE_RETRIEVAL_TREEWALK_ENABLED")
+	prevHops := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS")
+	prevLimit := os.Getenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT")
+	prevCits := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS")
+	prevModel := os.Getenv("VLE_RETRIEVAL_TREEWALK_MODEL")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", prevEnabled)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevCits)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", prevModel)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_ENABLED", prevEnabled)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS", prevHops)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT", prevLimit)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", prevCits)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MODEL", prevModel)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", "false")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "12")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "32000")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "5")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MODEL", "gemini-2.0-flash")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_ENABLED", "false")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS", "12")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT", "32000")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", "5")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MODEL", "gemini-2.0-flash")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
 
-	if cfg.Retrieval.PageIndex.Enabled {
-		t.Error("VLE_RETRIEVAL_PAGEINDEX_ENABLED=false should disable")
+	if cfg.Retrieval.TreeWalk.Enabled {
+		t.Error("VLE_RETRIEVAL_TREEWALK_ENABLED=false should disable")
 	}
-	if cfg.Retrieval.PageIndex.MaxHops != 12 {
-		t.Errorf("max_hops = %d, want 12", cfg.Retrieval.PageIndex.MaxHops)
+	if cfg.Retrieval.TreeWalk.MaxHops != 12 {
+		t.Errorf("max_hops = %d, want 12", cfg.Retrieval.TreeWalk.MaxHops)
 	}
-	if cfg.Retrieval.PageIndex.PageContentLimit != 32000 {
-		t.Errorf("page_content_limit = %d, want 32000", cfg.Retrieval.PageIndex.PageContentLimit)
+	if cfg.Retrieval.TreeWalk.PageContentLimit != 32000 {
+		t.Errorf("page_content_limit = %d, want 32000", cfg.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if cfg.Retrieval.PageIndex.MaxCitations != 5 {
-		t.Errorf("max_citations = %d, want 5", cfg.Retrieval.PageIndex.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 5 {
+		t.Errorf("max_citations = %d, want 5", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
-	if cfg.Retrieval.PageIndex.Model != "gemini-2.0-flash" {
-		t.Errorf("model = %q, want gemini-2.0-flash", cfg.Retrieval.PageIndex.Model)
+	if cfg.Retrieval.TreeWalk.Model != "gemini-2.0-flash" {
+		t.Errorf("model = %q, want gemini-2.0-flash", cfg.Retrieval.TreeWalk.Model)
 	}
 }
 
-// TestPageIndexMaxCitationsVLSAlias: the VLS_ prefix reaches
+// TestTreeWalkMaxCitationsVLSAlias: the VLS_ prefix reaches
 // MaxCitations too (the deploy layer forwards VLS_*), and VLE_ wins
 // when both are set.
-func TestPageIndexMaxCitationsVLSAlias(t *testing.T) {
-	prevVLE := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
-	prevVLS := os.Getenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
+func TestTreeWalkMaxCitationsVLSAlias(t *testing.T) {
+	prevVLE := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS")
+	prevVLS := os.Getenv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevVLE)
-		os.Setenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevVLS)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", prevVLE)
+		os.Setenv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS", prevVLS)
 	}()
 
 	// VLS_ alone reaches the field.
-	os.Unsetenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
-	os.Setenv("VLS_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "2")
+	os.Unsetenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS")
+	os.Setenv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS", "2")
 	cfg := Default()
 	applyEnvOverrides(&cfg)
-	if cfg.Retrieval.PageIndex.MaxCitations != 2 {
-		t.Errorf("VLS_ alias: max_citations = %d, want 2", cfg.Retrieval.PageIndex.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 2 {
+		t.Errorf("VLS_ alias: max_citations = %d, want 2", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
 
 	// VLE_ wins when both are set.
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "4")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", "4")
 	cfg2 := Default()
 	applyEnvOverrides(&cfg2)
-	if cfg2.Retrieval.PageIndex.MaxCitations != 4 {
-		t.Errorf("VLE_ should win over VLS_: max_citations = %d, want 4", cfg2.Retrieval.PageIndex.MaxCitations)
+	if cfg2.Retrieval.TreeWalk.MaxCitations != 4 {
+		t.Errorf("VLE_ should win over VLS_: max_citations = %d, want 4", cfg2.Retrieval.TreeWalk.MaxCitations)
 	}
 }
 
-// TestPageIndexEnvOverrideEnable: toggle on from an explicitly
+// TestTreeWalkEnvOverrideEnable: toggle on from an explicitly
 // disabled state.
-func TestPageIndexEnvOverrideEnable(t *testing.T) {
-	prev := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED")
-	defer os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", prev)
+func TestTreeWalkEnvOverrideEnable(t *testing.T) {
+	prev := os.Getenv("VLE_RETRIEVAL_TREEWALK_ENABLED")
+	defer os.Setenv("VLE_RETRIEVAL_TREEWALK_ENABLED", prev)
 
 	cfg := Default()
-	cfg.Retrieval.PageIndex.Enabled = false
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_ENABLED", "true")
+	cfg.Retrieval.TreeWalk.Enabled = false
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_ENABLED", "true")
 	applyEnvOverrides(&cfg)
-	if !cfg.Retrieval.PageIndex.Enabled {
-		t.Error("VLE_RETRIEVAL_PAGEINDEX_ENABLED=true should enable from disabled")
+	if !cfg.Retrieval.TreeWalk.Enabled {
+		t.Error("VLE_RETRIEVAL_TREEWALK_ENABLED=true should enable from disabled")
 	}
 }
 
-// TestPageIndexEnvOverrideRejectsBad: garbled numerics preserve the
+// TestTreeWalkEnvOverrideRejectsBad: garbled numerics preserve the
 // default rather than silently zeroing the cap.
-func TestPageIndexEnvOverrideRejectsBad(t *testing.T) {
-	prevHops := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS")
-	prevLimit := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT")
-	prevCits := os.Getenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS")
+func TestTreeWalkEnvOverrideRejectsBad(t *testing.T) {
+	prevHops := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS")
+	prevLimit := os.Getenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT")
+	prevCits := os.Getenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS")
 	defer func() {
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", prevHops)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", prevLimit)
-		os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", prevCits)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS", prevHops)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT", prevLimit)
+		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", prevCits)
 	}()
 
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_HOPS", "abc")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_PAGE_CONTENT_LIMIT", "not-a-number")
-	os.Setenv("VLE_RETRIEVAL_PAGEINDEX_MAX_CITATIONS", "lots")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_HOPS", "abc")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_PAGE_CONTENT_LIMIT", "not-a-number")
+	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", "lots")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
-	if cfg.Retrieval.PageIndex.MaxHops != 8 {
-		t.Errorf("garbage max_hops env should preserve default 8, got %d", cfg.Retrieval.PageIndex.MaxHops)
+	if cfg.Retrieval.TreeWalk.MaxHops != 8 {
+		t.Errorf("garbage max_hops env should preserve default 8, got %d", cfg.Retrieval.TreeWalk.MaxHops)
 	}
-	if cfg.Retrieval.PageIndex.PageContentLimit != 16000 {
-		t.Errorf("garbage page_content_limit env should preserve default, got %d", cfg.Retrieval.PageIndex.PageContentLimit)
+	if cfg.Retrieval.TreeWalk.PageContentLimit != 16000 {
+		t.Errorf("garbage page_content_limit env should preserve default, got %d", cfg.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if cfg.Retrieval.PageIndex.MaxCitations != 3 {
-		t.Errorf("garbage max_citations env should preserve default 3, got %d", cfg.Retrieval.PageIndex.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 3 {
+		t.Errorf("garbage max_citations env should preserve default 3, got %d", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
 }
 
-// TestValidatePageIndexNegatives: negatives rejected by Validate.
-func TestValidatePageIndexNegatives(t *testing.T) {
+// TestValidateTreeWalkNegatives: negatives rejected by Validate.
+func TestValidateTreeWalkNegatives(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
 	cfg.Database.URL = "postgres://localhost/test"
-	cfg.Retrieval.PageIndex.MaxHops = -1
+	cfg.Retrieval.TreeWalk.MaxHops = -1
 	if err := cfg.Validate(); err == nil {
 		t.Error("negative max_hops should fail validation")
 	}
 
 	cfg2 := Default()
 	cfg2.Database.URL = "postgres://localhost/test"
-	cfg2.Retrieval.PageIndex.PageContentLimit = -1
+	cfg2.Retrieval.TreeWalk.PageContentLimit = -1
 	if err := cfg2.Validate(); err == nil {
 		t.Error("negative page_content_limit should fail validation")
 	}
 
 	cfgCits := Default()
 	cfgCits.Database.URL = "postgres://localhost/test"
-	cfgCits.Retrieval.PageIndex.MaxCitations = -1
+	cfgCits.Retrieval.TreeWalk.MaxCitations = -1
 	if err := cfgCits.Validate(); err == nil {
 		t.Error("negative max_citations should fail validation")
 	}
 
 	cfg3 := Default()
 	cfg3.Database.URL = "postgres://localhost/test"
-	cfg3.Retrieval.PageIndex.MaxHops = 0
-	cfg3.Retrieval.PageIndex.PageContentLimit = 0
-	cfg3.Retrieval.PageIndex.MaxCitations = 0
+	cfg3.Retrieval.TreeWalk.MaxHops = 0
+	cfg3.Retrieval.TreeWalk.PageContentLimit = 0
+	cfg3.Retrieval.TreeWalk.MaxCitations = 0
 	if err := cfg3.Validate(); err != nil {
 		t.Errorf("zero values should pass (defaults applied at runtime): %v", err)
 	}
@@ -885,8 +885,8 @@ func TestValidateTLS(t *testing.T) {
 	// Neither set → OK (no TLS).
 	cfg5 := Default()
 	cfg5.Database.URL = "postgres://localhost/test"
-	if !cfg5.Server.TLS.Enabled() == true {
-		// should be disabled
+	if cfg5.Server.TLS.Enabled() {
+		t.Error("TLS should be disabled when neither cert nor key is set")
 	}
 }
 
@@ -1045,18 +1045,18 @@ func TestTablesEnvOverride(t *testing.T) {
 	prevRows := os.Getenv("VLE_INGEST_TABLES_MIN_ROWS")
 	prevCols := os.Getenv("VLE_INGEST_TABLES_MIN_COLS")
 	defer func() {
-		os.Setenv("VLE_INGEST_TABLES_ENABLED", prevEnabled)
-		os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", prevV)
-		os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", prevH)
-		os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", prevRows)
-		os.Setenv("VLE_INGEST_TABLES_MIN_COLS", prevCols)
+		_ = os.Setenv("VLE_INGEST_TABLES_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", prevV)
+		_ = os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", prevH)
+		_ = os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", prevRows)
+		_ = os.Setenv("VLE_INGEST_TABLES_MIN_COLS", prevCols)
 	}()
 
-	os.Setenv("VLE_INGEST_TABLES_ENABLED", "false")
-	os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", "text")
-	os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", "lines_strict")
-	os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", "4")
-	os.Setenv("VLE_INGEST_TABLES_MIN_COLS", "3")
+	_ = os.Setenv("VLE_INGEST_TABLES_ENABLED", "false")
+	_ = os.Setenv("VLE_INGEST_TABLES_VERTICAL_STRATEGY", "text")
+	_ = os.Setenv("VLE_INGEST_TABLES_HORIZONTAL_STRATEGY", "lines_strict")
+	_ = os.Setenv("VLE_INGEST_TABLES_MIN_ROWS", "4")
+	_ = os.Setenv("VLE_INGEST_TABLES_MIN_COLS", "3")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -1127,16 +1127,16 @@ func TestSummaryAxesEnvOverride(t *testing.T) {
 	prevEntities := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES")
 	prevNumbers := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS")
 	defer func() {
-		os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", prevEnabled)
-		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics)
-		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", prevEntities)
-		os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", prevNumbers)
+		_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", prevEnabled)
+		_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics)
+		_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", prevEntities)
+		_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", prevNumbers)
 	}()
 
-	os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", "false")
-	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "10")
-	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", "20")
-	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", "15")
+	_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_ENABLED", "false")
+	_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "10")
+	_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_ENTITIES", "20")
+	_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_NUMBERS", "15")
 
 	cfg := Default()
 	applyEnvOverrides(&cfg)
@@ -1159,8 +1159,8 @@ func TestSummaryAxesEnvOverride(t *testing.T) {
 // trim model output).
 func TestSummaryAxesEnvOverrideRejectsBad(t *testing.T) {
 	prevTopics := os.Getenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS")
-	defer os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics)
-	os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "not-a-number")
+	defer func() { _ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", prevTopics) }() // best-effort setenv
+	_ = os.Setenv("VLE_INGEST_SUMMARY_AXES_MAX_TOPICS", "not-a-number")
 	cfg := Default()
 	applyEnvOverrides(&cfg)
 	if cfg.Ingest.SummaryAxes.MaxTopics != 4 {

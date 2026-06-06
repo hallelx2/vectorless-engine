@@ -90,7 +90,7 @@ func (p *Pool) runMigration(ctx context.Context, f migrationFile) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // best-effort rollback
 	if _, err := tx.Exec(ctx, f.sql); err != nil {
 		return err
 	}

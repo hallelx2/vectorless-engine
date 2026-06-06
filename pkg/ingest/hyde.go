@@ -119,7 +119,7 @@ func (p *Pipeline) candidateQuestionsFor(ctx context.Context, s db.Section, prof
 		if err != nil {
 			return nil, err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }() // best-effort close
 		raw, err := io.ReadAll(io.LimitReader(rc, int64(p.SummaryMaxChars)))
 		if err != nil {
 			return nil, err
