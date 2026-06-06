@@ -370,7 +370,18 @@ func (b *TOCBuilder) verifyTitlesConcurrent(ctx context.Context, nodes []tree.TO
 			case <-gctx.Done():
 				return nil
 			}
-			startsHere, err := b.runVerifyTitleAtPageStart(gctx, n.Title, pageText, &localUse)
+			// Accumulate this call's usage into a goroutine-local Usage,
+			// then fold it into the shared total under the lock — passing
+			// &localUse directly would race (concurrent usage.add writes).
+			var u Usage
+			startsHere, err := b.runVerifyTitleAtPageStart(gctx, n.Title, pageText, &u)
+			mu.Lock()
+			localUse.InputTokens += u.InputTokens
+			localUse.OutputTokens += u.OutputTokens
+			localUse.TotalTokens += u.TotalTokens
+			localUse.CostUSD += u.CostUSD
+			localUse.LLMCalls += u.LLMCalls
+			mu.Unlock()
 			if err != nil {
 				// Transport / stub LLM — treat as "not verified" but
 				// don't clear the page; the LLM never weighed in.

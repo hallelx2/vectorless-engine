@@ -88,6 +88,8 @@ func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
 // originMatches is a helper that checks if an origin matches any of the
 // patterns in the allowed list. It supports exact matches only; for
 // wildcard sub-domain patterns extend this function.
+//
+//lint:ignore U1000 CORS matcher (staged for wildcard-origin support)
 func originMatches(origin string, patterns []string) bool {
 	for _, p := range patterns {
 		if strings.EqualFold(origin, p) {

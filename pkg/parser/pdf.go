@@ -1429,6 +1429,8 @@ func hasRepeatedAdjacentChars(s string) bool {
 // isEncryptedPDFError reports whether the given error from
 // ledongthuc/pdf indicates the document is encrypted. The library
 // has no proper error type for this, so we match on the message.
+//
+//lint:ignore U1000 encrypted-PDF detector (staged for OCR/encrypted support, HAL-112)
 func isEncryptedPDFError(err error) bool {
 	if err == nil {
 		return false

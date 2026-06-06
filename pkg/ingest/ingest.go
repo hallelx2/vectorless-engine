@@ -299,6 +299,8 @@ func completeWithTimeout(ctx context.Context, client llmgate.Client, req llmgate
 // stop retrying immediately on a timeout: re-issuing a call that just hung
 // would only multiply the wall-time cost (N retries × the timeout) without
 // changing the outcome, so a timeout is terminal, not retryable.
+//
+//lint:ignore U1000 timeout classifier (staged for retry decisions, HAL-73)
 func isTimeout(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
