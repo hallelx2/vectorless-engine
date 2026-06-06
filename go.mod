@@ -1,6 +1,7 @@
 module github.com/hallelx2/vectorless-engine
 
 go 1.25.0
+
 toolchain go1.25.11
 
 require (
