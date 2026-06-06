@@ -348,14 +348,14 @@ type selectionPayload struct {
 // Returns:
 //
 //   - ids:         the section IDs the model picked, in the order the
-//                  model returned them.
+//     model returned them.
 //   - confidences: map[id]float64 of per-pick confidences in [0.0, 1.0],
-//                  populated only when the model returned the new-shape
-//                  `picks` array. Returns nil (not an empty map) when
-//                  the response was the legacy shape OR when every pick
-//                  omitted its confidence — the distinction matters for
-//                  abstention, which fires only when confidence signal
-//                  is explicitly present.
+//     populated only when the model returned the new-shape
+//     `picks` array. Returns nil (not an empty map) when
+//     the response was the legacy shape OR when every pick
+//     omitted its confidence — the distinction matters for
+//     abstention, which fires only when confidence signal
+//     is explicitly present.
 //   - err:         non-nil only when the JSON cannot be decoded at all.
 func ParseSelection(raw string) ([]tree.SectionID, map[tree.SectionID]float64, error) {
 	raw = strings.TrimSpace(raw)

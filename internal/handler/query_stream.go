@@ -139,7 +139,7 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 					rc, _, getErr := h.storage.Get(ctx, sec.ContentRef)
 					if getErr == nil {
 						raw, _ := io.ReadAll(rc)
-						rc.Close()
+						_ = rc.Close() // best-effort close
 						content = string(raw)
 					}
 				}
@@ -163,7 +163,7 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 		}
 
 		data, _ := json.Marshal(sse)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data) // best-effort stream write
 		if canFlush {
 			flusher.Flush()
 		}

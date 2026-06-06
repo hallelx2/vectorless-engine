@@ -276,12 +276,12 @@ func (s *QueryService) QueryMultiStream(
 	for mevt := range events {
 		evt := mevt.Event
 		protoEvt := &v1.QueryMultiStreamEvent{
-			DocumentId: string(mevt.DocumentID),
-			DocIndex:   int32(mevt.DocIndex),
-			Type:       string(evt.Type),
-			SliceIndex: int32(evt.SliceIndex),
+			DocumentId:  string(mevt.DocumentID),
+			DocIndex:    int32(mevt.DocIndex),
+			Type:        string(evt.Type),
+			SliceIndex:  int32(evt.SliceIndex),
 			TotalSlices: int32(evt.TotalSlices),
-			Message:    evt.Message,
+			Message:     evt.Message,
 		}
 
 		if evt.Type == retrieval.EventStarted {
@@ -309,6 +309,6 @@ func fetchContent(ctx context.Context, store storage.Storage, ref string) string
 		return ""
 	}
 	raw, _ := io.ReadAll(rc)
-	rc.Close()
+	_ = rc.Close() // best-effort close
 	return string(raw)
 }

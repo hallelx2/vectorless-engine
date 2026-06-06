@@ -239,7 +239,7 @@ func (d Deps) serveAnswerTreeWalkStream(w http.ResponseWriter, r *http.Request, 
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 		flusher.Flush()
 	}
 

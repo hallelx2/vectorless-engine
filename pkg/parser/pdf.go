@@ -305,7 +305,7 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 			return nil, fmt.Errorf("pdf: open: %w", err)
 		}
 	}
-	defer pdoc.Close()
+	defer func() { _ = pdoc.Close() }() // best-effort close
 
 	reader, err := pdflib.NewReader(bytes.NewReader(docBytes), int64(len(docBytes)))
 	if err != nil {

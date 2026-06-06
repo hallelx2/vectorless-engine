@@ -118,7 +118,7 @@ func TestS3Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("read: %v", err)

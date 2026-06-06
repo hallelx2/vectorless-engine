@@ -134,7 +134,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	// ── LLM + retrieval strategy ──────────────────────────────────
 	llmClient, err := buildLLM(cfg.Engine.LLM)
@@ -518,7 +518,7 @@ func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 
@@ -559,7 +559,7 @@ func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 

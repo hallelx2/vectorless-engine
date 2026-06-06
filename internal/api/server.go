@@ -242,7 +242,7 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, `missing form field "file"`)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }() // best-effort close
 		filename = header.Filename
 		contentType = header.Header.Get("Content-Type")
 		body = file
@@ -395,7 +395,7 @@ func (d Deps) handleGetSection(w http.ResponseWriter, r *http.Request) {
 		rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
 		if err == nil {
 			raw, _ := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close() // best-effort close
 			content = string(raw)
 		}
 	}
@@ -538,7 +538,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
 			if err == nil {
 				raw, _ := io.ReadAll(rc)
-				rc.Close()
+				_ = rc.Close() // best-effort close
 				content = string(raw)
 			}
 		}
@@ -835,7 +835,7 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
 			if err == nil {
 				raw, _ := io.ReadAll(rc)
-				rc.Close()
+				_ = rc.Close() // best-effort close
 				content = string(raw)
 			}
 		}
@@ -1077,7 +1077,7 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 				rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
 				if err == nil {
 					raw, _ := io.ReadAll(rc)
-					rc.Close()
+					_ = rc.Close() // best-effort close
 					content = string(raw)
 				}
 			}

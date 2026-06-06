@@ -177,7 +177,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 			writeErr(w, http.StatusBadRequest, `missing form field "file"`)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }() // best-effort close
 		filename = header.Filename
 		contentType = header.Header.Get("Content-Type")
 		body = file
@@ -347,7 +347,7 @@ func (h *DocumentsHandler) HandleGetDocumentSource(w http.ResponseWriter, r *htt
 		writeErr(w, http.StatusInternalServerError, "read source: "+err.Error())
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 
 	ct := doc.ContentType
 	if ct == "" {
@@ -361,7 +361,7 @@ func (h *DocumentsHandler) HandleGetDocumentSource(w http.ResponseWriter, r *htt
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, doc.Title))
 	}
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, rc)
+	_, _ = io.Copy(w, rc) // best-effort write to response
 }
 
 // HandleGetTree returns the compact tree view used for LLM reasoning.
@@ -428,7 +428,7 @@ func (h *DocumentsHandler) HandleGetSection(w http.ResponseWriter, r *http.Reque
 		rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
 		if getErr == nil {
 			raw, _ := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close() // best-effort close
 			content = string(raw)
 		}
 	}

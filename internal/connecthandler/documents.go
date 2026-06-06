@@ -284,7 +284,7 @@ func (s *DocumentsService) GetDocumentSource(
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, fmt.Errorf("read source: %w", err))
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 
 	// Stream in 32 KiB chunks.
 	buf := make([]byte, 32*1024)

@@ -123,14 +123,14 @@ func newTestDeps(t *testing.T, replies ...string) (Deps, *treeWalkScriptedLLM, *
 	strat.PageLoader = pageStorageLoader{s: store}
 
 	deps := Deps{
-		Logger:            slog.Default(),
-		Storage:           store,
-		LLM:               llm,
-		LLMModel:          "test-model",
-		Strategy:          strat, // unrelated to /v1/answer/treewalk; populated for sanity
+		Logger:           slog.Default(),
+		Storage:          store,
+		LLM:              llm,
+		LLMModel:         "test-model",
+		Strategy:         strat, // unrelated to /v1/answer/treewalk; populated for sanity
 		TreeWalkStrategy: strat,
 		TreeWalk:         config.TreeWalkBlock{Enabled: true, MaxHops: 8, PageContentLimit: 16000},
-		AnswerSpan:        config.AnswerSpanBlock{Enabled: false},
+		AnswerSpan:       config.AnswerSpanBlock{Enabled: false},
 		Replay: retrieval.NewLRUReplayStore(retrieval.LRUReplayConfig{
 			MaxEntries: 16,
 			TTL:        5 * time.Minute,

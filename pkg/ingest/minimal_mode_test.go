@@ -268,7 +268,7 @@ func TestMinimalModeReadyIsQueryable(t *testing.T) {
 			t.Fatalf("load section %s content: %v", s.ID, err)
 		}
 		body, _ := io.ReadAll(rc)
-		rc.Close()
+		_ = rc.Close() // best-effort close
 		if len(bytes.TrimSpace(body)) > 0 {
 			loadedSomeBody = true
 		}

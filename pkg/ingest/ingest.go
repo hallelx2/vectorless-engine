@@ -548,7 +548,7 @@ func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Paylo
 	if err != nil {
 		return nil, fmt.Errorf("fetch source: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
 }
 
@@ -838,7 +838,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 		if err != nil {
 			return nil, err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }() // best-effort close
 		raw, err := io.ReadAll(io.LimitReader(rc, int64(p.SummaryMaxChars)))
 		if err != nil {
 			return nil, err

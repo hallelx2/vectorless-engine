@@ -47,8 +47,8 @@ func TestChunkOversizedLeavesSplits(t *testing.T) {
 
 func TestChunkOversizedLeavesLeavesSmallSectionsAlone(t *testing.T) {
 	in := []Section{
-		{Level: 1, Title: "Intro", Content: strings.Repeat("a b c d e f ", 50)},  // ~600 chars
-		{Level: 1, Title: "Methods", Content: strings.Repeat("x y z ", 200)},      // ~1200 chars
+		{Level: 1, Title: "Intro", Content: strings.Repeat("a b c d e f ", 50)}, // ~600 chars
+		{Level: 1, Title: "Methods", Content: strings.Repeat("x y z ", 200)},    // ~1200 chars
 	}
 	out := chunkOversizedLeaves(in)
 	if len(out) != 2 {

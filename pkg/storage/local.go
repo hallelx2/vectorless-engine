@@ -39,7 +39,7 @@ func (l *Local) Put(ctx context.Context, key string, r io.Reader, _ Metadata) er
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // best-effort close
 	_, err = io.Copy(f, r)
 	return err
 }

@@ -115,7 +115,7 @@ func TestHandleQueryStrategyOverrideRoutesToTreeWalk(t *testing.T) {
 	page := &labeledStrategy{name: "treewalk", picks: []tree.SectionID{"sec_b"}}
 	set := map[string]retrieval.Strategy{
 		"chunked-tree": def,
-		"treewalk":    page,
+		"treewalk":     page,
 	}
 	h := newQueryStrategyHandler(def, set)
 

@@ -77,7 +77,7 @@ func main() {
 			ID string `json:"id"`
 		} `json:"sections"`
 	}
-	json.Unmarshal(treeResp, &treeData)
+	_ = json.Unmarshal(treeResp, &treeData) // benchmark best-effort parse
 	sectionID := ""
 	if len(treeData.Sections) > 1 {
 		sectionID = treeData.Sections[1].ID // pick a child section
@@ -87,9 +87,9 @@ func main() {
 	fmt.Printf("Using section ID: %s\n\n", sectionID)
 
 	type result struct {
-		name     string
-		rest     []time.Duration
-		grpc     []time.Duration
+		name string
+		rest []time.Duration
+		grpc []time.Duration
 	}
 
 	var results []result
@@ -101,12 +101,12 @@ func main() {
 		fmt.Print(".")
 		// REST
 		start := time.Now()
-		restGET(base + "/v1/health")
+		_, _ = restGET(base + "/v1/health")
 		r.rest = append(r.rest, time.Since(start))
 
 		// gRPC (Connect)
 		start = time.Now()
-		healthClient.Check(ctx, connect.NewRequest(&v1.HealthCheckRequest{}))
+		_, _ = healthClient.Check(ctx, connect.NewRequest(&v1.HealthCheckRequest{}))
 		r.grpc = append(r.grpc, time.Since(start))
 	}
 	fmt.Println(" done")
@@ -118,11 +118,11 @@ func main() {
 	for i := 0; i < n; i++ {
 		fmt.Print(".")
 		start := time.Now()
-		restGET(base + "/v1/documents")
+		_, _ = restGET(base + "/v1/documents")
 		r.rest = append(r.rest, time.Since(start))
 
 		start = time.Now()
-		docsClient.ListDocuments(ctx, connect.NewRequest(&v1.ListDocumentsRequest{Limit: 10}))
+		_, _ = docsClient.ListDocuments(ctx, connect.NewRequest(&v1.ListDocumentsRequest{Limit: 10}))
 		r.grpc = append(r.grpc, time.Since(start))
 	}
 	fmt.Println(" done")
@@ -134,11 +134,11 @@ func main() {
 	for i := 0; i < n; i++ {
 		fmt.Print(".")
 		start := time.Now()
-		restGET(base + "/v1/documents/" + *docID + "/tree")
+		_, _ = restGET(base + "/v1/documents/" + *docID + "/tree")
 		r.rest = append(r.rest, time.Since(start))
 
 		start = time.Now()
-		docsClient.GetDocumentTree(ctx, connect.NewRequest(&v1.GetDocumentTreeRequest{
+		_, _ = docsClient.GetDocumentTree(ctx, connect.NewRequest(&v1.GetDocumentTreeRequest{
 			DocumentId: *docID,
 		}))
 		r.grpc = append(r.grpc, time.Since(start))
@@ -153,11 +153,11 @@ func main() {
 		for i := 0; i < n; i++ {
 			fmt.Print(".")
 			start := time.Now()
-			restGET(base + "/v1/sections/" + sectionID)
+			_, _ = restGET(base + "/v1/sections/" + sectionID)
 			r.rest = append(r.rest, time.Since(start))
 
 			start = time.Now()
-			docsClient.GetSection(ctx, connect.NewRequest(&v1.GetSectionRequest{
+			_, _ = docsClient.GetSection(ctx, connect.NewRequest(&v1.GetSectionRequest{
 				SectionId: sectionID,
 			}))
 			r.grpc = append(r.grpc, time.Since(start))
@@ -182,12 +182,12 @@ func main() {
 			"query":       q,
 		})
 		start := time.Now()
-		restPOST(base+"/v1/query", body)
+		_, _ = restPOST(base+"/v1/query", body)
 		r.rest = append(r.rest, time.Since(start))
 
 		// gRPC (Connect)
 		start = time.Now()
-		queryClient.Query(ctx, connect.NewRequest(&v1.QueryRequest{
+		_, _ = queryClient.Query(ctx, connect.NewRequest(&v1.QueryRequest{
 			DocumentId: *docID,
 			Query:      q,
 		}))
@@ -246,7 +246,7 @@ func restGET(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	return io.ReadAll(resp.Body)
 }
 
@@ -255,7 +255,7 @@ func restPOST(url string, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	return io.ReadAll(resp.Body)
 }
 

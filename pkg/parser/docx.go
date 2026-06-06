@@ -123,7 +123,7 @@ func readZipFile(zr *zip.Reader, name string) []byte {
 			if err != nil {
 				return nil
 			}
-			defer rc.Close()
+			defer func() { _ = rc.Close() }() // best-effort close
 			data, err := io.ReadAll(rc)
 			if err != nil {
 				return nil
@@ -164,11 +164,11 @@ func extractBlocks(body []byte) ([]docxBlock, error) {
 	var out []docxBlock
 
 	var (
-		tblDepth        int
-		rows            [][]string // current outermost table
-		inRow           bool
-		inCell          bool
-		cellBuf         strings.Builder
+		tblDepth int
+		rows     [][]string // current outermost table
+		inRow    bool
+		inCell   bool
+		cellBuf  strings.Builder
 
 		inPara          bool
 		level           int

@@ -31,7 +31,7 @@ type AsynqConfig struct {
 // payload is the engine Job marshalled as JSON. Handlers are dispatched
 // via an asynq.ServeMux at work time.
 type Asynq struct {
-	cfg    AsynqConfig
+	cfg      AsynqConfig
 	redisOpt asynq.RedisClientOpt
 
 	mu       sync.RWMutex

@@ -90,7 +90,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init queue: %w", err)
 	}
-	defer q.Close()
+	defer func() { _ = q.Close() }() // best-effort close
 
 	llmClient, err := buildLLM(cfg.LLM)
 	if err != nil {
@@ -439,7 +439,7 @@ func (sf storageFetcher) Get(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 
@@ -456,7 +456,7 @@ func (l storagePageLoader) Load(ctx context.Context, ref string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // best-effort close
 	return io.ReadAll(rc)
 }
 

@@ -52,7 +52,7 @@ func TestReplayByteExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -78,7 +78,7 @@ func TestReplayUnknownToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
@@ -105,7 +105,7 @@ func TestReplayDocumentIDMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
@@ -140,7 +140,7 @@ func TestReplayQueryMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
@@ -168,7 +168,7 @@ func TestReplayDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", resp.StatusCode)
 	}
@@ -196,7 +196,7 @@ func TestReplayRequiresFields(t *testing.T) {
 		if err != nil {
 			t.Fatalf("case %d: %v", i, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close() // best-effort close
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("case %d: status = %d, want 400", i, resp.StatusCode)
 		}
@@ -214,7 +214,7 @@ func TestReplayBadJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
@@ -289,7 +289,7 @@ func TestReplayEndToEndByteExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer got.Body.Close()
+	defer func() { _ = got.Body.Close() }() // best-effort close
 	if got.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", got.StatusCode)
 	}
@@ -328,7 +328,7 @@ func TestReplayPreservesUnicodeAndWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // best-effort close
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, want) {
 		t.Errorf("byte drift:\n  got  %q\n  want %q", got, want)

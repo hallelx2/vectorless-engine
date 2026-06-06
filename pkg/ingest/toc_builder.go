@@ -31,18 +31,18 @@ type PageText struct {
 // document. The shape mirrors TreeWalk's three-phase pipeline:
 //
 //  1. detect    — scan the first TOCCheckPages pages and ask the LLM
-//                 whether any of them looks like a real TOC.
+//     whether any of them looks like a real TOC.
 //  2. extract   — if a TOC page was found, ask the LLM to parse it
-//                 into structured nodes; otherwise call the no-TOC
-//                 path that generates a TOC straight from body
-//                 text (the LLM is given the full page text tagged
-//                 with <physical_index_X> markers it copies back as
-//                 the start page).
+//     into structured nodes; otherwise call the no-TOC
+//     path that generates a TOC straight from body
+//     text (the LLM is given the full page text tagged
+//     with <physical_index_X> markers it copies back as
+//     the start page).
 //  3. verify    — concurrently re-check each leaf node: does its
-//                 title actually appear at the start of the claimed
-//                 page? Mismatches are repaired by clearing the
-//                 page back to zero; downstream readers treat zero
-//                 as "open / unknown" rather than a wrong answer.
+//     title actually appear at the start of the claimed
+//     page? Mismatches are repaired by clearing the
+//     page back to zero; downstream readers treat zero
+//     as "open / unknown" rather than a wrong answer.
 //
 // EndPage is derived from sibling ordering once verification is
 // done. The builder is deliberately tolerant of LLM parse blips
@@ -465,18 +465,18 @@ Directly return the final JSON structure. Do not output anything else.`, title, 
 // --- prompt + schema constants ---
 
 const (
-	tocDetectorSystemPrompt   = "You are a precise document-structure analyser. Decide whether a single page of text is a table of contents."
-	tocExtractorSystemPrompt  = "You are an expert in extracting hierarchical tree structures from documents. You output strict JSON only."
-	tocVerifySystemPrompt     = "You are a precise verifier. Decide whether a section title starts a page's text."
-	defaultTOCRetries         = 2
-	tocDetectorMaxChars       = 12000
-	tocExtractorMaxChars      = 16000
-	tocExtractorMaxBody       = 60000
-	noTOCMaxBody              = 80000
-	verifyMaxChars            = 4000
-	tocDetectorJSONSchema     = `{"type":"object","properties":{"thinking":{"type":"string"},"toc_detected":{"type":"string"}},"required":["toc_detected"]}`
-	tocVerifyJSONSchema       = `{"type":"object","properties":{"thinking":{"type":"string"},"start_begin":{"type":"string"}},"required":["start_begin"]}`
-	tocNodesJSONSchema        = `{"type":"object","properties":{"nodes":{"type":"array","items":{"type":"object","properties":{"structure":{"type":"string"},"title":{"type":"string"},"physical_index":{"type":["string","null"]}},"required":["title"]}}},"required":["nodes"]}`
+	tocDetectorSystemPrompt  = "You are a precise document-structure analyser. Decide whether a single page of text is a table of contents."
+	tocExtractorSystemPrompt = "You are an expert in extracting hierarchical tree structures from documents. You output strict JSON only."
+	tocVerifySystemPrompt    = "You are a precise verifier. Decide whether a section title starts a page's text."
+	defaultTOCRetries        = 2
+	tocDetectorMaxChars      = 12000
+	tocExtractorMaxChars     = 16000
+	tocExtractorMaxBody      = 60000
+	noTOCMaxBody             = 80000
+	verifyMaxChars           = 4000
+	tocDetectorJSONSchema    = `{"type":"object","properties":{"thinking":{"type":"string"},"toc_detected":{"type":"string"}},"required":["toc_detected"]}`
+	tocVerifyJSONSchema      = `{"type":"object","properties":{"thinking":{"type":"string"},"start_begin":{"type":"string"}},"required":["start_begin"]}`
+	tocNodesJSONSchema       = `{"type":"object","properties":{"nodes":{"type":"array","items":{"type":"object","properties":{"structure":{"type":"string"},"title":{"type":"string"},"physical_index":{"type":["string","null"]}},"required":["title"]}}},"required":["nodes"]}`
 )
 
 // --- JSON payload types ---

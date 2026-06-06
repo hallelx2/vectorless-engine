@@ -133,7 +133,7 @@ func Idempotency(cfg IdempotencyConfig) func(http.Handler) http.Handler {
 			if cr, ok := cache.get(key); ok {
 				w.Header().Set("X-Idempotency-Replayed", "true")
 				w.WriteHeader(cr.statusCode)
-				w.Write(cr.body) //nolint:errcheck
+				_, _ = w.Write(cr.body) //nolint:errcheck // best-effort write to response
 				return
 			}
 

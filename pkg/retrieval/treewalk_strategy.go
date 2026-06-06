@@ -522,7 +522,6 @@ func (s *TreeWalkStrategy) renderPages(ctx context.Context, sections []sectionPa
 		}
 		if len(header) > remaining {
 			b.WriteString(header[:remaining])
-			written += remaining
 			break
 		}
 		b.WriteString(header)
@@ -538,7 +537,6 @@ func (s *TreeWalkStrategy) renderPages(ctx context.Context, sections []sectionPa
 		}
 		if len(body) > remaining {
 			b.WriteString(body[:remaining])
-			written += remaining
 			break
 		}
 		b.WriteString(body)

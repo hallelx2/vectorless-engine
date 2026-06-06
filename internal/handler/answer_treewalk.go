@@ -39,7 +39,7 @@ type AnswerTreeWalkHandler struct {
 	answerSpan enginecfg.AnswerSpanBlock
 	replay     retrieval.ReplayStore
 	strategy   *retrieval.TreeWalkStrategy
-	treeWalk  enginecfg.TreeWalkBlock
+	treeWalk   enginecfg.TreeWalkBlock
 
 	// treeLoader is a test seam overriding how the handler resolves
 	// the document tree. Nil routes through the org-scoped DB lookup
@@ -72,7 +72,7 @@ func NewAnswerTreeWalkHandler(
 		answerSpan: answerSpan,
 		replay:     replay,
 		strategy:   strategy,
-		treeWalk:  treeWalk,
+		treeWalk:   treeWalk,
 	}
 }
 
@@ -253,7 +253,7 @@ func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Reque
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 		flusher.Flush()
 	}
 
