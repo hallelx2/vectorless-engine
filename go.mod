@@ -17,7 +17,7 @@ require (
 	github.com/hallelx2/llmgate v0.3.0
 	github.com/hallelx2/pdftable v0.3.1
 	github.com/hibiken/asynq v0.26.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/pdfcpu/pdfcpu v0.12.1
 	github.com/prometheus/client_golang v1.20.5
