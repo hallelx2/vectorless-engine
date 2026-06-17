@@ -310,6 +310,15 @@ func (d Deps) buildTreeWalkCitations(ctx context.Context, t *tree.Tree, res *ret
 	sources := retrieval.CitationSources(res)
 	citations := make([]map[string]any, 0, len(sources))
 
+	// Canonical heading paths (section ID → logical heading path), resolved
+	// from the document's LLM TOC tree by page-range containment (HAL-109).
+	// This is what makes a citation carry a real STRUCTURAL path
+	// ("Item 8" → "Balance Sheet") rather than leaving the consumer to
+	// reverse-engineer one from the parser's chunk titles. Nil/empty when no
+	// TOC was persisted — the citation then simply omits title_path and the
+	// consumer falls back to its prior behaviour.
+	headingPaths := d.headingPathsForDoc(ctx, t)
+
 	for _, src := range sources {
 		sectionIDs := src.SectionIDs
 		if sectionIDs == nil {
@@ -319,6 +328,16 @@ func (d Deps) buildTreeWalkCitations(ctx context.Context, t *tree.Tree, res *ret
 			"start_page":  src.Start,
 			"end_page":    src.End,
 			"section_ids": sectionIDs,
+		}
+
+		// Attach the heading path of the citation's primary (first, i.e.
+		// earliest-page) section. This mirrors how a consumer anchors a
+		// page-range citation to one structural location, and is exactly
+		// the field the bench's path-correctness metric reads.
+		if len(sectionIDs) > 0 {
+			if hp := headingPaths[sectionIDs[0]]; len(hp) > 0 {
+				c["title_path"] = hp
+			}
 		}
 
 		// Quote extraction is best-effort: an LLM blip or empty
@@ -352,6 +371,44 @@ func (d Deps) buildTreeWalkCitations(ctx context.Context, t *tree.Tree, res *ret
 	})
 
 	return citations
+}
+
+// headingPathsForDoc resolves the canonical section-ID → heading-path
+// map for the document, reading the persisted LLM TOC tree through the
+// strategy's TOC provider and reconciling it with the section tree via
+// tree.BuildHeadingPaths (HAL-109).
+//
+// Every failure mode degrades to nil (no heading paths): no strategy /
+// provider wired, no TOC persisted (retrieval.ErrNoTOC), a fetch error,
+// or unparseable TOC JSON. A nil map is safe to index — citations then
+// omit title_path and the consumer falls back to its prior behaviour, so
+// this never makes a response worse than before the TOC was available.
+func (d Deps) headingPathsForDoc(ctx context.Context, t *tree.Tree) map[tree.SectionID][]string {
+	if t == nil || t.Root == nil || d.TreeWalkStrategy == nil || d.TreeWalkStrategy.TOC == nil {
+		return nil
+	}
+	raw, err := d.TreeWalkStrategy.TOC.GetTOC(ctx, t.DocumentID)
+	if err != nil {
+		// retrieval.ErrNoTOC is the expected "no TOC persisted yet" signal —
+		// silent. Any other error (DB/transport) is an operational issue worth
+		// surfacing for diagnosis, even though we still degrade to no heading
+		// paths rather than failing the request.
+		if !errors.Is(err, retrieval.ErrNoTOC) {
+			d.Logger.Debug("answer/treewalk: TOC fetch failed; citations omit heading paths",
+				"err", err, "document_id", t.DocumentID)
+		}
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var nodes []tree.TOCNode
+	if err := json.Unmarshal(raw, &nodes); err != nil {
+		d.Logger.Warn("answer/treewalk: TOC parse failed; citations omit heading paths",
+			"err", err, "document_id", t.DocumentID)
+		return nil
+	}
+	return tree.BuildHeadingPaths(t.Root, nodes)
 }
 
 // materialiseCitedContent loads + concatenates every cited
