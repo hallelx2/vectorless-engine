@@ -790,10 +790,64 @@ func Default() Config {
 	}
 }
 
+// localDefaultAddr is the canonical local-mode listen address. The whole
+// product (engine API + bundled dashboard) is reachable at
+// localhost:7654 so every doc, link, and quickstart can say one number.
+const localDefaultAddr = ":7654"
+
+// defaultLocalDatabaseURL is the Postgres DSN local mode assumes when no
+// URL is configured. It matches the bundled Postgres in the all-in-one
+// Docker image and the dev docker-compose (user/pass/db all "vectorless"
+// on localhost:5432), so a bare `engine --local` next to those services
+// just connects.
+const defaultLocalDatabaseURL = "postgres://vectorless:vectorless@localhost:5432/vectorless?sslmode=disable"
+
+// LocalModeEnabled reports whether zero-config local mode was requested
+// via the VLE_LOCAL_MODE env var (truthy: 1/true/yes/on). The engine's
+// --local flag sets this var before Load runs, so the CLI flag and the
+// env var (used by the Docker image) share one code path.
+func LocalModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("VLE_LOCAL_MODE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// applyLocalDefaults rewrites the base config for zero-config local
+// running: the canonical :7654 port, a localhost Postgres URL matching
+// the bundled/dev database, local file storage, and the Postgres-backed
+// river queue (no Redis required). It runs on the Default() base BEFORE
+// the YAML file and env overrides are applied, so any value the operator
+// sets explicitly still wins — local mode only moves the starting point
+// so the engine boots with no required configuration.
+//
+// Auth: the standalone engine (cmd/engine) is already unauthenticated —
+// it serves a single logical tenant with no API key — so "local-mode
+// auth" needs no extra wiring here. This is dev/local only and must not
+// be exposed to the public internet.
+func applyLocalDefaults(c *Config) {
+	c.Server.Addr = localDefaultAddr
+	c.Database.URL = defaultLocalDatabaseURL
+	c.Storage.Driver = "local"
+	if c.Storage.Local.Root == "" {
+		c.Storage.Local.Root = "./data/documents"
+	}
+	c.Queue.Driver = "river"
+}
+
 // Load reads configuration from a YAML file (optional) and applies
 // environment overrides on top. Pass an empty path to skip the file.
+//
+// When VLE_LOCAL_MODE is truthy (or the engine is run with --local, which
+// sets it), zero-config local defaults are applied to the base before the
+// file/env layers, so the engine boots on :7654 against a localhost
+// Postgres with no required configuration. File and env still override.
 func Load(path string) (Config, error) {
 	cfg := Default()
+	if LocalModeEnabled() {
+		applyLocalDefaults(&cfg)
+	}
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -868,6 +922,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("VLE_STORAGE_DRIVER"); v != "" {
 		c.Storage.Driver = v
+	}
+	if v := os.Getenv("VLE_STORAGE_LOCAL_ROOT"); v != "" {
+		c.Storage.Local.Root = v
 	}
 	if v := os.Getenv("VLE_QUEUE_DRIVER"); v != "" {
 		c.Queue.Driver = v
