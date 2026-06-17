@@ -388,7 +388,18 @@ func (d Deps) headingPathsForDoc(ctx context.Context, t *tree.Tree) map[tree.Sec
 		return nil
 	}
 	raw, err := d.TreeWalkStrategy.TOC.GetTOC(ctx, t.DocumentID)
-	if err != nil || len(raw) == 0 {
+	if err != nil {
+		// retrieval.ErrNoTOC is the expected "no TOC persisted yet" signal —
+		// silent. Any other error (DB/transport) is an operational issue worth
+		// surfacing for diagnosis, even though we still degrade to no heading
+		// paths rather than failing the request.
+		if !errors.Is(err, retrieval.ErrNoTOC) {
+			d.Logger.Debug("answer/treewalk: TOC fetch failed; citations omit heading paths",
+				"err", err, "document_id", t.DocumentID)
+		}
+		return nil
+	}
+	if len(raw) == 0 {
 		return nil
 	}
 	var nodes []tree.TOCNode
