@@ -1,6 +1,9 @@
 package tree
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // BuildHeadingPaths reconciles the parser's section tree with the
 // LLM-built TOC tree into one canonical lookup: section ID → logical
@@ -86,11 +89,12 @@ type tocEntry struct {
 	path  []string
 }
 
-// span is the inclusive page count the entry covers. A zero/negative
-// span (malformed node that survived resolution) sorts last.
+// span is the inclusive page count the entry covers. A malformed node
+// (end < start) that survived resolution reports the maximum span so it
+// sorts last in specificity comparisons, regardless of int width.
 func (e tocEntry) span() int {
 	if e.end < e.start {
-		return 1 << 30
+		return math.MaxInt
 	}
 	return e.end - e.start + 1
 }
