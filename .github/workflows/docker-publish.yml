@@ -1,13 +1,20 @@
 name: docker-publish
 
 # Build and publish the engine Docker image to GitHub Container Registry
-# on every push to main and every semver tag (vX.Y.Z).
+# AND Docker Hub on every push to main and every semver tag (vX.Y.Z).
 #
-# Resulting tags:
+# Resulting tags (identical on both registries):
 #   ghcr.io/hallelx2/vectorless-engine:main          (latest main branch)
 #   ghcr.io/hallelx2/vectorless-engine:sha-<7chars>  (immutable, per-commit)
 #   ghcr.io/hallelx2/vectorless-engine:vX.Y.Z        (release tags)
 #   ghcr.io/hallelx2/vectorless-engine:latest        (only on release tags)
+#
+#   hallelx2/vectorless-engine:main                  (Docker Hub, same)
+#   hallelx2/vectorless-engine:sha-<7chars>
+#   hallelx2/vectorless-engine:vX.Y.Z
+#   hallelx2/vectorless-engine:latest
+#
+# Multi-arch: linux/amd64 + linux/arm64
 
 on:
   push:
@@ -20,12 +27,8 @@ permissions:
 
 jobs:
   publish:
-    name: build + push (${{ matrix.platform }})
+    name: Build + push (multi-arch)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [linux/amd64]   # add linux/arm64 once you're ready to spend the build time
 
     steps:
       - name: Checkout
@@ -44,11 +47,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Extract tags + labels
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/vectorless-engine
+          images: |
+            ghcr.io/${{ github.repository_owner }}/vectorless-engine
+            hallelx2/vectorless-engine
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -60,7 +71,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
