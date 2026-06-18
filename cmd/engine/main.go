@@ -60,6 +60,8 @@ func run() error {
 		"queue_driver", cfg.Queue.Driver,
 		"llm_driver", cfg.LLM.Driver,
 		"retrieval_strategy", cfg.Retrieval.Strategy,
+		"ingest_mode", cfg.Ingest.Mode,
+		"toc_enabled", cfg.Ingest.TOC.Enabled,
 	)
 
 	// Surface any model with no price-book entry: its cost reads $0, which
@@ -190,7 +192,15 @@ func run() error {
 		SummaryAxesMaxTopics:   cfg.Ingest.SummaryAxes.MaxTopics,
 		SummaryAxesMaxEntities: cfg.Ingest.SummaryAxes.MaxEntities,
 		SummaryAxesMaxNumbers:  cfg.Ingest.SummaryAxes.MaxNumbers,
-		GlobalLLMConcurrency:   cfg.Ingest.GlobalLLMConcurrency,
+		// Wire the LLM TOC builder (cmd/server already does this). Without
+		// these, Pipeline.TOCEnabled defaults to false, runTOCBuilder never
+		// runs, documents.toc_tree stays NULL, and the treewalk citation
+		// title_path (HAL-70) can never resolve on the standalone engine.
+		TOCEnabled:           cfg.Ingest.TOC.Enabled,
+		TOCModel:             cfg.Ingest.TOC.Model,
+		TOCConcurrency:       cfg.Ingest.TOC.Concurrency,
+		TOCCheckPages:        cfg.Ingest.TOC.TOCCheckPages,
+		GlobalLLMConcurrency: cfg.Ingest.GlobalLLMConcurrency,
 	})
 	if cfg.Ingest.Mode == ingest.ModeMinimal {
 		logger.Info("ingest: MINIMAL mode — parse→persist→ready; skipping summarize/HyDE/multi-axis/TOC + table extraction")
