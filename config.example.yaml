@@ -13,6 +13,19 @@
 #
 # `vectorless-engine config print` prints the effective config with secrets
 # redacted; `vectorless-engine config check` validates it and exits 0/1.
+#
+# ZERO-CONFIG LOCAL MODE
+# ----------------------
+# Run `engine --local` (or set VLE_LOCAL_MODE=true) to boot with no config
+# at all: it listens on :7654, points at a localhost Postgres
+# (postgres://vectorless:vectorless@localhost:5432/vectorless?sslmode=disable), uses local
+# file storage and the Postgres-backed river queue, and requires no API key
+# to call the engine. This matches the all-in-one Docker image, where
+# Postgres is bundled in the same container. You still supply an LLM
+# provider key (e.g. VLE_LLM_ANTHROPIC_API_KEY) for ingestion + retrieval.
+# Override any local default with the usual env/flags, e.g.
+# VLE_SERVER_ADDR=:9000 or VLE_STORAGE_LOCAL_ROOT=/data/documents.
+# Local mode is for dev/local use — do NOT expose it to the public internet.
 
 server:
   addr: ":8080"

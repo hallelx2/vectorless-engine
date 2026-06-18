@@ -46,7 +46,15 @@ func main() {
 
 func run() error {
 	configPath := flag.String("config", "", "path to config.yaml (optional; env vars take precedence)")
+	localMode := flag.Bool("local", false, "zero-config local mode: localhost Postgres, local storage, listen on :7654, no setup (sets VLE_LOCAL_MODE)")
 	flag.Parse()
+
+	// --local is sugar for VLE_LOCAL_MODE=true so the CLI flag and the env
+	// var (used by the all-in-one Docker image) flow through one path in
+	// config.Load. Set it before Load reads the environment.
+	if *localMode {
+		_ = os.Setenv("VLE_LOCAL_MODE", "true")
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -56,6 +64,7 @@ func run() error {
 	logger := newLogger(cfg.Log)
 	logger.Info("starting vectorless-engine",
 		"version", version,
+		"local_mode", config.LocalModeEnabled(),
 		"storage_driver", cfg.Storage.Driver,
 		"queue_driver", cfg.Queue.Driver,
 		"llm_driver", cfg.LLM.Driver,
