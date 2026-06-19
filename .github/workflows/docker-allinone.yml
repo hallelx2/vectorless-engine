@@ -13,8 +13,12 @@ name: docker-allinone
 # (GHCR uses the built-in GITHUB_TOKEN — no extra secret.)
 
 on:
-  workflow_dispatch: {}        # run on demand from the Actions tab / gh CLI
+  workflow_dispatch: {}        # run on demand once this lands on the default branch
   push:
+    # TEMPORARY: build from the local-mode feature branch so we can publish a
+    # usable :latest before this merges to main. After merge, drop the branch
+    # entry and rely on workflow_dispatch + tags (latest then tracks default).
+    branches: ["halleluyaholudele/hal-186-engine-zero-config-local-mode"]
     tags: ["v*.*.*"]
 
 permissions:
@@ -53,8 +57,7 @@ jobs:
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/vectorless
             ghcr.io/${{ github.repository_owner }}/vectorless
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest
             type=ref,event=tag
             type=sha,prefix=sha-,format=short
 
