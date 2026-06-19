@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vectorless · local</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231456F0'/%3E%3Cpath d='M4 4 L12 20 L20 4' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='12' cy='20' r='2' fill='%23EA5EC1'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<script src="/vendor/pdf.min.js"></script>
+<style>
+  :root{
+    --canvas:#FCFCFD; --ink:#0A0A0A; --secondary:#3F3F46; --muted:#71717A;
+    --hairline:#E5E7EB; --hairline2:#EFEFF1; --blue:#1456F0; --pink:#EA5EC1;
+    --panel:#FFFFFF; --ok:#16A34A; --warn:#D97706; --err:#DC2626; --rail:#FAFAFB;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--canvas);color:var(--ink);font-family:"Geist",system-ui,sans-serif;font-weight:300;
+    line-height:1.5;-webkit-font-smoothing:antialiased;font-size:14px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  .eyebrow{font-family:"Geist Mono",monospace;font-size:10.5px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .grad{background:linear-gradient(92deg,var(--blue),var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .serif{font-family:"Instrument Serif",Georgia,serif;font-style:italic;font-weight:400}
+  a{color:var(--blue);text-decoration:none}
+
+  nav{display:flex;align-items:center;gap:11px;padding:13px 22px;border-bottom:1px solid var(--hairline);flex:0 0 auto}
+  .wordmark{font-weight:500;letter-spacing:-.02em;font-size:16px}
+  .nav-meta{margin-left:14px;font-size:12px;color:var(--muted)}
+  .nav-meta b{color:var(--secondary);font-weight:500}
+  .status{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);transition:background .3s}
+  .dot.up{background:var(--ok)} .dot.down{background:var(--err)}
+  .navbtn{display:flex;align-items:center;gap:5px;background:none;border:1px solid var(--hairline);border-radius:8px;
+    padding:5px 8px;cursor:pointer;color:var(--secondary);transition:border-color .12s,color .12s}
+  .navbtn:hover{border-color:var(--blue);color:var(--blue)}
+  .keydot{width:7px;height:7px;border-radius:50%;background:var(--err)}
+  .keydot.set{background:var(--ok)}
+  /* modal */
+  .modal-bg{position:fixed;inset:0;background:rgba(10,10,10,.35);display:none;align-items:center;justify-content:center;z-index:50}
+  .modal-bg.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--hairline);border-radius:16px;width:440px;max-width:92vw;
+    box-shadow:0 20px 60px rgba(0,0,0,.18);overflow:hidden}
+  .modal .mhead{padding:18px 22px 14px;border-bottom:1px solid var(--hairline2)}
+  .modal .mhead h3{margin:0;font-size:15px;font-weight:500} .modal .mhead p{margin:5px 0 0;font-size:12.5px;color:var(--muted)}
+  .modal .mbody{padding:18px 22px;display:flex;flex-direction:column;gap:14px}
+  .field label{display:block;font-size:12px;font-weight:500;color:var(--secondary);margin-bottom:5px}
+  .field input,.field select{width:100%;font-family:inherit;font-size:13.5px;color:var(--ink);background:var(--canvas);
+    border:1px solid var(--hairline);border-radius:9px;padding:9px 11px}
+  .field input:focus,.field select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(20,86,240,.08)}
+  .field .fhint{font-size:11px;color:var(--muted);margin-top:4px}
+  .modal .mfoot{padding:14px 22px;border-top:1px solid var(--hairline2);display:flex;gap:10px;justify-content:flex-end;align-items:center}
+  .modal .mfoot .spacer{margin-right:auto;font-size:12px}
+
+  .shell{display:grid;grid-template-columns:300px 1fr;flex:1 1 auto;min-height:0}
+  @media(max-width:860px){.shell{grid-template-columns:1fr}}
+
+  aside{border-right:1px solid var(--hairline);background:var(--rail);overflow-y:auto;padding:18px}
+  .sec-label{font-family:"Geist Mono",monospace;font-size:10px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 11px;display:flex;align-items:center;gap:7px}
+  .sec-label .ct{margin-left:auto;color:var(--muted);font-weight:400}
+  .drop{display:block;border:1.5px dashed var(--hairline);border-radius:11px;padding:22px 14px;text-align:center;cursor:pointer;
+    transition:border-color .15s,background .15s;background:var(--panel)}
+  .drop:hover,.drop.over{border-color:var(--blue);background:rgba(20,86,240,.035)}
+  .drop .big{font-size:13px;color:var(--secondary)} .drop .small{font-size:11px;color:var(--muted);margin-top:4px}
+  input[type=file]{display:none}
+  #upmsg{font-size:12px;color:var(--muted);margin-top:9px;min-height:16px}
+  .docs{margin-top:22px}
+  .doc{display:flex;gap:9px;align-items:center;padding:9px;border:1px solid transparent;border-radius:9px;cursor:pointer;
+    transition:background .12s,border-color .12s}
+  .doc:hover{background:var(--panel);border-color:var(--hairline2)}
+  .doc.active{border-color:var(--blue);background:var(--panel);box-shadow:0 0 0 1px rgba(20,86,240,.12)}
+  .doc .ic{width:22px;height:22px;border-radius:6px;background:rgba(20,86,240,.08);display:grid;place-items:center;flex:0 0 auto}
+  .doc .t{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+  .doc .st{margin-left:auto;flex:0 0 auto}
+  .doc .del{flex:0 0 auto;opacity:0;border:none;background:none;color:var(--muted);cursor:pointer;font-size:15px;padding:0 2px;line-height:1;transition:opacity .12s,color .12s}
+  .doc:hover .del{opacity:1} .doc .del:hover{color:var(--err)}
+  .badge{font-family:"Geist Mono",monospace;font-size:9.5px;font-weight:500;padding:2px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.04em}
+  .badge.ready{color:var(--ok);background:rgba(22,163,74,.1)} .badge.work{color:var(--warn);background:rgba(217,119,6,.1)} .badge.fail{color:var(--err);background:rgba(220,38,38,.1)}
+  .rail-empty{font-size:12.5px;color:var(--muted);padding:6px 2px}
+
+  main{overflow-y:auto;padding:28px 36px;min-width:0}
+  .wrap{max-width:1080px;margin:0 auto}
+
+  .welcome{padding:34px 0 24px;max-width:780px}
+  .welcome h1{font-weight:500;letter-spacing:-.025em;font-size:34px;line-height:1.12;margin:12px 0 0}
+  .welcome p{color:var(--secondary);font-size:16px;max-width:54ch;margin:14px 0 0}
+  .steps{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap}
+  .step{flex:1 1 150px;border:1px solid var(--hairline);border-radius:12px;padding:16px;background:var(--panel)}
+  .step .n{font-family:"Geist Mono",monospace;font-size:11px;color:var(--blue);font-weight:500}
+  .step .h{font-size:13.5px;font-weight:500;margin:7px 0 3px} .step .d{font-size:12.5px;color:var(--muted)}
+
+  .doc-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding-bottom:4px}
+  .doc-head h1{font-weight:500;letter-spacing:-.02em;font-size:23px;margin:0}
+  .doc-head .facts{font-size:12.5px;color:var(--muted)} .doc-head .facts b{color:var(--secondary);font-weight:500}
+
+  .card{background:var(--panel);border:1px solid var(--hairline);border-radius:15px;margin-top:18px;overflow:hidden}
+  .card .cap{display:flex;align-items:center;gap:8px;padding:13px 18px;border-bottom:1px solid var(--hairline2)}
+  .card .cap .ttl{font-size:12.5px;font-weight:500} .card .cap .hint{margin-left:auto;font-size:11.5px;color:var(--muted)}
+  .card .body{padding:16px 18px}
+  textarea{width:100%;font-family:inherit;font-size:15px;font-weight:300;color:var(--ink);background:var(--canvas);
+    border:1px solid var(--hairline);border-radius:11px;padding:12px 14px;resize:vertical;min-height:64px;line-height:1.5}
+  textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(20,86,240,.08)}
+  .ask-row{display:flex;gap:11px;align-items:center;margin-top:11px}
+  .btn{font-family:inherit;font-size:13.5px;font-weight:400;border-radius:10px;border:1px solid var(--ink);background:var(--ink);
+    color:#fff;padding:9px 18px;cursor:pointer;transition:opacity .15s,transform .05s}
+  .btn:hover{opacity:.88} .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.35;cursor:not-allowed}
+  .askhint{font-size:12px;color:var(--muted)}
+  .examples{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+  .ex{font-size:12px;color:var(--secondary);background:var(--canvas);border:1px solid var(--hairline);border-radius:20px;
+    padding:5px 11px;cursor:pointer;transition:border-color .12s,color .12s}
+  .ex:hover{border-color:var(--blue);color:var(--blue)}
+
+  /* result */
+  #result:empty{display:none}
+  .res{margin-top:16px;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .lbl{font-family:"Geist Mono",monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  .answer-text{font-size:17px;line-height:1.6;color:var(--ink);font-weight:400}
+  .chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+  .chip{font-family:"Geist Mono",monospace;font-size:11px;color:var(--secondary);background:var(--canvas);border:1px solid var(--hairline);border-radius:20px;padding:3px 9px}
+  .chip.good{color:var(--ok);border-color:rgba(22,163,74,.3)}
+
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+  @media(max-width:900px){.split{grid-template-columns:1fr}}
+
+  .cite{padding:10px 0;border-top:1px dashed var(--hairline);cursor:pointer;transition:background .1s}
+  .cite:first-of-type{border-top:none} .cite:hover{background:rgba(20,86,240,.02)}
+  .cite.sel{background:rgba(20,86,240,.04)}
+  .cite .pg{font-family:"Geist Mono",monospace;font-size:11px;color:var(--blue);font-weight:500;display:flex;align-items:center;gap:6px}
+  .cite .q{font-size:13px;color:var(--secondary);margin-top:3px;line-height:1.5} .cite .q::before{content:"“"} .cite .q::after{content:"”"}
+
+  .sec-item{padding:11px 0;border-top:1px solid var(--hairline2)} .sec-item:first-of-type{border-top:none}
+  .sec-item .h{display:flex;align-items:center;gap:8px}
+  .sec-item .title{font-size:13.5px;font-weight:500;color:var(--ink)}
+  .sec-item .pg{margin-left:auto;font-family:"Geist Mono",monospace;font-size:10px;color:var(--muted)}
+  .sec-item .snip{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.5;max-height:60px;overflow:hidden}
+
+  /* pdf preview */
+  .preview .cap .nav{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .pvbtn{border:1px solid var(--hairline);background:var(--panel);border-radius:7px;width:26px;height:24px;cursor:pointer;
+    color:var(--secondary);font-size:13px;line-height:1;display:grid;place-items:center;transition:border-color .12s}
+  .pvbtn:hover{border-color:var(--blue);color:var(--blue)} .pvbtn:disabled{opacity:.35;cursor:not-allowed}
+  .pvpage{font-family:"Geist Mono",monospace;font-size:11px;color:var(--muted)}
+  .pvwrap{background:#F4F4F5;display:grid;place-items:center;padding:14px;min-height:280px;max-height:560px;overflow:auto}
+  .pvwrap canvas{box-shadow:0 1px 8px rgba(0,0,0,.12);border-radius:3px;max-width:100%;height:auto}
+  .pvmsg{color:var(--muted);font-size:12.5px}
+
+  .tree{max-height:300px;overflow:auto;font-size:13px}
+  .node{display:flex;gap:8px;padding:3.5px 0;color:var(--secondary)} .node:hover{color:var(--ink)}
+  .node .pg{margin-left:auto;font-family:"Geist Mono",monospace;font-size:10px;color:var(--muted)} .node.d0{font-weight:500;color:var(--ink);margin-top:3px}
+
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--hairline);border-top-color:var(--blue);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .empty{color:var(--muted);font-size:12.5px;padding:6px 0} .err{color:var(--err);font-size:13px}
+</style>
+</head>
+<body>
+<nav>
+  <svg width="25" height="25" viewBox="0 0 24 24" fill="none" aria-label="Vectorless">
+    <rect width="24" height="24" rx="6" fill="#1456F0"/>
+    <path d="M4 4 L12 20 L20 4" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <circle cx="12" cy="20" r="2" fill="#EA5EC1"/>
+  </svg>
+  <span class="wordmark">Vectorless</span>
+  <span class="nav-meta">local engine · <b id="modelName">glm-4.6</b> · treewalk</span>
+  <button id="settingsBtn" class="navbtn" title="API key & model settings">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H2a2 2 0 110-4h.09A1.65 1.65 0 004.6 8a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V2a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H22a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+    <span id="keyStatus" class="keydot"></span>
+  </button>
+  <span class="status"><span id="hdot" class="dot"></span><span id="hstat">checking…</span></span>
+</nav>
+
+<div class="shell">
+  <aside>
+    <div class="sec-label">Upload</div>
+    <label class="drop" id="drop">
+      <div class="big">Drop a PDF, or <u>browse</u></div>
+      <div class="small">PDF · DOCX · HTML · MD · TXT</div>
+      <input type="file" id="file" accept=".pdf,.docx,.html,.htm,.md,.txt" />
+    </label>
+    <div id="upmsg"></div>
+    <div class="docs">
+      <div class="sec-label">Documents <span class="ct" id="docct"></span></div>
+      <div id="docs"><div class="rail-empty">Loading…</div></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="wrap">
+      <section id="welcome" class="welcome">
+        <div class="eyebrow">Reasoning-based retrieval</div>
+        <h1>Ask a document. Get a <span class="grad">cited answer</span>.</h1>
+        <p>Upload a PDF — the engine parses it into a structured tree and an LLM navigates that
+           structure to answer, <span class="serif">no chunking, no embeddings, no vectors</span>.</p>
+        <div class="steps">
+          <div class="step"><div class="n">01</div><div class="h">Upload</div><div class="d">Drop a PDF in the left rail.</div></div>
+          <div class="step"><div class="n">02</div><div class="h">Ingest</div><div class="d">Parsed into a section tree in seconds.</div></div>
+          <div class="step"><div class="n">03</div><div class="h">Ask</div><div class="d">Cited answers — page, quote & preview.</div></div>
+        </div>
+      </section>
+
+      <section id="workspace" style="display:none">
+        <div class="doc-head"><h1 id="wsTitle"></h1><span class="facts" id="wsFacts"></span></div>
+
+        <div class="card">
+          <div class="cap"><span class="ttl">Ask</span><span class="hint">answered via treewalk · ⌘/Ctrl+Enter</span></div>
+          <div class="body">
+            <textarea id="q" placeholder="e.g. What were the company's capital expenditures in fiscal year 2018?"></textarea>
+            <div class="ask-row"><button class="btn" id="ask">Ask</button><span class="askhint" id="askhint"></span></div>
+            <div class="examples" id="examples"></div>
+            <div id="result"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cap"><span class="ttl">Structure map</span><span class="hint" id="treeHint"></span></div>
+          <div class="body" style="padding-top:10px"><div id="tree"><div class="empty">Loading…</div></div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="modal-bg" id="settingsModal">
+  <div class="modal">
+    <div class="mhead">
+      <h3>Model & API key</h3>
+      <p>Your key is stored in this browser only and sent with each query as a request header — never persisted on the server.</p>
+    </div>
+    <div class="mbody">
+      <div class="field"><label>Provider</label>
+        <select id="setProvider">
+          <option value="anthropic">Anthropic-compatible (GLM / Z.ai, Claude)</option>
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Gemini</option>
+        </select>
+      </div>
+      <div class="field"><label>API key</label>
+        <input id="setKey" type="password" placeholder="paste your API key" autocomplete="off" />
+        <div class="fhint">e.g. your GLM key from z.ai. Required to ask questions.</div>
+      </div>
+      <div class="field"><label>Base URL <span style="color:var(--muted)">(optional)</span></label>
+        <input id="setBase" type="text" placeholder="https://api.z.ai/api/anthropic/v1" />
+        <div class="fhint">Leave blank to use the server default. For GLM it must end in <code>/v1</code>.</div>
+      </div>
+      <div class="field"><label>Model <span style="color:var(--muted)">(optional)</span></label>
+        <input id="setModel" type="text" placeholder="glm-4.6" />
+      </div>
+    </div>
+    <div class="mfoot">
+      <span class="spacer" id="setStatus"></span>
+      <button class="btn ghost" id="setCancel">Cancel</button>
+      <button class="btn" id="setSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+
+// ---- BYOK settings (browser-local) ----
+const LS="vl_llm_settings";
+const DEFAULTS={provider:"anthropic",baseUrl:"https://api.z.ai/api/anthropic/v1",model:"glm-4.6",apiKey:""};
+function getSettings(){ try{ return {...DEFAULTS, ...JSON.parse(localStorage.getItem(LS)||"{}")}; }catch{ return {...DEFAULTS}; } }
+function saveSettings(s){ localStorage.setItem(LS, JSON.stringify(s)); refreshKeyStatus(); }
+function llmHeaders(){ const s=getSettings(); const h={}; if(s.apiKey){ h["X-LLM-Api-Key"]=s.apiKey;
+  if(s.provider) h["X-LLM-Provider"]=s.provider; if(s.baseUrl) h["X-LLM-Base-Url"]=s.baseUrl; if(s.model) h["X-LLM-Model"]=s.model; } return h; }
+function refreshKeyStatus(){ const s=getSettings(); const dot=document.getElementById("keyStatus");
+  dot.className="keydot"+(s.apiKey?" set":""); dot.title=s.apiKey?`key set · ${s.model||"default model"}`:"no API key — click to configure";
+  if(s.model) document.getElementById("modelName").textContent=s.model; }
+function openSettings(){ const s=getSettings();
+  document.getElementById("setProvider").value=s.provider; document.getElementById("setKey").value=s.apiKey;
+  document.getElementById("setBase").value=s.baseUrl===DEFAULTS.baseUrl?"":s.baseUrl;
+  document.getElementById("setModel").value=s.model===DEFAULTS.model?"":s.model;
+  document.getElementById("setStatus").textContent=""; document.getElementById("settingsModal").classList.add("open"); }
+function closeSettings(){ document.getElementById("settingsModal").classList.remove("open"); }
+document.getElementById("settingsBtn").onclick=openSettings;
+document.getElementById("setCancel").onclick=closeSettings;
+document.getElementById("settingsModal").onclick=e=>{ if(e.target.id==="settingsModal") closeSettings(); };
+document.getElementById("setSave").onclick=()=>{
+  saveSettings({ provider:document.getElementById("setProvider").value,
+    apiKey:document.getElementById("setKey").value.trim(),
+    baseUrl:document.getElementById("setBase").value.trim()||DEFAULTS.baseUrl,
+    model:document.getElementById("setModel").value.trim()||DEFAULTS.model });
+  closeSettings();
+};
+const E = p => "/engine" + p;
+let activeDoc=null, pollTimer=null, pdfDoc=null, pdfPage=1, pdfRange=[1,1];
+const EXAMPLES=["What were the capital expenditures in fiscal year 2018?","What was total net sales for the year?","What was total debt at year-end?","Summarize the company's business segments."];
+
+async function health(){
+  try{ const r=await fetch(E("/v1/health"));
+    document.getElementById("hdot").className="dot "+(r.ok?"up":"down");
+    document.getElementById("hstat").textContent=r.ok?"online · :7654":"error";
+  }catch{ document.getElementById("hdot").className="dot down"; document.getElementById("hstat").textContent="offline"; }
+}
+function badge(st){const c=st==="ready"?"ready":(st==="failed"?"fail":"work");return `<span class="badge ${c}">${st}</span>`;}
+const fileSvg=`<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M14 3v5h5M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" stroke="#1456F0" stroke-width="2" stroke-linejoin="round"/></svg>`;
+
+async function loadDocs(){
+  const box=document.getElementById("docs");
+  try{
+    const r=await fetch(E("/v1/documents?limit=100")); const d=await r.json(); const items=d.items||[];
+    document.getElementById("docct").textContent=items.length||"";
+    if(!items.length){ box.innerHTML=`<div class="rail-empty">No documents yet.<br>Upload one above.</div>`; return; }
+    box.innerHTML=items.map(it=>`
+      <div class="doc ${activeDoc&&activeDoc.id===it.id?"active":""}" data-id="${it.id}" data-title="${esc(it.title)}" data-status="${it.status}" data-ct="${esc(it.content_type||'')}">
+        <span class="ic">${fileSvg}</span><span class="t" title="${esc(it.title)}">${esc(it.title||it.id)}</span>
+        <span class="st">${badge(it.status)}</span><button class="del" title="Delete" data-del="${it.id}">×</button>
+      </div>`).join("");
+    box.querySelectorAll(".doc").forEach(el=>el.addEventListener("click",ev=>{ if(ev.target.dataset.del) return;
+      selectDoc({id:el.dataset.id,title:el.dataset.title,status:el.dataset.status,ct:el.dataset.ct}); }));
+    box.querySelectorAll(".del").forEach(b=>b.addEventListener("click",ev=>{ev.stopPropagation();delDoc(b.dataset.del);}));
+  }catch{ box.innerHTML=`<div class="err">Failed to load.</div>`; }
+}
+async function delDoc(id){ await fetch(E(`/v1/documents/${id}`),{method:"DELETE"});
+  if(activeDoc&&activeDoc.id===id){ activeDoc=null; document.getElementById("welcome").style.display=""; document.getElementById("workspace").style.display="none"; } loadDocs(); }
+
+async function selectDoc(doc){
+  activeDoc=doc; pdfDoc=null;
+  document.querySelectorAll(".doc").forEach(el=>el.classList.toggle("active",el.dataset.id===doc.id));
+  document.getElementById("welcome").style.display="none";
+  document.getElementById("workspace").style.display="";
+  document.getElementById("wsTitle").textContent=doc.title||doc.id;
+  document.getElementById("result").innerHTML="";
+  const ready=doc.status==="ready";
+  document.getElementById("ask").disabled=!ready;
+  document.getElementById("askhint").textContent=ready?"":`Document is “${doc.status}” — wait until ready.`;
+  document.getElementById("examples").innerHTML=ready?EXAMPLES.map(e=>`<span class="ex">${esc(e)}</span>`).join(""):"";
+  document.querySelectorAll(".ex").forEach(x=>x.onclick=()=>{document.getElementById("q").value=x.textContent;document.getElementById("q").focus();});
+  loadTree(doc.id);
+}
+
+async function loadTree(id){
+  const box=document.getElementById("tree"); box.innerHTML=`<div class="empty"><span class="spin"></span>Loading structure…</div>`;
+  try{
+    const r=await fetch(E(`/v1/documents/${id}/tree`)); const d=await r.json();
+    const secs=(d.sections||[]).filter(s=>s.title); const pages=secs.reduce((m,s)=>Math.max(m,s.page_end||0),0);
+    document.getElementById("wsFacts").innerHTML=`<b>${secs.length}</b> sections${pages?` · pp. 1–<b>${pages}</b>`:""}`;
+    document.getElementById("treeHint").textContent=`${secs.length} sections`;
+    if(!secs.length){ box.innerHTML=`<div class="empty">No sections.</div>`; return; }
+    box.innerHTML=`<div class="tree">`+secs.slice(0,400).map(s=>{
+      const indent=Math.min(s.depth||0,6)*15; const pg=s.page_start?`p${s.page_start}${s.page_end&&s.page_end!==s.page_start?"–"+s.page_end:""}`:"";
+      return `<div class="node d${Math.min(s.depth||0,1)}" style="padding-left:${indent}px"><span>${esc(s.title)}</span>${pg?`<span class="pg">${pg}</span>`:""}</div>`;
+    }).join("")+`</div>`;
+  }catch{ box.innerHTML=`<div class="err">Failed to load tree.</div>`; }
+}
+
+// upload
+const drop=document.getElementById("drop"), fileIn=document.getElementById("file");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over")}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over")}));
+drop.addEventListener("drop",e=>{ if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
+fileIn.addEventListener("change",e=>{ if(e.target.files[0]) upload(e.target.files[0]); });
+async function upload(file){
+  const msg=document.getElementById("upmsg"); msg.innerHTML=`<span class="spin"></span>Uploading ${esc(file.name)}…`;
+  try{ const fd=new FormData(); fd.append("file",file);
+    const r=await fetch(E("/v1/documents"),{method:"POST",body:fd}); const d=await r.json();
+    if(!r.ok||!d.document_id){ msg.innerHTML=`<span class="err">Upload failed</span>`; return; }
+    msg.innerHTML=`<span class="spin"></span>Ingesting…`; pollIngest(d.document_id,file.name,msg);
+  }catch(e){ msg.innerHTML=`<span class="err">${esc(String(e))}</span>`; }
+}
+function pollIngest(id,name,msg){ clearTimeout(pollTimer);
+  const tick=async()=>{ try{
+      const r=await fetch(E(`/v1/documents/${id}`)); const d=await r.json();
+      if(d.status==="ready"){ msg.innerHTML=`<span style="color:var(--ok)">✓</span> ${esc(name)} ready.`; await loadDocs(); selectDoc({id,title:d.title||name,status:"ready",ct:d.content_type}); return; }
+      if(d.status==="failed"){ msg.innerHTML=`<span class="err">Ingest failed: ${esc(d.error_message||"")}</span>`; await loadDocs(); return; }
+      msg.innerHTML=`<span class="spin"></span>Ingesting — <b>${esc(d.status)}</b>`; pollTimer=setTimeout(tick,1400);
+    }catch{ pollTimer=setTimeout(tick,2200); } }; tick();
+}
+
+// ask
+document.getElementById("ask").addEventListener("click",ask);
+document.getElementById("q").addEventListener("keydown",e=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") ask(); });
+async function ask(){
+  if(!activeDoc) return; const q=document.getElementById("q").value.trim(); if(!q) return;
+  if(!getSettings().apiKey){ openSettings(); document.getElementById("setStatus").innerHTML='<span style="color:var(--warn)">Set an API key to ask questions.</span>'; return; }
+  const out=document.getElementById("result"), btn=document.getElementById("ask"); btn.disabled=true; pdfDoc=null;
+  out.innerHTML=`<div class="res card" style="margin-top:16px"><div class="body"><span class="spin"></span><span class="askhint">Navigating the document…</span></div></div>`;
+  const t0=performance.now();
+  try{
+    const r=await fetch(E("/v1/answer/treewalk"),{method:"POST",headers:{"Content-Type":"application/json",...llmHeaders()},body:JSON.stringify({document_id:activeDoc.id,query:q})});
+    const d=await r.json();
+    if(!r.ok){ out.innerHTML=`<div class="res card"><div class="body err">Error: ${esc(d.error||JSON.stringify(d))}</div></div>`; return; }
+    renderResult(d,Math.round(performance.now()-t0));
+  }catch(e){ out.innerHTML=`<div class="res card"><div class="body err">${esc(String(e))}</div></div>`; }
+  finally{ btn.disabled=false; }
+}
+
+function renderResult(d,ms){
+  const u=d.usage||{}; const conf=(typeof d.confidence==="number")?Math.round(d.confidence*100)+"%":"—";
+  const cost=(u.cost_usd!=null)?"$"+Number(u.cost_usd).toFixed(4):"—";
+  const chips=[`<span class="chip good">confidence ${conf}</span>`,`<span class="chip">${d.hops_taken??"?"} hops</span>`,
+    `<span class="chip">${u.total_tokens??"?"} tokens</span>`,`<span class="chip">${cost}</span>`,`<span class="chip">${d.elapsed_ms??ms} ms</span>`,
+    d.model?`<span class="chip">${esc(d.model)}</span>`:""].join("");
+  const cites=d.citations||[];
+  const citeHtml=cites.map((c,i)=>{ const ps=c.start_page,pe=c.end_page; const pg=ps?`pages ${ps}${pe&&pe!==ps?"–"+pe:""}`:"section";
+    return `<div class="cite ${i===0?"sel":""}" data-ps="${ps||0}" data-pe="${pe||ps||0}"><div class="pg">▸ ${esc(pg)}</div>${c.quote?`<div class="q">${esc(c.quote)}</div>`:""}</div>`;
+  }).join("")||`<div class="empty">No page citations.</div>`;
+
+  // collect unique section ids the engine relied on (citations first, then pages_read)
+  const secIds=[]; const seen=new Set();
+  (cites||[]).forEach(c=>(c.section_ids||[]).forEach(s=>{if(!seen.has(s)){seen.add(s);secIds.push(s);}}));
+  (d.pages_read||[]).forEach(p=>(p.section_ids||[]).forEach(s=>{if(!seen.has(s)){seen.add(s);secIds.push(s);}}));
+
+  document.getElementById("result").innerHTML=`
+    <div class="res">
+      <div class="card"><div class="body">
+        <div class="lbl">Answer</div><div class="answer-text">${esc(d.answer||"(no answer)")}</div>
+        <div class="chips">${chips}</div>
+      </div></div>
+      <div class="split">
+        <div class="card">
+          <div class="cap"><span class="ttl">Citations &amp; sections read</span></div>
+          <div class="body">
+            <div class="lbl">Cited pages</div>${citeHtml}
+            <div class="lbl" style="margin-top:16px">Sections the engine read <span style="color:var(--muted)">(${secIds.length})</span></div>
+            <div id="secList"><div class="empty"><span class="spin"></span>Loading sections…</div></div>
+          </div>
+        </div>
+        <div class="card preview">
+          <div class="cap"><span class="ttl">Source preview</span>
+            <span class="nav"><a id="pvOpen" class="pvpage" href="#" target="_blank" rel="noopener" style="margin-right:4px">open ↗</a><button class="pvbtn" id="pvPrev">‹</button><span class="pvpage" id="pvLabel">—</span><button class="pvbtn" id="pvNext">›</button></span>
+          </div>
+          <div class="pvwrap" id="pvWrap"><div class="pvmsg">Loading page…</div></div>
+        </div>
+      </div>
+    </div>`;
+
+  // wire citation click → preview that page
+  document.querySelectorAll("#result .cite").forEach(el=>el.addEventListener("click",()=>{
+    document.querySelectorAll("#result .cite").forEach(c=>c.classList.remove("sel")); el.classList.add("sel");
+    const ps=+el.dataset.ps||1, pe=+el.dataset.pe||ps; pdfRange=[ps,pe]; showPdfPage(ps);
+  }));
+  document.getElementById("pvPrev").onclick=()=>showPdfPage(pdfPage-1);
+  document.getElementById("pvNext").onclick=()=>showPdfPage(pdfPage+1);
+
+  loadSections(secIds);
+  const firstPs = cites[0] && cites[0].start_page ? cites[0].start_page : 1;
+  const firstPe = cites[0] && cites[0].end_page ? cites[0].end_page : firstPs;
+  pdfRange=[firstPs,firstPe];
+  loadPdf(activeDoc.id, firstPs);
+}
+
+async function loadSections(ids){
+  const box=document.getElementById("secList");
+  if(!ids.length){ box.innerHTML=`<div class="empty">The engine answered without pinning specific sections.</div>`; return; }
+  try{
+    const results=await Promise.all(ids.slice(0,8).map(id=>fetch(E(`/v1/sections/${id}`)).then(r=>r.ok?r.json():null).catch(()=>null)));
+    const ok=results.filter(Boolean);
+    if(!ok.length){ box.innerHTML=`<div class="empty">Section details unavailable.</div>`; return; }
+    box.innerHTML=ok.map(s=>{
+      const pg=s.page_start?`p${s.page_start}${s.page_end&&s.page_end!==s.page_start?"–"+s.page_end:""}`:"";
+      const snip=(s.summary&&s.summary.trim())?s.summary:cleanSnip(s.content);
+      return `<div class="sec-item"><div class="h"><span class="title">${esc(s.title||"Untitled section")}</span>${pg?`<span class="pg">${pg}</span>`:""}</div>
+        ${snip?`<div class="snip">${esc(snip)}</div>`:""}</div>`;
+    }).join("");
+  }catch{ box.innerHTML=`<div class="err">Failed to load sections.</div>`; }
+}
+function cleanSnip(t){ if(!t) return ""; return t.replace(/\s+/g," ").trim().slice(0,200)+(t.length>200?"…":""); }
+
+// pdf preview
+async function loadPdf(docId, page){
+  const wrap=document.getElementById("pvWrap");
+  const srcUrl=E(`/v1/documents/${docId}/source`);
+  const openLink=document.getElementById("pvOpen"); if(openLink) openLink.href=srcUrl;
+  const fallback=()=>{ wrap.innerHTML=`<div class="pvmsg">Inline preview didn’t load — <a href="${srcUrl}" target="_blank" rel="noopener">open the source ↗</a>.</div>`; };
+  if(!window.pdfjsLib){ fallback(); return; }
+  try{
+    // disableRange/Stream: the local proxy serves the whole body with a 200
+    // (no HTTP Range support), so force one plain GET instead of range/stream
+    // requests that would otherwise stall.
+    const task=pdfjsLib.getDocument({url:srcUrl,disableRange:true,disableStream:true});
+    const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),9000));
+    pdfDoc=await Promise.race([task.promise,timeout]); showPdfPage(page||1);
+  }catch(e){ fallback(); }
+}
+async function showPdfPage(n){
+  if(!pdfDoc) return; const wrap=document.getElementById("pvWrap");
+  n=Math.max(1,Math.min(n,pdfDoc.numPages)); pdfPage=n;
+  document.getElementById("pvLabel").textContent=`page ${n} / ${pdfDoc.numPages}`;
+  document.getElementById("pvPrev").disabled=(n<=1); document.getElementById("pvNext").disabled=(n>=pdfDoc.numPages);
+  try{
+    const page=await pdfDoc.getPage(n);
+    const vp0=page.getViewport({scale:1}); const scale=Math.min(2,(wrap.clientWidth-28)/vp0.width)*1.4;
+    const vp=page.getViewport({scale:Math.max(1,scale)});
+    const canvas=document.createElement("canvas"); canvas.width=vp.width; canvas.height=vp.height;
+    await page.render({canvasContext:canvas.getContext("2d"),viewport:vp}).promise;
+    wrap.innerHTML=""; wrap.appendChild(canvas);
+  }catch(e){ wrap.innerHTML=`<div class="pvmsg">Could not render page ${n}.</div>`; }
+}
+
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function init(){ await loadDocs();
+  const p=new URLSearchParams(location.search); const want=p.get("doc");
+  if(want){ try{ const r=await fetch(E(`/v1/documents/${want}`)); if(r.ok){ const d=await r.json();
+    await selectDoc({id:want,title:d.title||want,status:d.status,ct:d.content_type});
+    const q=p.get("ask"); if(q){ document.getElementById("q").value=q; ask(); } } }catch{} }
+  if(new URLSearchParams(location.search).get("settings")) openSettings();
+}
+refreshKeyStatus(); health(); init(); setInterval(health,8000);
+</script>
+</body>
+</html>

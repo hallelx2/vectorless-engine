@@ -78,8 +78,32 @@ type treeWalkAnswerRequest struct {
 //	  "stream"?: false, "reasoning"?: false }
 //
 // Response: see treeWalkAnswerResponse below.
+// resolveLLM picks the llmgate client for this request. When the caller
+// supplies BYOK credentials via the X-LLM-Api-Key header (optionally
+// X-LLM-Provider / X-LLM-Base-Url / X-LLM-Model) and a BuildLLM factory is
+// wired, it builds a per-request client inheriting server defaults for any
+// empty field; otherwise it returns the shared client. The returned model
+// string is the header-supplied model override (may be "").
+func (d Deps) resolveLLM(r *http.Request) (llmgate.Client, string, error) {
+	model := r.Header.Get("X-LLM-Model")
+	key := r.Header.Get("X-LLM-Api-Key")
+	if key == "" || d.BuildLLM == nil {
+		return d.LLM, model, nil
+	}
+	c, err := d.BuildLLM(
+		r.Header.Get("X-LLM-Provider"),
+		key,
+		r.Header.Get("X-LLM-Base-Url"),
+		model,
+	)
+	if err != nil {
+		return nil, model, err
+	}
+	return c, model, nil
+}
+
 func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
-	if d.LLM == nil {
+	if d.LLM == nil && d.BuildLLM == nil {
 		writeErr(w, http.StatusNotImplemented, "answer/treewalk endpoint requires an LLM client")
 		return
 	}
@@ -126,9 +150,29 @@ func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 	if body.MaxPagesPerFetch > 0 {
 		perReq.PageContentLimit = body.MaxPagesPerFetch
 	}
+	// BYOK: if the caller supplies their own LLM credentials via X-LLM-*
+	// headers, build a per-request client and run BOTH the navigation loop
+	// and citation span-extraction through it. dReq is a value copy of Deps
+	// with the per-request client swapped in — Deps is passed by value so
+	// this never mutates the shared instance other goroutines read.
+	client, hdrModel, err := d.resolveLLM(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid LLM credentials: "+err.Error())
+		return
+	}
+	if client == nil {
+		writeErr(w, http.StatusBadRequest, "no LLM credentials: configure a server key or send an X-LLM-Api-Key header (BYOK)")
+		return
+	}
+	perReq.LLM = client
+	dReq := d
+	dReq.LLM = client
+	if body.Model == "" {
+		body.Model = hdrModel
+	}
+
 	// Per-request model override falls through to budget.ModelName
 	// the same way every other handler does.
-
 	budget := retrieval.ContextBudget{ModelName: body.Model}
 	if budget.ModelName == "" {
 		budget.ModelName = d.LLMModel
@@ -139,7 +183,7 @@ func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 	// Stream variant: hijack the response writer for SSE and emit
 	// one event per tool call.
 	if body.Stream {
-		d.serveAnswerTreeWalkStream(w, r, &perReq, t, body, budget, started)
+		dReq.serveAnswerTreeWalkStream(w, r, &perReq, t, body, budget, started)
 		return
 	}
 
@@ -164,7 +208,7 @@ func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	citations := d.buildTreeWalkCitations(r.Context(), t, res, body.Query, body.Model)
+	citations := dReq.buildTreeWalkCitations(r.Context(), t, res, body.Query, body.Model)
 
 	resp := map[string]any{
 		"document_id": body.DocumentID,

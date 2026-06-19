@@ -346,9 +346,9 @@ func applyEnvOverrides(c *Config) {
 		}
 	}
 	// Anthropic-compatible gateway overrides (e.g. GLM/Zhipu via
-	// https://api.z.ai/api/anthropic): base URL + model, so the
-	// anthropic driver can run a non-Anthropic model without a secret
-	// edit.
+	// https://api.z.ai/api/anthropic/v1 — the /v1 is required, the client
+	// posts to ${base}/messages): base URL + model, so the anthropic
+	// driver can run a non-Anthropic model without a secret edit.
 	if v := firstEnv("VLS_LLM_ANTHROPIC_BASE_URL", "VLE_LLM_ANTHROPIC_BASE_URL"); v != "" {
 		c.Engine.LLM.Anthropic.BaseURL = v
 	}

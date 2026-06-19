@@ -59,6 +59,13 @@ type Deps struct {
 	// LLMModel is the default model name. Per-request overrides win.
 	LLMModel string
 
+	// BuildLLM constructs a per-request llmgate client from caller-supplied
+	// credentials (BYOK), inheriting server defaults for any empty field.
+	// Wired in main.go. When set, callers can pass their own key/base_url/
+	// model via X-LLM-* request headers; nil disables per-request keys and
+	// handlers fall back to the shared LLM client. See resolveLLM.
+	BuildLLM func(provider, apiKey, baseURL, model string) (llmgate.Client, error)
+
 	// AnswerSpan / Answer hold the relevant config blocks. Default
 	// values (AnswerSpan disabled, Answer.MaxSections=5) are safe.
 	AnswerSpan config.AnswerSpanBlock
@@ -140,6 +147,7 @@ func Router(d Deps) http.Handler {
 			r.Get("/{id}", d.handleGetDocument)
 			r.Delete("/{id}", d.handleDeleteDocument)
 			r.Get("/{id}/tree", d.handleGetTree)
+			r.Get("/{id}/source", d.handleGetSource)
 		})
 
 		r.Get("/sections/{id}", d.handleGetSection)
@@ -362,6 +370,50 @@ func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetSource streams the original uploaded bytes for a document.
+// Useful for clients that want to render the source (e.g. a PDF page
+// preview in a viewer) without a second storage system. Served inline
+// with the document's content type.
+func (d Deps) handleGetSource(w http.ResponseWriter, r *http.Request) {
+	id := tree.DocumentID(chi.URLParam(r, "id"))
+	doc, err := d.DB.GetDocument(r.Context(), id, standaloneOrgID, "")
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if doc.SourceRef == "" {
+		writeErr(w, http.StatusNotFound, "document has no stored source")
+		return
+	}
+	rc, meta, err := d.Storage.Get(r.Context(), doc.SourceRef)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "source object not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = rc.Close() }()
+
+	ct := doc.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	if meta.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+	}
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, rc)
 }
 
 func (d Deps) handleGetTree(w http.ResponseWriter, r *http.Request) {
