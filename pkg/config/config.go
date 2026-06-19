@@ -386,8 +386,15 @@ type AnthropicBlock struct {
 	// BaseURL overrides the Anthropic API endpoint. Empty = official
 	// api.anthropic.com. Set this to point the Anthropic driver at any
 	// Anthropic-compatible gateway — e.g. GLM/Zhipu's
-	// https://api.z.ai/api/anthropic — so the same driver can drive a
+	// https://api.z.ai/api/anthropic/v1 — so the same driver can drive a
 	// non-Anthropic model that speaks the Messages API.
+	//
+	// IMPORTANT: the value must include the API version segment (.../v1).
+	// The underlying client posts to "${base_url}/messages" (its built-in
+	// default is https://api.anthropic.com/v1), so a base_url WITHOUT /v1
+	// resolves to .../anthropic/messages — which z.ai answers with an
+	// HTTP 200 body {"code":500,"msg":"404 NOT_FOUND"} and the engine then
+	// reports the opaque "anthropic: no response".
 	BaseURL string `yaml:"base_url"`
 }
 
@@ -934,7 +941,8 @@ func applyEnvOverrides(c *Config) {
 	}
 	// Anthropic-driver overrides. These let an operator point the
 	// anthropic driver at an Anthropic-compatible gateway (e.g. GLM via
-	// https://api.z.ai/api/anthropic) without baking the values into the
+	// https://api.z.ai/api/anthropic/v1 — the /v1 is required; see
+	// AnthropicBlock.BaseURL) without baking the values into the
 	// config file or secret.
 	if v := os.Getenv("VLE_LLM_ANTHROPIC_API_KEY"); v != "" {
 		c.LLM.Anthropic.APIKey = v
