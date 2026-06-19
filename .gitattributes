@@ -1,0 +1,5 @@
+# Shell scripts and the all-in-one entrypoint MUST stay LF — CRLF breaks the
+# shebang inside the Linux container ("bad interpreter: /usr/bin/env bash^M").
+*.sh        text eol=lf
+deploy/allinone/entrypoint.sh text eol=lf
+localapp/serve.py             text eol=lf
