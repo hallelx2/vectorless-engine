@@ -656,7 +656,17 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 			// time so we never persist bytes the LLM SDKs would reject
 			// later. PDFs with CID-mapped fonts and no ToUnicode CMap
 			// leak raw glyph IDs into extracted text.
+			// Only assign a ContentRef when we actually wrote content. A
+			// leaf whose text is empty after cleanForLLM (heading-only
+			// sections, or CID-font garbage stripped to nothing) gets NO
+			// object stored, so it must get NO ref — otherwise every later
+			// read (summarize, HyDE, treewalk get_pages) chases a key that
+			// was never written and fails with "storage: object not found".
+			// Empty ContentRef is already the canonical "no stored content"
+			// state every reader guards on (summaryFor falls back to the
+			// title; the treewalk loader returns the summary or empty).
 			cleanedContent := cleanForLLM(s.Content)
+			contentRef := ""
 			if strings.TrimSpace(cleanedContent) != "" {
 				if err := p.Storage.Put(ctx, contentKey,
 					bytes.NewReader([]byte(cleanedContent)),
@@ -666,6 +676,7 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 					}); err != nil {
 					return fmt.Errorf("store section %s: %w", id, err)
 				}
+				contentRef = contentKey
 			}
 
 			if err := store.UpsertSection(ctx, db.Section{
@@ -675,7 +686,7 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 				Ordinal:    i,
 				Depth:      depth,
 				Title:      cleanForLLM(s.Title),
-				ContentRef: contentKey,
+				ContentRef: contentRef,
 				TokenCount: approxTokens(cleanedContent),
 				PageStart:  s.PageStart,
 				PageEnd:    s.PageEnd,
