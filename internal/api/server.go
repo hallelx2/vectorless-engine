@@ -320,9 +320,16 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 		SourceRef:   key,
 	})
 	if err := d.Queue.Enqueue(ctx, queue.Job{
-		Kind:      queue.KindIngestDocument,
-		Payload:   payload,
-		DedupeKey: string(docID),
+		Kind:    queue.KindIngestDocument,
+		Payload: payload,
+		// Cap retries so a transient failure (e.g. a parse-timeout or a
+		// not-yet-visible source under heavy concurrent ingestion) gets a
+		// few chances to recover, without the queue's default 25-attempt
+		// exponential backoff dragging a genuinely-bad document out for
+		// hours. The document stays "parsing" across these attempts and
+		// only flips to "failed" on the last one (see Pipeline.fail).
+		MaxRetries: 5,
+		DedupeKey:  string(docID),
 	}); err != nil {
 		d.Logger.Error("ingest: enqueue failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "enqueue failed")
