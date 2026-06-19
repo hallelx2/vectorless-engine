@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 380" font-family="'Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="sig" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1456F0"/><stop offset="1" stop-color="#EA5EC1"/>
+    </linearGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#0A0A0A" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+  <rect width="1240" height="380" fill="#FCFCFD"/>
+  <text x="40" y="52" font-size="13" letter-spacing="2.4" fill="#71717A" font-weight="600">HOW IT WORKS</text>
+  <text x="40" y="86" font-size="26" fill="#0A0A0A" font-weight="600">Reason over structure, not embeddings</text>
+
+  <!-- step cards -->
+  <g filter="url(#sh)">
+    <rect x="40"  y="130" width="250" height="170" rx="16" fill="#fff" stroke="#E5E7EB"/>
+    <rect x="333" y="130" width="250" height="170" rx="16" fill="#fff" stroke="#E5E7EB"/>
+    <rect x="626" y="130" width="250" height="170" rx="16" fill="#fff" stroke="#E5E7EB"/>
+    <rect x="919" y="130" width="281" height="170" rx="16" fill="#fff" stroke="#E5E7EB"/>
+  </g>
+
+  <!-- 01 ingest -->
+  <text x="64" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">01 · INGEST</text>
+  <text x="64" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Parse to a tree</text>
+  <text x="64" y="228" font-size="14" fill="#3F3F46">PDF → titled sections,</text>
+  <text x="64" y="250" font-size="14" fill="#3F3F46">page ranges, structure</text>
+  <text x="64" y="272" font-size="14" fill="#71717A">— no chunking.</text>
+
+  <!-- 02 navigate -->
+  <text x="357" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">02 · NAVIGATE</text>
+  <text x="357" y="200" font-size="19" fill="#0A0A0A" font-weight="600">LLM walks it</text>
+  <text x="357" y="228" font-size="14" fill="#3F3F46">Reads the table of</text>
+  <text x="357" y="250" font-size="14" fill="#3F3F46">contents, jumps to the</text>
+  <text x="357" y="272" font-size="14" fill="#71717A">right pages.</text>
+
+  <!-- 03 read -->
+  <text x="650" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">03 · READ</text>
+  <text x="650" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Full sections</text>
+  <text x="650" y="228" font-size="14" fill="#3F3F46">Returns whole sections</text>
+  <text x="650" y="250" font-size="14" fill="#3F3F46">in context — not</text>
+  <text x="650" y="272" font-size="14" fill="#71717A">top-K fragments.</text>
+
+  <!-- 04 answer -->
+  <text x="943" y="166" font-size="13" font-weight="700" font-family="monospace" fill="url(#sig)">04 · ANSWER</text>
+  <text x="943" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Cited answer</text>
+  <text x="943" y="228" font-size="14" fill="#3F3F46">Grounded answer with</text>
+  <text x="943" y="250" font-size="14" fill="#3F3F46">page ranges + verbatim</text>
+  <text x="943" y="272" font-size="14" fill="#71717A">quotes.</text>
+
+  <!-- arrows -->
+  <g stroke="url(#sig)" stroke-width="2.5" fill="none">
+    <path d="M298 215 L325 215" marker-end="url(#arr)"/>
+    <path d="M591 215 L618 215" marker-end="url(#arr)"/>
+    <path d="M884 215 L911 215" marker-end="url(#arr)"/>
+  </g>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#EA5EC1"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="346" font-size="14" fill="#71717A">Postgres + object storage. No vector database, no ANN index, nothing to recompute when you swap models.</text>
+</svg>

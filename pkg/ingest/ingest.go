@@ -556,7 +556,11 @@ func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Paylo
 // retried with short backoff rather than failing the whole document.
 // Any non-ErrNotFound error returns immediately.
 func getSourceWithRetry(ctx context.Context, s storage.Storage, key string) (io.ReadCloser, storage.Metadata, error) {
-	const attempts = 6
+	// Up to ~16s of incremental backoff. A large source (multi-MB) written
+	// under heavy concurrent ingestion on a busy/low-disk filesystem can take
+	// several seconds to become visible to this worker; a too-short window
+	// turns that transient into a hard "object not found" failure.
+	const attempts = 16
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		rc, meta, err := s.Get(ctx, key)
@@ -570,7 +574,7 @@ func getSourceWithRetry(ctx context.Context, s storage.Storage, key string) (io.
 		select {
 		case <-ctx.Done():
 			return nil, storage.Metadata{}, ctx.Err()
-		case <-time.After(time.Duration(i+1) * 150 * time.Millisecond):
+		case <-time.After(time.Duration(i+1) * 125 * time.Millisecond):
 		}
 	}
 	return nil, storage.Metadata{}, lastErr
