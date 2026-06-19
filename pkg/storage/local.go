@@ -39,9 +39,22 @@ func (l *Local) Put(ctx context.Context, key string, r io.Reader, _ Metadata) er
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }() // best-effort close
-	_, err = io.Copy(f, r)
-	return err
+	if _, err := io.Copy(f, r); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// fsync before returning. Ingest enqueues the background parse job
+	// immediately after Put returns; the worker may pick it up within
+	// microseconds and Stat this exact path. Without the sync the bytes
+	// (and on Windows the directory entry) can lag behind, so the worker
+	// races the write and fails with ErrNotFound on a file that is in
+	// fact being written. Syncing here makes the object durably visible
+	// before the caller proceeds to enqueue.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (l *Local) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, error) {

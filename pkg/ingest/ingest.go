@@ -540,12 +540,40 @@ func runParallelStages(ctx context.Context, summarizeFn, hydeFn func(context.Con
 }
 
 func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Payload) (*parser.ParsedDoc, error) {
-	rc, _, err := p.Storage.Get(ctx, pl.SourceRef)
+	rc, _, err := getSourceWithRetry(ctx, p.Storage, pl.SourceRef)
 	if err != nil {
 		return nil, fmt.Errorf("fetch source: %w", err)
 	}
 	defer func() { _ = rc.Close() }() // best-effort close
 	return parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
+}
+
+// getSourceWithRetry fetches a freshly-uploaded object, tolerating the
+// brief window where the background ingest job (enqueued right after the
+// upload handler's Storage.Put) outraces the source bytes becoming
+// visible. Storage.Put now fsyncs, so this is belt-and-suspenders for
+// slower or eventually-consistent backends: a transient ErrNotFound is
+// retried with short backoff rather than failing the whole document.
+// Any non-ErrNotFound error returns immediately.
+func getSourceWithRetry(ctx context.Context, s storage.Storage, key string) (io.ReadCloser, storage.Metadata, error) {
+	const attempts = 6
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		rc, meta, err := s.Get(ctx, key)
+		if err == nil {
+			return rc, meta, nil
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			return nil, storage.Metadata{}, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, storage.Metadata{}, ctx.Err()
+		case <-time.After(time.Duration(i+1) * 150 * time.Millisecond):
+		}
+	}
+	return nil, storage.Metadata{}, lastErr
 }
 
 // runMinimal is the fast/minimal ingest path: parse → build tree →
