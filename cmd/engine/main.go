@@ -103,7 +103,16 @@ func run() error {
 
 	llmClient, err := buildLLM(cfg.LLM)
 	if err != nil {
-		return fmt.Errorf("init llm: %w", err)
+		// A missing provider key is non-fatal in local mode: the bundled UI
+		// (and any caller) can supply credentials per request via X-LLM-*
+		// headers (BYOK), so boot without a shared client and let those
+		// requests build their own. Any other init error is still fatal.
+		if config.LocalModeEnabled() && llmKeyMissing(cfg.LLM) {
+			logger.Warn("no LLM provider key configured — queries require a per-request key (BYOK via X-LLM-Api-Key), or set VLE_LLM_ANTHROPIC_API_KEY")
+			llmClient = nil
+		} else {
+			return fmt.Errorf("init llm: %w", err)
+		}
 	}
 	strategy := buildStrategy(cfg.Retrieval, llmClient, store)
 
@@ -221,12 +230,16 @@ func run() error {
 	// (gated by retrieval.treewalk.enabled), even on a deployment
 	// using chunked-tree as its default selection path.
 	var treeWalkStrategy *retrieval.TreeWalkStrategy
-	if cfg.Retrieval.TreeWalk.Enabled && llmClient != nil {
+	if cfg.Retrieval.TreeWalk.Enabled {
+		// Built even when llmClient is nil (no server key): the per-request
+		// BYOK path sets the strategy's client from X-LLM-Api-Key headers,
+		// so the endpoint stays available for callers that bring their own key.
 		treeWalkStrategy = buildTreeWalkStrategy(cfg.Retrieval, llmClient, store)
 		logger.Info("retrieval: treewalk answer endpoint enabled",
 			"max_hops", treeWalkStrategy.MaxHops,
 			"page_content_limit", treeWalkStrategy.PageContentLimit,
 			"model_override", cfg.Retrieval.TreeWalk.Model,
+			"server_key", llmClient != nil,
 		)
 	}
 
@@ -250,6 +263,9 @@ func run() error {
 		Abstain:          cfg.Retrieval.Abstain,
 		TreeWalkStrategy: treeWalkStrategy,
 		TreeWalk:         cfg.Retrieval.TreeWalk,
+		BuildLLM: func(provider, apiKey, baseURL, model string) (llmgate.Client, error) {
+			return buildLLMFrom(cfg.LLM, provider, apiKey, baseURL, model)
+		},
 	}
 
 	srv := &http.Server{
@@ -386,6 +402,66 @@ func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
 	default:
 		// Config.Validate rejects unknown drivers; this is defensive.
 		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)
+	}
+}
+
+// buildLLMFrom constructs an llmgate client from caller-supplied
+// credentials (BYOK), inheriting the server's configured provider, base
+// URL, and model whenever a field is left empty. This backs the
+// per-request X-LLM-* headers so a user of the bundled UI can paste only
+// their API key and have everything else default to the engine's config.
+// llmKeyMissing reports whether the configured provider has no API key.
+// Used to keep local-mode boot non-fatal so per-request BYOK can work.
+func llmKeyMissing(c config.LLMConfig) bool {
+	switch c.Driver {
+	case "anthropic":
+		return c.Anthropic.APIKey == ""
+	case "openai":
+		return c.OpenAI.APIKey == ""
+	case "gemini":
+		return c.Gemini.APIKey == ""
+	}
+	return false
+}
+
+func buildLLMFrom(c config.LLMConfig, provider, apiKey, baseURL, model string) (llmgate.Client, error) {
+	if provider == "" {
+		provider = c.Driver
+	}
+	switch provider {
+	case "anthropic":
+		if model == "" {
+			model = c.Anthropic.Model
+		}
+		if baseURL == "" {
+			baseURL = c.Anthropic.BaseURL
+		}
+		return anthropic.New(anthropic.Config{
+			APIKey:         apiKey,
+			Model:          model,
+			ReasoningModel: c.Anthropic.ReasoningModel,
+			BaseURL:        baseURL,
+		})
+	case "openai":
+		if model == "" {
+			model = c.OpenAI.Model
+		}
+		return openai.New(openai.Config{
+			APIKey:         apiKey,
+			Model:          model,
+			ReasoningModel: c.OpenAI.ReasoningModel,
+		})
+	case "gemini":
+		if model == "" {
+			model = c.Gemini.Model
+		}
+		return gemini.New(gemini.Config{
+			APIKey:         apiKey,
+			Model:          model,
+			ReasoningModel: c.Gemini.ReasoningModel,
+		})
+	default:
+		return nil, fmt.Errorf("unknown llm provider: %s", provider)
 	}
 }
 

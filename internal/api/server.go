@@ -59,6 +59,13 @@ type Deps struct {
 	// LLMModel is the default model name. Per-request overrides win.
 	LLMModel string
 
+	// BuildLLM constructs a per-request llmgate client from caller-supplied
+	// credentials (BYOK), inheriting server defaults for any empty field.
+	// Wired in main.go. When set, callers can pass their own key/base_url/
+	// model via X-LLM-* request headers; nil disables per-request keys and
+	// handlers fall back to the shared LLM client. See resolveLLM.
+	BuildLLM func(provider, apiKey, baseURL, model string) (llmgate.Client, error)
+
 	// AnswerSpan / Answer hold the relevant config blocks. Default
 	// values (AnswerSpan disabled, Answer.MaxSections=5) are safe.
 	AnswerSpan config.AnswerSpanBlock

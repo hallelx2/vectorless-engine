@@ -31,6 +31,26 @@
   .status{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);transition:background .3s}
   .dot.up{background:var(--ok)} .dot.down{background:var(--err)}
+  .navbtn{display:flex;align-items:center;gap:5px;background:none;border:1px solid var(--hairline);border-radius:8px;
+    padding:5px 8px;cursor:pointer;color:var(--secondary);transition:border-color .12s,color .12s}
+  .navbtn:hover{border-color:var(--blue);color:var(--blue)}
+  .keydot{width:7px;height:7px;border-radius:50%;background:var(--err)}
+  .keydot.set{background:var(--ok)}
+  /* modal */
+  .modal-bg{position:fixed;inset:0;background:rgba(10,10,10,.35);display:none;align-items:center;justify-content:center;z-index:50}
+  .modal-bg.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--hairline);border-radius:16px;width:440px;max-width:92vw;
+    box-shadow:0 20px 60px rgba(0,0,0,.18);overflow:hidden}
+  .modal .mhead{padding:18px 22px 14px;border-bottom:1px solid var(--hairline2)}
+  .modal .mhead h3{margin:0;font-size:15px;font-weight:500} .modal .mhead p{margin:5px 0 0;font-size:12.5px;color:var(--muted)}
+  .modal .mbody{padding:18px 22px;display:flex;flex-direction:column;gap:14px}
+  .field label{display:block;font-size:12px;font-weight:500;color:var(--secondary);margin-bottom:5px}
+  .field input,.field select{width:100%;font-family:inherit;font-size:13.5px;color:var(--ink);background:var(--canvas);
+    border:1px solid var(--hairline);border-radius:9px;padding:9px 11px}
+  .field input:focus,.field select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(20,86,240,.08)}
+  .field .fhint{font-size:11px;color:var(--muted);margin-top:4px}
+  .modal .mfoot{padding:14px 22px;border-top:1px solid var(--hairline2);display:flex;gap:10px;justify-content:flex-end;align-items:center}
+  .modal .mfoot .spacer{margin-right:auto;font-size:12px}
 
   .shell{display:grid;grid-template-columns:300px 1fr;flex:1 1 auto;min-height:0}
   @media(max-width:860px){.shell{grid-template-columns:1fr}}
@@ -144,6 +164,10 @@
   </svg>
   <span class="wordmark">Vectorless</span>
   <span class="nav-meta">local engine · <b id="modelName">glm-4.6</b> · treewalk</span>
+  <button id="settingsBtn" class="navbtn" title="API key & model settings">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H2a2 2 0 110-4h.09A1.65 1.65 0 004.6 8a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V2a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H22a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+    <span id="keyStatus" class="keydot"></span>
+  </button>
   <span class="status"><span id="hdot" class="dot"></span><span id="hstat">checking…</span></span>
 </nav>
 
@@ -198,8 +222,69 @@
   </main>
 </div>
 
+<div class="modal-bg" id="settingsModal">
+  <div class="modal">
+    <div class="mhead">
+      <h3>Model & API key</h3>
+      <p>Your key is stored in this browser only and sent with each query as a request header — never persisted on the server.</p>
+    </div>
+    <div class="mbody">
+      <div class="field"><label>Provider</label>
+        <select id="setProvider">
+          <option value="anthropic">Anthropic-compatible (GLM / Z.ai, Claude)</option>
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Gemini</option>
+        </select>
+      </div>
+      <div class="field"><label>API key</label>
+        <input id="setKey" type="password" placeholder="paste your API key" autocomplete="off" />
+        <div class="fhint">e.g. your GLM key from z.ai. Required to ask questions.</div>
+      </div>
+      <div class="field"><label>Base URL <span style="color:var(--muted)">(optional)</span></label>
+        <input id="setBase" type="text" placeholder="https://api.z.ai/api/anthropic/v1" />
+        <div class="fhint">Leave blank to use the server default. For GLM it must end in <code>/v1</code>.</div>
+      </div>
+      <div class="field"><label>Model <span style="color:var(--muted)">(optional)</span></label>
+        <input id="setModel" type="text" placeholder="glm-4.6" />
+      </div>
+    </div>
+    <div class="mfoot">
+      <span class="spacer" id="setStatus"></span>
+      <button class="btn ghost" id="setCancel">Cancel</button>
+      <button class="btn" id="setSave">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+
+// ---- BYOK settings (browser-local) ----
+const LS="vl_llm_settings";
+const DEFAULTS={provider:"anthropic",baseUrl:"https://api.z.ai/api/anthropic/v1",model:"glm-4.6",apiKey:""};
+function getSettings(){ try{ return {...DEFAULTS, ...JSON.parse(localStorage.getItem(LS)||"{}")}; }catch{ return {...DEFAULTS}; } }
+function saveSettings(s){ localStorage.setItem(LS, JSON.stringify(s)); refreshKeyStatus(); }
+function llmHeaders(){ const s=getSettings(); const h={}; if(s.apiKey){ h["X-LLM-Api-Key"]=s.apiKey;
+  if(s.provider) h["X-LLM-Provider"]=s.provider; if(s.baseUrl) h["X-LLM-Base-Url"]=s.baseUrl; if(s.model) h["X-LLM-Model"]=s.model; } return h; }
+function refreshKeyStatus(){ const s=getSettings(); const dot=document.getElementById("keyStatus");
+  dot.className="keydot"+(s.apiKey?" set":""); dot.title=s.apiKey?`key set · ${s.model||"default model"}`:"no API key — click to configure";
+  if(s.model) document.getElementById("modelName").textContent=s.model; }
+function openSettings(){ const s=getSettings();
+  document.getElementById("setProvider").value=s.provider; document.getElementById("setKey").value=s.apiKey;
+  document.getElementById("setBase").value=s.baseUrl===DEFAULTS.baseUrl?"":s.baseUrl;
+  document.getElementById("setModel").value=s.model===DEFAULTS.model?"":s.model;
+  document.getElementById("setStatus").textContent=""; document.getElementById("settingsModal").classList.add("open"); }
+function closeSettings(){ document.getElementById("settingsModal").classList.remove("open"); }
+document.getElementById("settingsBtn").onclick=openSettings;
+document.getElementById("setCancel").onclick=closeSettings;
+document.getElementById("settingsModal").onclick=e=>{ if(e.target.id==="settingsModal") closeSettings(); };
+document.getElementById("setSave").onclick=()=>{
+  saveSettings({ provider:document.getElementById("setProvider").value,
+    apiKey:document.getElementById("setKey").value.trim(),
+    baseUrl:document.getElementById("setBase").value.trim()||DEFAULTS.baseUrl,
+    model:document.getElementById("setModel").value.trim()||DEFAULTS.model });
+  closeSettings();
+};
 const E = p => "/engine" + p;
 let activeDoc=null, pollTimer=null, pdfDoc=null, pdfPage=1, pdfRange=[1,1];
 const EXAMPLES=["What were the capital expenditures in fiscal year 2018?","What was total net sales for the year?","What was total debt at year-end?","Summarize the company's business segments."];
@@ -290,11 +375,12 @@ document.getElementById("ask").addEventListener("click",ask);
 document.getElementById("q").addEventListener("keydown",e=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") ask(); });
 async function ask(){
   if(!activeDoc) return; const q=document.getElementById("q").value.trim(); if(!q) return;
+  if(!getSettings().apiKey){ openSettings(); document.getElementById("setStatus").innerHTML='<span style="color:var(--warn)">Set an API key to ask questions.</span>'; return; }
   const out=document.getElementById("result"), btn=document.getElementById("ask"); btn.disabled=true; pdfDoc=null;
   out.innerHTML=`<div class="res card" style="margin-top:16px"><div class="body"><span class="spin"></span><span class="askhint">Navigating the document…</span></div></div>`;
   const t0=performance.now();
   try{
-    const r=await fetch(E("/v1/answer/treewalk"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({document_id:activeDoc.id,query:q})});
+    const r=await fetch(E("/v1/answer/treewalk"),{method:"POST",headers:{"Content-Type":"application/json",...llmHeaders()},body:JSON.stringify({document_id:activeDoc.id,query:q})});
     const d=await r.json();
     if(!r.ok){ out.innerHTML=`<div class="res card"><div class="body err">Error: ${esc(d.error||JSON.stringify(d))}</div></div>`; return; }
     renderResult(d,Math.round(performance.now()-t0));
@@ -411,8 +497,9 @@ async function init(){ await loadDocs();
   if(want){ try{ const r=await fetch(E(`/v1/documents/${want}`)); if(r.ok){ const d=await r.json();
     await selectDoc({id:want,title:d.title||want,status:d.status,ct:d.content_type});
     const q=p.get("ask"); if(q){ document.getElementById("q").value=q; ask(); } } }catch{} }
+  if(new URLSearchParams(location.search).get("settings")) openSettings();
 }
-health(); init(); setInterval(health,8000);
+refreshKeyStatus(); health(); init(); setInterval(health,8000);
 </script>
 </body>
 </html>
