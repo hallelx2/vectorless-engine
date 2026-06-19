@@ -375,14 +375,21 @@ document.getElementById("ask").addEventListener("click",ask);
 document.getElementById("q").addEventListener("keydown",e=>{ if((e.metaKey||e.ctrlKey)&&e.key==="Enter") ask(); });
 async function ask(){
   if(!activeDoc) return; const q=document.getElementById("q").value.trim(); if(!q) return;
-  if(!getSettings().apiKey){ openSettings(); document.getElementById("setStatus").innerHTML='<span style="color:var(--warn)">Set an API key to ask questions.</span>'; return; }
   const out=document.getElementById("result"), btn=document.getElementById("ask"); btn.disabled=true; pdfDoc=null;
   out.innerHTML=`<div class="res card" style="margin-top:16px"><div class="body"><span class="spin"></span><span class="askhint">Navigating the document…</span></div></div>`;
   const t0=performance.now();
   try{
     const r=await fetch(E("/v1/answer/treewalk"),{method:"POST",headers:{"Content-Type":"application/json",...llmHeaders()},body:JSON.stringify({document_id:activeDoc.id,query:q})});
     const d=await r.json();
-    if(!r.ok){ out.innerHTML=`<div class="res card"><div class="body err">Error: ${esc(d.error||JSON.stringify(d))}</div></div>`; return; }
+    if(!r.ok){
+      const msg=d.error||JSON.stringify(d);
+      if(/no LLM credentials|X-LLM-Api-Key/i.test(msg)){
+        out.innerHTML=""; openSettings();
+        document.getElementById("setStatus").innerHTML='<span style="color:var(--warn)">Set your API key to ask questions.</span>';
+        return;
+      }
+      out.innerHTML=`<div class="res card"><div class="body err">Error: ${esc(msg)}</div></div>`; return;
+    }
     renderResult(d,Math.round(performance.now()-t0));
   }catch(e){ out.innerHTML=`<div class="res card"><div class="body err">${esc(String(e))}</div></div>`; }
   finally{ btn.disabled=false; }
