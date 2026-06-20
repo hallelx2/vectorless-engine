@@ -82,6 +82,23 @@ func (s *DocumentsService) CreateDocument(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("content is required"))
 	}
 
+	// Idempotent ingest: a repeat CreateDocument carrying the same
+	// Idempotency-Key returns the original document rather than a duplicate
+	// (mirrors the REST path; closes the HAL-323 duplicate-upload bug for SDK
+	// callers that retry the RPC).
+	idemKey := req.Header().Get("Idempotency-Key")
+	if idemKey != "" {
+		if existing, err := s.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); err == nil {
+			return connect.NewResponse(&v1.CreateDocumentResponse{
+				DocumentId: string(existing.ID),
+				Status:     string(existing.Status),
+			}), nil
+		} else if !errors.Is(err, db.ErrNotFound) {
+			s.logger.Error("ingest: idempotency lookup failed", "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("db read failed"))
+		}
+	}
+
 	docID := ingest.NewDocumentID()
 	contentType := msg.ContentType
 	if contentType == "" {
@@ -105,15 +122,29 @@ func (s *DocumentsService) CreateDocument(
 	}
 
 	if err := s.db.NewDocument(ctx, db.Document{
-		ID:          docID,
-		OrgID:       orgID,
-		StoreID:     storeIDFromConnect(req),
-		Title:       title,
-		ContentType: contentType,
-		SourceRef:   key,
-		Status:      db.StatusPending,
-		ByteSize:    size,
+		ID:             docID,
+		OrgID:          orgID,
+		StoreID:        storeIDFromConnect(req),
+		Title:          title,
+		ContentType:    contentType,
+		SourceRef:      key,
+		Status:         db.StatusPending,
+		ByteSize:       size,
+		IdempotencyKey: idemKey,
 	}); err != nil {
+		// Concurrent same-key insert won the race: drop the orphan source and
+		// return the winner instead of erroring.
+		if idemKey != "" && errors.Is(err, db.ErrConflict) {
+			if delErr := s.storage.Delete(ctx, key); delErr != nil {
+				s.logger.Warn("ingest: orphan source cleanup failed", "err", delErr, "source_ref", key, "idempotency_key", idemKey)
+			}
+			if existing, lookupErr := s.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); lookupErr == nil {
+				return connect.NewResponse(&v1.CreateDocumentResponse{
+					DocumentId: string(existing.ID),
+					Status:     string(existing.Status),
+				}), nil
+			}
+		}
 		s.logger.Error("ingest: db insert failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("db write failed"))
 	}

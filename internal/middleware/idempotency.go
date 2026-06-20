@@ -122,12 +122,21 @@ func Idempotency(cfg IdempotencyConfig) func(http.Handler) http.Handler {
 				return
 			}
 
-			key := r.Header.Get("Idempotency-Key")
-			if key == "" {
+			rawKey := r.Header.Get("Idempotency-Key")
+			if rawKey == "" {
 				// No key provided — proceed normally.
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// Scope the cache entry by tenant + method + path, NOT the raw
+			// Idempotency-Key alone. Two orgs legitimately use the same opaque
+			// key (e.g. "1", a per-corpus id); replaying by the bare key would
+			// hand org B a 202 cached for org A's document — a cross-tenant
+			// leak. The org header is absent in standalone/local mode, which is
+			// single-tenant, so an empty org collapses to one namespace there.
+			org := r.Header.Get("X-Vectorless-Org")
+			key := r.Method + "|" + r.URL.Path + "|" + org + "|" + rawKey
 
 			// Check cache.
 			if cr, ok := cache.get(key); ok {

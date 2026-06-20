@@ -73,14 +73,14 @@ func (g *GCS) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, err
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
 		if errors.Is(err, gcs.ErrObjectNotExist) {
-			return nil, Metadata{}, ErrNotFound
+			return nil, Metadata{}, fmt.Errorf("%w: gs://%s/%s", ErrNotFound, g.cfg.Bucket, key)
 		}
 		return nil, Metadata{}, fmt.Errorf("gcs storage: attrs %q: %w", key, err)
 	}
 	rc, err := obj.NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, gcs.ErrObjectNotExist) {
-			return nil, Metadata{}, ErrNotFound
+			return nil, Metadata{}, fmt.Errorf("%w: gs://%s/%s", ErrNotFound, g.cfg.Bucket, key)
 		}
 		return nil, Metadata{}, fmt.Errorf("gcs storage: get %q: %w", key, err)
 	}
@@ -98,7 +98,7 @@ func (g *GCS) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, err
 func (g *GCS) Delete(ctx context.Context, key string) error {
 	err := g.bucket.Object(key).Delete(ctx)
 	if errors.Is(err, gcs.ErrObjectNotExist) {
-		return ErrNotFound
+		return fmt.Errorf("%w: gs://%s/%s", ErrNotFound, g.cfg.Bucket, key)
 	}
 	if err != nil {
 		return fmt.Errorf("gcs storage: delete %q: %w", key, err)
