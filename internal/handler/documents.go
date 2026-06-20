@@ -260,7 +260,9 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		// inserted first. Drop the orphan source we just wrote and return the
 		// winner's document rather than a 500.
 		if idemKey != "" && errors.Is(err, db.ErrConflict) {
-			_ = h.storage.Delete(ctx, key)
+			if delErr := h.storage.Delete(ctx, key); delErr != nil {
+				h.logger.Warn("ingest: orphan source cleanup failed", "err", delErr, "source_ref", key, "idempotency_key", idemKey)
+			}
 			if existing, lookupErr := h.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); lookupErr == nil {
 				writeJSON(w, http.StatusAccepted, map[string]any{
 					"document_id": existing.ID,

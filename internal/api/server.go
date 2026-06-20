@@ -334,7 +334,9 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 		// A concurrent same-key ingest won the race: drop the orphan source we
 		// just wrote and return the winner instead of a 500.
 		if idemKey != "" && errors.Is(err, db.ErrConflict) {
-			_ = d.Storage.Delete(ctx, key)
+			if delErr := d.Storage.Delete(ctx, key); delErr != nil {
+				d.Logger.Warn("ingest: orphan source cleanup failed", "err", delErr, "source_ref", key, "idempotency_key", idemKey)
+			}
 			if existing, lookupErr := d.DB.GetDocumentByIdempotencyKey(ctx, standaloneOrgID, idemKey); lookupErr == nil {
 				writeJSON(w, http.StatusAccepted, map[string]any{
 					"document_id": existing.ID,

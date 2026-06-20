@@ -108,20 +108,19 @@ func (p *Pool) GetDocumentByIdempotencyKey(ctx context.Context, orgID, key strin
 	}
 	row := p.QueryRow(ctx, `
         SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
-               byte_size, metadata, created_at, updated_at, toc_tree
+               byte_size, metadata, created_at, updated_at, toc_tree, idempotency_key
         FROM documents WHERE org_id = $1 AND idempotency_key = $2`, orgID, key)
 
 	var d Document
 	var status string
 	var rawMeta, rawTOC []byte
 	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
-		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
+		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC, &d.IdempotencyKey); err != nil {
 		return nil, mapErr(err)
 	}
 	d.Status = DocumentStatus(status)
 	d.Metadata = unmarshalMeta(rawMeta)
 	d.TOCTree = rawTOC
-	d.IdempotencyKey = key
 	return &d, nil
 }
 

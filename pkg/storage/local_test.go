@@ -68,9 +68,11 @@ func TestLocalDeleteNotFoundCarriesPath(t *testing.T) {
 func TestLocalGetRetriesTransientNotExist(t *testing.T) {
 	// Simulate the Windows Defender scan window: the source does not exist when
 	// Get is first called, then appears shortly after. On Windows the bounded
-	// internal retry must ride through the gap and return the bytes rather than a
-	// hard not-found. (On non-Windows there is a single pass, so this only
-	// asserts the eventual success once the file is present.)
+	// internal retry (cumulative ~1.4s) must ride through the gap so the FIRST
+	// Get returns the bytes — no caller-side fallback. This test fails if the
+	// Windows retry loop is removed or shortened below the write delay, because
+	// a single-pass Get would return ErrNotFound at t≈0. Off Windows there is no
+	// scan-hold and Get makes a single pass, so we wait for the writer first.
 	l, err := NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
@@ -81,30 +83,29 @@ func TestLocalGetRetriesTransientNotExist(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		// Write the file a beat after Get starts polling.
+		// Write the file a beat after Get starts polling — well within the
+		// Windows retry budget but after the first attempt would have missed.
 		time.Sleep(80 * time.Millisecond)
 		_ = l.Put(ctx, key, bytes.NewReader(want), Metadata{})
 		close(done)
 	}()
 
 	if runtime.GOOS != "windows" {
-		// No internal retry off Windows — wait for the writer, then read.
-		<-done
+		<-done // single-pass platforms: ensure the file is present first
 	}
+
+	// On Windows this is the assertion that matters: the internal retry must
+	// make this succeed despite the file being absent when the call began.
 	rc, _, err := l.Get(ctx, key)
 	if err != nil {
-		<-done
-		// Fall back to a direct read so the test is meaningful everywhere.
-		rc, _, err = l.Get(ctx, key)
-		if err != nil {
-			t.Fatalf("Get after write: %v", err)
-		}
+		t.Fatalf("Get rode through the write window? err = %v (want nil — retry should cover the %v file-appear delay)", err, 80*time.Millisecond)
 	}
 	defer func() { _ = rc.Close() }()
 	got, _ := io.ReadAll(rc)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("round-trip = %q, want %q", got, want)
 	}
+	<-done // avoid leaking the writer goroutine
 }
 
 func TestLocalPutThenGetRoundTrip(t *testing.T) {

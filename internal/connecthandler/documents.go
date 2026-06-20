@@ -135,7 +135,9 @@ func (s *DocumentsService) CreateDocument(
 		// Concurrent same-key insert won the race: drop the orphan source and
 		// return the winner instead of erroring.
 		if idemKey != "" && errors.Is(err, db.ErrConflict) {
-			_ = s.storage.Delete(ctx, key)
+			if delErr := s.storage.Delete(ctx, key); delErr != nil {
+				s.logger.Warn("ingest: orphan source cleanup failed", "err", delErr, "source_ref", key, "idempotency_key", idemKey)
+			}
 			if existing, lookupErr := s.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); lookupErr == nil {
 				return connect.NewResponse(&v1.CreateDocumentResponse{
 					DocumentId: string(existing.ID),
