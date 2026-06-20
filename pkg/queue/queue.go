@@ -44,6 +44,15 @@ type Job struct {
 
 	// Optional: max retries before dead-lettering.
 	MaxRetries int `json:"max_retries,omitempty"`
+
+	// Attempt is the 1-based current attempt number, set by the queue when
+	// it dispatches a job to its handler (0 if the queue doesn't track
+	// attempts). MaxAttempts is the total before dead-lettering. Handlers
+	// use these to tell a transient, will-be-retried failure apart from a
+	// terminal one — e.g. so a document isn't marked "failed" while the
+	// queue will still retry it.
+	Attempt     int `json:"-"`
+	MaxAttempts int `json:"-"`
 }
 
 // Handler processes a single job.

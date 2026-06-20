@@ -73,7 +73,19 @@ func (w *envelopeWorker) Work(ctx context.Context, job *river.Job[envelopeArgs])
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownKind, job.Args.DomainKind)
 	}
-	return h(ctx, Job{Kind: job.Args.DomainKind, Payload: job.Args.Payload})
+	// Attempt/MaxAttempts live on River's embedded *JobRow, which is always
+	// populated in production but may be nil in unit tests that construct a
+	// bare river.Job. Guard the deref.
+	attempt, maxAttempts := 0, 0
+	if job.JobRow != nil {
+		attempt, maxAttempts = job.Attempt, job.MaxAttempts
+	}
+	return h(ctx, Job{
+		Kind:        job.Args.DomainKind,
+		Payload:     job.Args.Payload,
+		Attempt:     attempt,
+		MaxAttempts: maxAttempts,
+	})
 }
 
 // NewRiver constructs a new River-backed Queue. It opens its own pgxpool
