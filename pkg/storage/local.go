@@ -18,12 +18,30 @@ type Local struct {
 
 // NewLocal returns a Local storage rooted at dir. The directory is created
 // if it does not exist.
+//
+// dir is resolved to an ABSOLUTE path up front. A relative root (the default
+// is "./data/documents") is otherwise resolved against the process's current
+// working directory on every call — so if the engine is ever relaunched from a
+// different directory while the queue still holds jobs that reference earlier
+// uploads (River persists jobs in Postgres across restarts), the worker would
+// look under a different root than the one the bytes were written to and fail
+// with "object not found" on a file that is in fact on disk. Pinning the root
+// to an absolute path at construction makes it stable for the process lifetime.
 func NewLocal(dir string) (*Local, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve storage root %q: %w", dir, err)
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("create storage root: %w", err)
 	}
-	return &Local{root: dir}, nil
+	return &Local{root: abs}, nil
 }
+
+// Root returns the absolute filesystem path the storage is rooted at. Exposed
+// so the engine can log the resolved root at boot (the single most useful fact
+// when diagnosing an "object not found" on a file that appears to be on disk).
+func (l *Local) Root() string { return l.root }
 
 func (l *Local) path(key string) string {
 	// Keys may include slashes; treat them as path separators.
@@ -62,7 +80,11 @@ func (l *Local) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, e
 	info, err := os.Stat(full)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, Metadata{}, ErrNotFound
+			// Wrap ErrNotFound (errors.Is still matches) but carry the resolved
+			// absolute path so the failure is self-diagnosing: a caller seeing
+			// this in a log can immediately tell whether it looked in the wrong
+			// root vs. the bytes genuinely being absent.
+			return nil, Metadata{}, fmt.Errorf("%w: %s", ErrNotFound, full)
 		}
 		return nil, Metadata{}, err
 	}

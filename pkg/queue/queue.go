@@ -79,3 +79,41 @@ type Queue interface {
 // ErrUnknownKind is returned by Queue implementations when a job with no
 // registered handler is received.
 var ErrUnknownKind = errors.New("queue: no handler registered for job kind")
+
+// PermanentError marks a handler failure as NON-retryable: the input is
+// deterministically bad (e.g. an encrypted or malformed document the parser
+// can't open, or content with no extractable text), so re-running the job can
+// only fail the same way. A queue backend that understands retries MUST stop
+// retrying a job whose handler returns a PermanentError and dead-letter it
+// immediately, instead of burning the full retry budget on an outcome that
+// will never change.
+//
+// Transient failures (a not-yet-visible source under heavy concurrent
+// ingestion, a parse timeout under load, a flaky network call) are the
+// opposite: they are returned as ordinary errors so the queue retries them.
+type PermanentError struct{ Err error }
+
+func (e *PermanentError) Error() string {
+	if e.Err == nil {
+		return "permanent failure"
+	}
+	return e.Err.Error()
+}
+
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+// Permanent wraps err so the queue treats the failure as non-retryable. It
+// returns nil for a nil err so `return queue.Permanent(doThing())` stays
+// correct on the success path.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &PermanentError{Err: err}
+}
+
+// IsPermanent reports whether err (or anything it wraps) is a PermanentError.
+func IsPermanent(err error) bool {
+	var pe *PermanentError
+	return errors.As(err, &pe)
+}

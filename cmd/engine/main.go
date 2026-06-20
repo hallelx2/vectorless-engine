@@ -96,6 +96,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init storage: %w", err)
 	}
+	// Log the resolved storage location at boot. For the local driver this is
+	// the absolute root every source/section object is read from and written
+	// to — the single most useful fact when diagnosing an "object not found",
+	// and the place to point a Windows Defender exclusion so antivirus scans of
+	// freshly-written PDFs don't transiently hide them from the ingest worker.
+	if local, ok := store.(*storage.Local); ok {
+		logger.Info("storage: local root resolved", "root", local.Root())
+	}
 
 	q, err := buildQueue(cfg.Queue, cfg.Database.URL)
 	if err != nil {
