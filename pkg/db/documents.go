@@ -47,8 +47,8 @@ type Document struct {
 	// ingest with the same key returns the existing document instead of
 	// creating a duplicate. Empty means "no dedup" (column stored as NULL).
 	IdempotencyKey string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 
 	// TOCTree is the JSONB blob persisted by the ingest pipeline's
 	// LLM-driven TOC builder ([]tree.TOCNode marshalled). nil
