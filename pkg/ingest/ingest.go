@@ -566,10 +566,44 @@ func runParallelStages(ctx context.Context, summarizeFn, hydeFn func(context.Con
 func (p *Pipeline) parse(ctx context.Context, parsers *parser.Registry, pl Payload) (*parser.ParsedDoc, error) {
 	rc, _, err := getSourceWithRetry(ctx, p.Storage, pl.SourceRef)
 	if err != nil {
+		// A not-yet-visible source is transient (the upload's fsync'd bytes can
+		// briefly read back as ErrNotFound under heavy concurrent ingestion, or
+		// while antivirus scans a freshly-written file), so it is returned as an
+		// ordinary, retryable error — never permanent.
 		return nil, fmt.Errorf("fetch source: %w", err)
 	}
 	defer func() { _ = rc.Close() }() // best-effort close
-	return parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
+
+	parsed, perr := parsers.Parse(ctx, pl.ContentType, pl.Filename, rc)
+	if perr != nil {
+		// Classify the failure so the queue stops wasting retries on inputs
+		// that can never succeed. A parse TIMEOUT or a context cancellation is
+		// transient — the same document may parse on a less-loaded attempt — so
+		// it stays an ordinary (retryable) error. Everything else from the
+		// parser is deterministic on these bytes (encrypted PDF that won't open
+		// with the empty password, a backend-rejected/malformed structure, a
+		// scanned image with no extractable text): retrying only re-derives the
+		// same failure, so mark it permanent and dead-letter it immediately.
+		if isTransientParseErr(perr) {
+			return nil, perr
+		}
+		return nil, queue.Permanent(perr)
+	}
+	return parsed, nil
+}
+
+// isTransientParseErr reports whether a parser error is worth retrying. Parse
+// timeouts and context cancellations are load-dependent (a complex document may
+// finish within budget on a quieter attempt), so they are transient. A genuine
+// structural rejection is not.
+func isTransientParseErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// The PDF parser's own deadline wrapper formats a plain (unwrapped) message
+	// when its internal timer fires, so match it textually as a fallback.
+	msg := err.Error()
+	return strings.Contains(msg, "parse exceeded") || strings.Contains(msg, "parse cancelled")
 }
 
 // getSourceWithRetry fetches a freshly-uploaded object, tolerating the
@@ -1035,13 +1069,18 @@ func (p *Pipeline) fail(ctx context.Context, store docPersister, id tree.Documen
 	failCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// If the queue will retry this job, the failure is (so far) transient —
-	// under heavy concurrent ingestion, parse can hit a parse-timeout or a
-	// not-yet-visible source and recover on a later attempt. Surfacing
-	// "failed" now would tell a polling client the document is dead when it
-	// isn't, so keep it in "parsing" and let the retry run. Only the final
-	// attempt produces a terminal "failed".
-	if !isLastAttempt(ctx) {
+	// A permanent failure (encrypted/malformed/no-text document) will NOT be
+	// retried by the queue — the worker cancels the job — so it is terminal
+	// right now regardless of which attempt we're on. Marking it failed
+	// immediately gives the caller the real reason instead of leaving the
+	// document wedged in "parsing" forever waiting for a retry that never runs.
+	if !queue.IsPermanent(cause) && !isLastAttempt(ctx) {
+		// Otherwise, if the queue will retry this job, the failure is (so far)
+		// transient — under heavy concurrent ingestion, parse can hit a
+		// parse-timeout or a not-yet-visible source and recover on a later
+		// attempt. Surfacing "failed" now would tell a polling client the
+		// document is dead when it isn't, so keep it in "parsing" and let the
+		// retry run. Only the final attempt produces a terminal "failed".
 		p.Logger.Warn("ingest: transient failure, will retry",
 			"document_id", string(id), "stage", stage, "cause", cause.Error())
 		if err := store.SetDocumentStatus(failCtx, id, db.StatusParsing, ""); err != nil {
