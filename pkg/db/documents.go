@@ -41,6 +41,12 @@ type Document struct {
 	ErrorMessage string
 	ByteSize     int64
 	Metadata     map[string]string
+
+	// IdempotencyKey is the optional client-supplied Idempotency-Key.
+	// When non-empty it is unique per (org_id, idempotency_key): a repeat
+	// ingest with the same key returns the existing document instead of
+	// creating a duplicate. Empty means "no dedup" (column stored as NULL).
+	IdempotencyKey string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 
@@ -76,12 +82,47 @@ func (p *Pool) NewDocument(ctx context.Context, d Document) error {
 	if storeID == "" {
 		storeID = NilScope
 	}
+	// NULL (not "") when no key, so the partial unique index ignores the row.
+	var idemKey any
+	if d.IdempotencyKey != "" {
+		idemKey = d.IdempotencyKey
+	}
 	_, err = p.Exec(ctx, `
-        INSERT INTO documents (id, org_id, store_id, title, content_type, source_ref, status, byte_size, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		string(d.ID), d.OrgID, storeID, d.Title, d.ContentType, d.SourceRef, string(d.Status), d.ByteSize, meta,
+        INSERT INTO documents (id, org_id, store_id, title, content_type, source_ref, status, byte_size, metadata, idempotency_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		string(d.ID), d.OrgID, storeID, d.Title, d.ContentType, d.SourceRef, string(d.Status), d.ByteSize, meta, idemKey,
 	)
 	return mapErr(err)
+}
+
+// GetDocumentByIdempotencyKey returns the document an org previously ingested
+// under key, or ErrNotFound if none exists. Used to short-circuit a repeat
+// ingest (client retry / SDK transport retry) back to the original document
+// instead of creating a duplicate.
+func (p *Pool) GetDocumentByIdempotencyKey(ctx context.Context, orgID, key string) (*Document, error) {
+	if orgID == "" {
+		return nil, fmt.Errorf("GetDocumentByIdempotencyKey: orgID is required")
+	}
+	if key == "" {
+		return nil, ErrNotFound
+	}
+	row := p.QueryRow(ctx, `
+        SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
+               byte_size, metadata, created_at, updated_at, toc_tree
+        FROM documents WHERE org_id = $1 AND idempotency_key = $2`, orgID, key)
+
+	var d Document
+	var status string
+	var rawMeta, rawTOC []byte
+	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
+		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
+		return nil, mapErr(err)
+	}
+	d.Status = DocumentStatus(status)
+	d.Metadata = unmarshalMeta(rawMeta)
+	d.TOCTree = rawTOC
+	d.IdempotencyKey = key
+	return &d, nil
 }
 
 // GetDocument fetches a document scoped to an org and (optionally) a

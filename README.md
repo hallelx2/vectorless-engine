@@ -164,6 +164,15 @@ llm:
 
 > **Anthropic-compatible gateways (GLM/Z.ai):** `base_url` **must include `/v1`** — the client posts to `${base_url}/messages`.
 
+> **Windows + local storage:** Windows Defender real-time protection scans
+> each freshly-written file and briefly hides it from `os.Stat`/`os.Open`,
+> which under heavy concurrent ingestion can surface as transient
+> `object not found` errors. The local backend rides through this window with
+> a short internal retry, but for large bulk loads **add a Defender exclusion
+> for your storage root** (`local.root` / `VLE_STORAGE_LOCAL_ROOT`):
+> `Add-MpPreference -ExclusionPath "C:\path\to\data\documents"`. Linux has no
+> such scan-hold and needs no exclusion.
+
 ### Supported formats
 
 PDF (positioned text + tables via [`pdftable`](https://github.com/hallelx2/pdftable)) · Markdown · HTML · DOCX · Text.

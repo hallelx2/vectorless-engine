@@ -158,6 +158,25 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 	ctx := r.Context()
 	docID := ingest.NewDocumentID()
 
+	// Idempotent ingest: if the client supplied an Idempotency-Key and we
+	// already have a document for this org under that key, return it instead
+	// of creating a duplicate. This makes a client/transport retry of the
+	// ingest POST (the HAL-323 duplicate-upload bug) a no-op.
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey != "" {
+		if existing, err := h.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); err == nil {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"document_id": existing.ID,
+				"status":      string(existing.Status),
+			})
+			return
+		} else if !errors.Is(err, db.ErrNotFound) {
+			h.logger.Error("ingest: idempotency lookup failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "db read failed")
+			return
+		}
+	}
+
 	var (
 		filename    string
 		contentType string
@@ -227,15 +246,29 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 	}
 
 	if err := h.db.NewDocument(ctx, db.Document{
-		ID:          docID,
-		OrgID:       orgID,
-		StoreID:     storeID(r),
-		Title:       title,
-		ContentType: contentType,
-		SourceRef:   key,
-		Status:      db.StatusPending,
-		ByteSize:    size,
+		ID:             docID,
+		OrgID:          orgID,
+		StoreID:        storeID(r),
+		Title:          title,
+		ContentType:    contentType,
+		SourceRef:      key,
+		Status:         db.StatusPending,
+		ByteSize:       size,
+		IdempotencyKey: idemKey,
 	}); err != nil {
+		// A concurrent request with the same Idempotency-Key won the race and
+		// inserted first. Drop the orphan source we just wrote and return the
+		// winner's document rather than a 500.
+		if idemKey != "" && errors.Is(err, db.ErrConflict) {
+			_ = h.storage.Delete(ctx, key)
+			if existing, lookupErr := h.db.GetDocumentByIdempotencyKey(ctx, orgID, idemKey); lookupErr == nil {
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"document_id": existing.ID,
+					"status":      string(existing.Status),
+				})
+				return
+			}
+		}
 		h.logger.Error("ingest: db insert failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "db write failed")
 		return

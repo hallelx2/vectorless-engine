@@ -114,7 +114,7 @@ func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, erro
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, Metadata{}, ErrNotFound
+			return nil, Metadata{}, fmt.Errorf("%w: s3://%s/%s", ErrNotFound, s.cfg.Bucket, key)
 		}
 		return nil, Metadata{}, fmt.Errorf("s3 storage: get %q: %w", key, err)
 	}
@@ -144,7 +144,7 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	if !exists {
-		return ErrNotFound
+		return fmt.Errorf("%w: s3://%s/%s", ErrNotFound, s.cfg.Bucket, key)
 	}
 	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.cfg.Bucket),

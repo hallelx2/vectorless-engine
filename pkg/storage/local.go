@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -77,32 +78,62 @@ func (l *Local) Put(ctx context.Context, key string, r io.Reader, _ Metadata) er
 
 func (l *Local) Get(ctx context.Context, key string) (io.ReadCloser, Metadata, error) {
 	full := l.path(key)
-	info, err := os.Stat(full)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// Wrap ErrNotFound (errors.Is still matches) but carry the resolved
-			// absolute path so the failure is self-diagnosing: a caller seeing
-			// this in a log can immediately tell whether it looked in the wrong
-			// root vs. the bytes genuinely being absent.
-			return nil, Metadata{}, fmt.Errorf("%w: %s", ErrNotFound, full)
+
+	// On Windows, Defender real-time protection holds a brief lock on a
+	// freshly-written file while it scans it; during that window GetFileAttributes
+	// (os.Stat) and CreateFile (os.Open) return ERROR_FILE_NOT_FOUND on a file
+	// that IS on disk (HAL-321/HAL-323). The same flip can hit between our Stat
+	// and Open (a TOCTOU race). A short bounded retry here closes that window
+	// transparently so the caller never sees the transient as a hard not-found.
+	// On non-Windows there is no such hold, so we make a single pass.
+	const winRetries = 8
+	attempts := 1
+	if runtime.GOOS == "windows" {
+		attempts = winRetries
+	}
+
+	for i := 0; i < attempts; i++ {
+		info, err := os.Stat(full)
+		if err == nil {
+			f, openErr := os.Open(full)
+			if openErr == nil {
+				return f, Metadata{
+					Key:        key,
+					Size:       info.Size(),
+					ModifiedAt: info.ModTime(),
+				}, nil
+			}
+			// Open can fail with not-exist even though Stat just succeeded — the
+			// Windows scan window flipped between the two calls. Treat it like a
+			// transient stat miss and retry; surface anything else immediately.
+			if !errors.Is(openErr, os.ErrNotExist) {
+				return nil, Metadata{}, openErr
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, Metadata{}, err
 		}
-		return nil, Metadata{}, err
+
+		if i < attempts-1 {
+			select {
+			case <-ctx.Done():
+				return nil, Metadata{}, ctx.Err()
+			case <-time.After(time.Duration(i+1) * 50 * time.Millisecond):
+			}
+		}
 	}
-	f, err := os.Open(full)
-	if err != nil {
-		return nil, Metadata{}, err
-	}
-	return f, Metadata{
-		Key:        key,
-		Size:       info.Size(),
-		ModifiedAt: info.ModTime(),
-	}, nil
+
+	// Wrap ErrNotFound (errors.Is still matches) but carry the resolved absolute
+	// path so the failure is self-diagnosing: a caller seeing this in a log can
+	// immediately tell whether it looked in the wrong root vs. the bytes
+	// genuinely being absent.
+	return nil, Metadata{}, fmt.Errorf("%w: %s", ErrNotFound, full)
 }
 
 func (l *Local) Delete(ctx context.Context, key string) error {
-	err := os.Remove(l.path(key))
+	full := l.path(key)
+	err := os.Remove(full)
 	if errors.Is(err, os.ErrNotExist) {
-		return ErrNotFound
+		return fmt.Errorf("%w: %s", ErrNotFound, full)
 	}
 	return err
 }

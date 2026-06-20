@@ -231,6 +231,28 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 
 	docID := ingest.NewDocumentID()
 
+	// Idempotent ingest: if the caller supplied an Idempotency-Key and a
+	// document already exists under it (for the standalone org), return that
+	// document instead of creating a duplicate. A client — or the SDK's own
+	// transport retry-on-transient — that re-POSTs the same upload after a
+	// reset that landed AFTER the server committed the row is then a no-op.
+	// This is the standalone/local-mode half of the HAL-323 duplicate-upload
+	// fix (the multi-tenant handler in internal/handler mirrors it).
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey != "" {
+		if existing, err := d.DB.GetDocumentByIdempotencyKey(ctx, standaloneOrgID, idemKey); err == nil {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"document_id": existing.ID,
+				"status":      string(existing.Status),
+			})
+			return
+		} else if !errors.Is(err, db.ErrNotFound) {
+			d.Logger.Error("ingest: idempotency lookup failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "db read failed")
+			return
+		}
+	}
+
 	var (
 		filename    string
 		contentType string
@@ -300,14 +322,27 @@ func (d Deps) handleIngestDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := d.DB.NewDocument(ctx, db.Document{
-		ID:          docID,
-		OrgID:       standaloneOrgID,
-		Title:       title,
-		ContentType: contentType,
-		SourceRef:   key,
-		Status:      db.StatusPending,
-		ByteSize:    size,
+		ID:             docID,
+		OrgID:          standaloneOrgID,
+		Title:          title,
+		ContentType:    contentType,
+		SourceRef:      key,
+		Status:         db.StatusPending,
+		ByteSize:       size,
+		IdempotencyKey: idemKey,
 	}); err != nil {
+		// A concurrent same-key ingest won the race: drop the orphan source we
+		// just wrote and return the winner instead of a 500.
+		if idemKey != "" && errors.Is(err, db.ErrConflict) {
+			_ = d.Storage.Delete(ctx, key)
+			if existing, lookupErr := d.DB.GetDocumentByIdempotencyKey(ctx, standaloneOrgID, idemKey); lookupErr == nil {
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"document_id": existing.ID,
+					"status":      string(existing.Status),
+				})
+				return
+			}
+		}
 		d.Logger.Error("ingest: db insert failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "db write failed")
 		return

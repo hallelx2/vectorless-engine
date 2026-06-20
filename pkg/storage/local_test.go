@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLocalResolvesRootToAbsolute(t *testing.T) {
@@ -42,6 +44,66 @@ func TestLocalGetNotFoundCarriesPath(t *testing.T) {
 	// WHERE the worker looked.
 	if !strings.Contains(err.Error(), "source.pdf") {
 		t.Fatalf("not-found error %q should include the resolved path", err)
+	}
+}
+
+func TestLocalDeleteNotFoundCarriesPath(t *testing.T) {
+	// Delete of a missing key must also report ErrNotFound WITH the resolved
+	// path. Previously it returned the bare sentinel, which is indistinguishable
+	// in a DB error column from a Get miss — exactly the HAL-323 ambiguity where
+	// pathless "object not found" rows could not be attributed to a code path.
+	l, err := NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	err = l.Delete(context.Background(), "documents/missing/source.pdf")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "source.pdf") {
+		t.Fatalf("not-found error %q should include the resolved path", err)
+	}
+}
+
+func TestLocalGetRetriesTransientNotExist(t *testing.T) {
+	// Simulate the Windows Defender scan window: the source does not exist when
+	// Get is first called, then appears shortly after. On Windows the bounded
+	// internal retry must ride through the gap and return the bytes rather than a
+	// hard not-found. (On non-Windows there is a single pass, so this only
+	// asserts the eventual success once the file is present.)
+	l, err := NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	ctx := context.Background()
+	key := "documents/doc-late/source.pdf"
+	want := []byte("appears late")
+
+	done := make(chan struct{})
+	go func() {
+		// Write the file a beat after Get starts polling.
+		time.Sleep(80 * time.Millisecond)
+		_ = l.Put(ctx, key, bytes.NewReader(want), Metadata{})
+		close(done)
+	}()
+
+	if runtime.GOOS != "windows" {
+		// No internal retry off Windows — wait for the writer, then read.
+		<-done
+	}
+	rc, _, err := l.Get(ctx, key)
+	if err != nil {
+		<-done
+		// Fall back to a direct read so the test is meaningful everywhere.
+		rc, _, err = l.Get(ctx, key)
+		if err != nil {
+			t.Fatalf("Get after write: %v", err)
+		}
+	}
+	defer func() { _ = rc.Close() }()
+	got, _ := io.ReadAll(rc)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("round-trip = %q, want %q", got, want)
 	}
 }
 

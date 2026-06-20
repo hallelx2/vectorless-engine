@@ -113,6 +113,21 @@ paths:
         (field: "file") or JSON body with content. Returns immediately
         with a document_id in "pending" state. The ingest pipeline runs
         asynchronously: parse → build tree → summarize sections.
+
+        Pass an `Idempotency-Key` header to make ingestion idempotent: a
+        repeated request with the same key returns the original document
+        (and its current status) instead of creating a duplicate. Use this
+        to make a client/network retry of the upload safe.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Opaque client-chosen key, unique per document. Repeating a
+            request with the same key returns the existing document rather
+            than ingesting a duplicate.
+          schema:
+            type: string
       requestBody:
         required: true
         content:

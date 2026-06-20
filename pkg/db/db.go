@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,6 +25,10 @@ var migrationsFS embed.FS
 
 // ErrNotFound signals a missing row.
 var ErrNotFound = errors.New("db: not found")
+
+// ErrConflict signals a unique-constraint violation (SQLSTATE 23505), e.g.
+// a second insert with the same (org_id, idempotency_key).
+var ErrConflict = errors.New("db: conflict")
 
 // Pool wraps *pgxpool.Pool with engine-specific helpers.
 type Pool struct {
@@ -135,6 +140,10 @@ func mapErr(err error) error {
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return fmt.Errorf("%w: %s", ErrConflict, pgErr.ConstraintName)
 	}
 	return err
 }
