@@ -80,12 +80,20 @@ func (w *envelopeWorker) Work(ctx context.Context, job *river.Job[envelopeArgs])
 	if job.JobRow != nil {
 		attempt, maxAttempts = job.Attempt, job.MaxAttempts
 	}
-	return h(ctx, Job{
+	err := h(ctx, Job{
 		Kind:        job.Args.DomainKind,
 		Payload:     job.Args.Payload,
 		Attempt:     attempt,
 		MaxAttempts: maxAttempts,
 	})
+	// A PermanentError means the input is deterministically bad — retrying it
+	// can only waste the remaining attempts (and, worse, interleave confusing
+	// transient errors into the job's history). river.JobCancel stops all
+	// further retries and dead-letters the job now, preserving the real cause.
+	if IsPermanent(err) {
+		return river.JobCancel(err)
+	}
+	return err
 }
 
 // NewRiver constructs a new River-backed Queue. It opens its own pgxpool
