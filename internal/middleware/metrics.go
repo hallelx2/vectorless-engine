@@ -56,6 +56,17 @@ func (r *metricsRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush propagates to the wrapped writer so SSE/streaming handlers can
+// flush through the metrics middleware.
+func (r *metricsRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer for http.ResponseController.
+func (r *metricsRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // normalizePath strips URL parameters to keep metric cardinality
 // bounded. Document and section IDs are replaced with a placeholder.
 func normalizePath(path string) string {
