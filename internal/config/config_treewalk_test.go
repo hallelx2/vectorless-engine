@@ -18,13 +18,13 @@ func TestForwardTreeWalkMaxCitations(t *testing.T) {
 		os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", prevVLE)
 	}()
 
-	// Engine default is 3 with no env set.
+	// Engine default is 6 with no env set.
 	os.Unsetenv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS")
 	os.Unsetenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS")
 	cfg := Default()
 	applyEnvOverrides(&cfg)
-	if cfg.Engine.Retrieval.TreeWalk.MaxCitations != 3 {
-		t.Errorf("default max_citations = %d, want 3", cfg.Engine.Retrieval.TreeWalk.MaxCitations)
+	if cfg.Engine.Retrieval.TreeWalk.MaxCitations != 6 {
+		t.Errorf("default max_citations = %d, want 6", cfg.Engine.Retrieval.TreeWalk.MaxCitations)
 	}
 
 	// VLE_ alone forwards through.
@@ -43,12 +43,12 @@ func TestForwardTreeWalkMaxCitations(t *testing.T) {
 		t.Errorf("VLS_ should win: max_citations = %d, want 1", cfg3.Engine.Retrieval.TreeWalk.MaxCitations)
 	}
 
-	// Garbled value preserves the engine default (3), does not zero it.
+	// Garbled value preserves the engine default (6), does not zero it.
 	os.Unsetenv("VLS_RETRIEVAL_TREEWALK_MAX_CITATIONS")
 	os.Setenv("VLE_RETRIEVAL_TREEWALK_MAX_CITATIONS", "heaps")
 	cfg4 := Default()
 	applyEnvOverrides(&cfg4)
-	if cfg4.Engine.Retrieval.TreeWalk.MaxCitations != 3 {
-		t.Errorf("garbage value should preserve default 3, got %d", cfg4.Engine.Retrieval.TreeWalk.MaxCitations)
+	if cfg4.Engine.Retrieval.TreeWalk.MaxCitations != 6 {
+		t.Errorf("garbage value should preserve default 6, got %d", cfg4.Engine.Retrieval.TreeWalk.MaxCitations)
 	}
 }

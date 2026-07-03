@@ -424,10 +424,32 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 			// depth relative to the font-derived level. We only ever DEEPEN
 			// (never change the base level), so top-level headings — numbered
 			// "3" or not ("Abstract") — stay siblings at the same font level.
+			newLevel := lvl
 			if nd, ok := numberedHeadingDepth(text); ok && nd > 1 {
-				lvl += nd - 1
+				newLevel += nd - 1
 			}
-			current = &flat{level: lvl, title: text}
+			// Multi-line display heading: a run of heading rows at the SAME
+			// level, on the SAME page, with NO body text accrued between them
+			// is one visual heading wrapped across lines — e.g. a hero title
+			// "THE SYSTEM, END-TO-END" / "How Vectorless" / "actually works."
+			// Left un-merged, each line becomes its own heading flat whose
+			// body is empty, shipping as a "purely structural" Section that
+			// returns empty content to the section browser / API. Fold the
+			// continuation line into the current heading instead so the body
+			// that follows attaches to the whole title and no empty fragment
+			// section is emitted. We only merge when the current flat is
+			// itself an as-yet-empty heading at the same level on the same
+			// page — never across a level change (real nesting) or once body
+			// text has begun.
+			if current.level > 0 && newLevel == current.level &&
+				current.title != "" &&
+				strings.TrimSpace(current.body.String()) == "" &&
+				(current.pageEnd == 0 || row.page == 0 || row.page == current.pageEnd) {
+				current.title = strings.TrimSpace(current.title + " " + text)
+				touch(current, row.page)
+				continue
+			}
+			current = &flat{level: newLevel, title: text}
 			touch(current, row.page)
 			flats = append(flats, current)
 			continue
@@ -509,6 +531,11 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 		}}
 	}
 
+	// Drop empty "structural" leaf fragments (multi-line title remnants,
+	// running headers) so no section returns empty content to the browser /
+	// API; their titles ride onto the sibling body they head.
+	rootSec.Children = foldEmptyLeafSections(rootSec.Children)
+
 	// Internal sections inherit the union of their children's page ranges
 	// so callers reading the outline can still cite a page span.
 	propagateSectionPages(rootSec.Children)
@@ -548,6 +575,115 @@ func (p *PDF) resolvedParseTimeout() time.Duration {
 		return defaultParseTimeout
 	}
 	return p.ParseTimeout
+}
+
+// foldEmptyLeafSections eliminates leaf sections (no children) whose
+// content is empty. A PDF whose heading detector fires on a fragment that
+// carries no body — a lone display-title line the row-merge didn't catch,
+// a repeated running header, a stray bold word — otherwise ships as a
+// "purely structural" Section that returns empty content to the section
+// browser and the /v1/sections/{id} API, which reads as a broken/empty
+// part of the document.
+//
+// The fold is lossless: an empty leaf's TITLE is preserved by attaching it
+// as a bold markdown heading line to the content of the sibling it heads —
+// the NEXT sibling when one exists (the body it introduces), else the
+// PREVIOUS sibling. Consecutive empty leaves accumulate and flush together
+// into the first sibling that can carry them, so a multi-line title that
+// escaped the row-merge still lands as one heading block above its body.
+// Page ranges union so citations stay correct. Internal nodes (sections
+// WITH children) are recursed into but never dropped — an empty heading
+// with real sub-sections is legitimate structure whose content lives in
+// its children.
+//
+// A lone empty leaf with no siblings to carry its title is kept as-is
+// (dropping it would erase the only trace of that heading); this is the
+// rare degenerate case and harms nothing.
+func foldEmptyLeafSections(sections []Section) []Section {
+	for i := range sections {
+		if len(sections[i].Children) > 0 {
+			sections[i].Children = foldEmptyLeafSections(sections[i].Children)
+		}
+	}
+
+	// Collect the indices of empty leaves eligible to fold. A section is an
+	// empty leaf when it has no children and no non-whitespace content.
+	emptyLeaf := func(s *Section) bool {
+		return len(s.Children) == 0 && strings.TrimSpace(s.Content) == ""
+	}
+	// Nothing to do unless there is at least one empty leaf AND at least one
+	// sibling that can carry a folded title.
+	empties, carriers := 0, 0
+	for i := range sections {
+		if emptyLeaf(&sections[i]) {
+			empties++
+		} else {
+			carriers++
+		}
+	}
+	if empties == 0 || carriers == 0 {
+		return sections
+	}
+
+	out := make([]Section, 0, len(sections))
+	var pendingTitles []string
+	var pendStart, pendEnd int
+	takePending := func(target *Section) {
+		if len(pendingTitles) == 0 {
+			return
+		}
+		var b strings.Builder
+		for _, t := range pendingTitles {
+			b.WriteString("**")
+			b.WriteString(t)
+			b.WriteString("**\n\n")
+		}
+		b.WriteString(target.Content)
+		target.Content = strings.TrimSpace(b.String())
+		target.PageStart = minNonZero(pendStart, target.PageStart)
+		if pendEnd > target.PageEnd {
+			target.PageEnd = pendEnd
+		}
+		pendingTitles = nil
+		pendStart, pendEnd = 0, 0
+	}
+
+	for i := range sections {
+		s := sections[i]
+		if emptyLeaf(&s) {
+			if t := strings.TrimSpace(s.Title); t != "" {
+				pendingTitles = append(pendingTitles, t)
+				pendStart = minNonZero(pendStart, s.PageStart)
+				if s.PageEnd > pendEnd {
+					pendEnd = s.PageEnd
+				}
+			}
+			continue // drop the empty leaf; its title rides on pendingTitles
+		}
+		// A real section: it carries any pending titles as heading prefix
+		// (these are the fragments it follows).
+		takePending(&s)
+		out = append(out, s)
+	}
+
+	// Any titles still pending had no following carrier — attach them to the
+	// last emitted sibling as a trailing heading block so nothing is lost.
+	if len(pendingTitles) > 0 && len(out) > 0 {
+		last := &out[len(out)-1]
+		var b strings.Builder
+		b.WriteString(last.Content)
+		for _, t := range pendingTitles {
+			b.WriteString("\n\n**")
+			b.WriteString(t)
+			b.WriteString("**")
+		}
+		last.Content = strings.TrimSpace(b.String())
+		if pendEnd > last.PageEnd {
+			last.PageEnd = pendEnd
+		}
+		last.PageStart = minNonZero(pendStart, last.PageStart)
+	}
+	return out
 }
 
 // propagateSectionPages fills internal-node PageStart/PageEnd from the union
@@ -1268,7 +1404,9 @@ func parsePDFWithOutline(outline pdflib.Outline, rows []pdfRow) (*ParsedDoc, boo
 		title = rootSec.Children[0].Title
 	}
 
-	// Propagate page ranges so internal nodes span their children.
+	// Fold empty leaf fragments, then propagate page ranges so internal
+	// nodes span their children.
+	rootSec.Children = foldEmptyLeafSections(rootSec.Children)
 	propagateSectionPages(rootSec.Children)
 
 	return &ParsedDoc{
