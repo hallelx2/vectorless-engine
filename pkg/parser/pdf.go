@@ -962,6 +962,14 @@ type pdfRow struct {
 // Once pdftable bundles standard-14 AFM metrics (v0.4.x goal) we can
 // swap back to its Words() output.
 func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
+	// pdftable's Words() mutates the same package-level state as OpenBytes
+	// (see pdftableOpenMu) — it is not safe for concurrent callers, and
+	// ingest workers parse documents in parallel. Serialize it too until
+	// pdftable itself is made concurrency-safe. (Proper fix tracked in the
+	// Foundational Libraries project.)
+	pdftableOpenMu.Lock()
+	defer pdftableOpenMu.Unlock()
+
 	numPages := doc.NumPages()
 	var out []pdfRow
 
