@@ -760,7 +760,7 @@ func Default() Config {
 				Enabled:          true,
 				MaxHops:          8,
 				PageContentLimit: 16000,
-				MaxCitations:     3,
+				MaxCitations:     6,
 			},
 		},
 		Ingest: IngestConfig{

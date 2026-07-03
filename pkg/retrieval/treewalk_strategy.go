@@ -140,15 +140,23 @@ const defaultTreeWalkMaxHops = 8
 // excerpt. Matches TreeWalk's reference behaviour.
 const defaultPageContentLimit = 16000
 
-// defaultTreeWalkMaxCitations bounds the FINAL cited-range set. Three
-// is generous for the answer-spans-one-place common case (where ONE is
-// ideal) while still allowing a genuinely multi-location answer (e.g. a
-// 10-K figure cross-referenced between the income statement and a
-// footnote) to cite two or three distinct ranges. The FinanceBench
-// signal that motivated the cap: confident single-pick = f1 1.0,
-// 5-range spray = f1 0. Capping at 3 keeps the legitimate multi-range
-// case while removing the long tail of low-confidence noise.
-const defaultTreeWalkMaxCitations = 3
+// defaultTreeWalkMaxCitations bounds the FINAL cited-range set. The cap
+// is a CEILING, not a target: it only bites when the model emits MORE
+// distinct ranges than this. The prompt still drives the model to the
+// minimal sufficient set (usually one), so a confident single-pick answer
+// still yields ONE citation and the FinanceBench precision behaviour is
+// unchanged — the signal that motivated a cap at all (confident single =
+// f1 1.0, 5-range spray = f1 0) is enforced by the prompt + confidence
+// gating, not by clamping legitimate multi-location answers.
+//
+// It is raised from 3 to 6 so richer, genuinely multi-location answers —
+// a synthesis question over a whitepaper that draws on the intro, a
+// method section and a results table; a comparison spanning several parts
+// of a report — surface every location they actually rely on rather than
+// being truncated to three. Six is still well below the "spray" regime the
+// prompt/confidence machinery suppresses, so precision-critical single-pick
+// answers are untouched while multi-source answers become fully traceable.
+const defaultTreeWalkMaxCitations = 6
 
 // strategyNameTreeWalk is the stable identifier for config
 // (retrieval.strategy: treewalk) and telemetry.

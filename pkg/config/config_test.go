@@ -684,8 +684,8 @@ func TestTreeWalkDefaults(t *testing.T) {
 	if cfg.Retrieval.TreeWalk.PageContentLimit != 16000 {
 		t.Errorf("page_content_limit = %d, want 16000", cfg.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if cfg.Retrieval.TreeWalk.MaxCitations != 3 {
-		t.Errorf("max_citations = %d, want 3", cfg.Retrieval.TreeWalk.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 6 {
+		t.Errorf("max_citations = %d, want 6", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
 	if cfg.Retrieval.TreeWalk.Model != "" {
 		t.Errorf("model default should be empty (inherit), got %q", cfg.Retrieval.TreeWalk.Model)
@@ -802,8 +802,8 @@ func TestTreeWalkEnvOverrideRejectsBad(t *testing.T) {
 	if cfg.Retrieval.TreeWalk.PageContentLimit != 16000 {
 		t.Errorf("garbage page_content_limit env should preserve default, got %d", cfg.Retrieval.TreeWalk.PageContentLimit)
 	}
-	if cfg.Retrieval.TreeWalk.MaxCitations != 3 {
-		t.Errorf("garbage max_citations env should preserve default 3, got %d", cfg.Retrieval.TreeWalk.MaxCitations)
+	if cfg.Retrieval.TreeWalk.MaxCitations != 6 {
+		t.Errorf("garbage max_citations env should preserve default 6, got %d", cfg.Retrieval.TreeWalk.MaxCitations)
 	}
 }
 
