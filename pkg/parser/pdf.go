@@ -307,19 +307,16 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 	}
 	defer func() { _ = pdoc.Close() }() // best-effort close
 
-	reader, err := pdflib.NewReader(bytes.NewReader(docBytes), int64(len(docBytes)))
-	if err != nil {
-		// ledongthuc/pdf failed on a PDF pdftable accepted (some
-		// xref-stream variants are pdftable-only). Without ledongthuc
-		// we lose both outline access AND the primitive layer the
-		// row extractor uses — so we bail with a clear message rather
-		// than emit garbled text from pdftable.Words() (its word
-		// grouping concatenates words on standard-14 fonts without
-		// AFM metrics; see v0.4.x followup).
-		return nil, fmt.Errorf("pdf: open: ledongthuc/pdf backend rejected the document: %w", err)
+	// ledongthuc/pdf is now used ONLY for /Outlines (bookmarks). Text and
+	// rows come from pdftable's Words() (v0.4.0: correct order + spacing).
+	// A reader failure is therefore non-fatal — we just lose the outline
+	// hint and fall back to the font-size heuristic on the pdftable rows.
+	reader, rerr := pdflib.NewReader(bytes.NewReader(docBytes), int64(len(docBytes)))
+	if rerr != nil {
+		reader = nil
 	}
 
-	rows, err := extractPDFRows(reader)
+	rows, err := extractPDFRows(pdoc)
 	if err != nil {
 		return nil, err
 	}
@@ -964,24 +961,48 @@ type pdfRow struct {
 //
 // Once pdftable bundles standard-14 AFM metrics (v0.4.x goal) we can
 // swap back to its Words() output.
-func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
-	numPages := reader.NumPage()
+func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
+	// pdftable's Words() mutates the same package-level state as OpenBytes
+	// (see pdftableOpenMu) — it is not safe for concurrent callers, and
+	// ingest workers parse documents in parallel. Serialize it too until
+	// pdftable itself is made concurrency-safe. (Proper fix tracked in the
+	// Foundational Libraries project.)
+	pdftableOpenMu.Lock()
+	defer pdftableOpenMu.Unlock()
+
+	numPages := doc.NumPages()
 	var out []pdfRow
 
+	// pdftable v0.4.0 word extraction: a size-relative gap tolerance plus
+	// explicit-space boundaries give correct reading order and word
+	// spacing on real design/academic PDFs — replacing the ledongthuc
+	// glyph path that produced reversed, replacement-char-laden text.
+	wopts := pdftable.WordOpts{
+		XTolerance:        3,
+		XToleranceRatio:   0.15,
+		YTolerance:        3,
+		HorizontalLTR:     true,
+		VerticalTTB:       true,
+		Expand:            true,
+		UseExplicitSpaces: true,
+	}
+
 	for pageNum := 1; pageNum <= numPages; pageNum++ {
-		page := reader.Page(pageNum)
-		if page.V.IsNull() {
+		page, perr := doc.Page(pageNum)
+		if perr != nil {
 			continue
 		}
-		content := page.Content()
+		words, werr := page.Words(wopts)
+		if werr != nil {
+			continue
+		}
 
-		// Group letters by (approximate) baseline Y. Values within 2pt
-		// are considered the same row — PDFs frequently jitter Y by a
-		// fraction.
+		// Bucket words into rows by visual top (Y1), within 2pt — PDFs
+		// frequently jitter Y by a fraction.
 		type rowBucket struct {
 			y     float64
 			maxFS float64
-			chars []pdflib.Text
+			words []pdftable.Word
 		}
 		var buckets []*rowBucket
 		find := func(y float64) *rowBucket {
@@ -994,37 +1015,30 @@ func extractPDFRows(reader *pdflib.Reader) ([]pdfRow, error) {
 			buckets = append(buckets, b)
 			return b
 		}
-		for _, t := range content.Text {
-			b := find(t.Y)
-			b.chars = append(b.chars, t)
-			if t.FontSize > b.maxFS {
-				b.maxFS = t.FontSize
+		for _, wd := range words {
+			b := find(wd.Y1)
+			b.words = append(b.words, wd)
+			if wd.FontSize > b.maxFS {
+				b.maxFS = wd.FontSize
 			}
 		}
 		sort.Slice(buckets, func(i, j int) bool { return buckets[i].y > buckets[j].y })
 
 		for _, b := range buckets {
-			sort.Slice(b.chars, func(i, j int) bool { return b.chars[i].X < b.chars[j].X })
+			// Left-to-right. pdftable already resolved word boundaries +
+			// spacing, so we just order the words and join them.
+			sort.Slice(b.words, func(i, j int) bool { return b.words[i].X0 < b.words[j].X0 })
 			var sb strings.Builder
-			var lastX float64
 			boldGlyphs, totalGlyphs := 0, 0
-			for i, ch := range b.chars {
-				// Insert a space when the gap between the previous
-				// glyph's end and this glyph's start exceeds 0.20 of
-				// the font size. Tuned against real PDFs (arXiv +
-				// SEC 10-Ks): word-boundary gaps land around
-				// 0.20-0.30·fontSize; intra-word kerning stays well
-				// below 0.10.
-				if i > 0 && ch.X-lastX > ch.FontSize*0.20 {
+			for i, wd := range b.words {
+				if i > 0 {
 					sb.WriteString(" ")
 				}
-				sb.WriteString(ch.S)
-				lastX = ch.X + ch.W
-				if strings.TrimSpace(ch.S) != "" {
-					totalGlyphs++
-					if isBoldFont(ch.Font) {
-						boldGlyphs++
-					}
+				sb.WriteString(wd.Text)
+				n := len([]rune(strings.TrimSpace(wd.Text)))
+				totalGlyphs += n
+				if isBoldFont(wd.FontName) {
+					boldGlyphs += n
 				}
 			}
 			// Wide letter-tracking — common on filing cover pages and
