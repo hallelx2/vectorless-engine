@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,13 @@ type RiverConfig struct {
 
 	// NumWorkers is the max concurrent jobs drained from the default queue.
 	NumWorkers int
+
+	// JobTimeout bounds how long a single job may run before River cancels
+	// its context. River's own default is just 1 minute — far too short for
+	// full-document ingest, where summarize + HyDE + ToC issue one LLM call
+	// per section and a large document has hundreds. Zero applies a generous
+	// default (see NewRiver).
+	JobTimeout time.Duration
 }
 
 // River is a Postgres-backed Queue using https://github.com/riverqueue/river.
@@ -106,6 +114,12 @@ func NewRiver(cfg RiverConfig) (*River, error) {
 	}
 	if cfg.NumWorkers <= 0 {
 		cfg.NumWorkers = 10
+	}
+	if cfg.JobTimeout <= 0 {
+		// Large documents (100+ sections) need well over River's 1-minute
+		// default to finish every per-section LLM summary. 30 minutes is a
+		// safe ceiling that still guards against a genuinely wedged job.
+		cfg.JobTimeout = 30 * time.Minute
 	}
 
 	// We open the pool eagerly so NewRiver surfaces DB misconfiguration at
@@ -219,6 +233,7 @@ func (r *River) ensureClient() error {
 			Queues: map[string]river.QueueConfig{
 				river.QueueDefault: {MaxWorkers: r.cfg.NumWorkers},
 			},
+			JobTimeout: r.cfg.JobTimeout,
 		})
 		if err != nil {
 			r.initEr = fmt.Errorf("river: new client: %w", err)
