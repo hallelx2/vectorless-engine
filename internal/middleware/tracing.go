@@ -67,6 +67,17 @@ func (r *tracingRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush propagates to the wrapped writer so SSE/streaming handlers can
+// flush through the tracing middleware.
+func (r *tracingRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer for http.ResponseController.
+func (r *tracingRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // TraceIDFromContext extracts the trace ID string from the current span,
 // useful for correlating logs with traces.
 func TraceIDFromContext(ctx context.Context) string {

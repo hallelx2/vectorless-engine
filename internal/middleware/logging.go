@@ -28,6 +28,18 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush propagates to the wrapped writer so SSE/streaming handlers can
+// flush through this middleware. Without it, w.(http.Flusher) fails and
+// streaming endpoints error out.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer for http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // AccessLog logs one structured line per HTTP request: method, path,
 // status, duration, request ID, and principal ID.
 //
