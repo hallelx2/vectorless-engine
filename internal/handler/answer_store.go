@@ -4,83 +4,96 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hallelx2/llmgate"
+	"golang.org/x/sync/errgroup"
 
+	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
-	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
-// AnswerStoreHandler answers a question across a SET of documents (a
-// "store" / collection) and synthesises a SINGLE grounded answer with
-// per-document citations. It is the map-reduce companion to the
-// single-document tree-walk:
-//
-//	map    — retrieval.MultiDoc fans the strategy across every document
-//	         and returns the relevant sections per document.
-//	reduce — one LLM call reads the gathered, source-labelled evidence
-//	         and writes one answer, citing sources with [n] markers.
-//
-// The caller passes the document_ids that make up the store (the
-// dashboard resolves store → its ready documents); the org + store scope
-// come from the injected headers, so a key can only ever read its own
-// documents.
-type AnswerStoreHandler struct {
-	logger   *slog.Logger
-	storage  storage.Storage
-	multiDoc *retrieval.MultiDoc
-	llm      llmgate.Client
-	llmModel string
+// storeTreeLoader is the narrow slice of *db.Pool the store handler needs
+// to materialise each document's section tree. *db.Pool satisfies it.
+type storeTreeLoader interface {
+	LoadTree(ctx context.Context, docID tree.DocumentID, orgID, storeID string) (*tree.Tree, error)
 }
 
-// NewAnswerStoreHandler creates an AnswerStoreHandler. llm/multiDoc may be
-// nil in configurations without an LLM; the handler then returns 501.
+// AnswerStoreHandler answers a question across a SET of documents (a
+// "store" / collection) and synthesises a SINGLE grounded answer with
+// per-document citations. It is reasoning-first, not chunk-retrieval:
+//
+//	map    — the FULL agentic tree-walk runs on EACH document: it reads
+//	         the document's structure and navigates it hop by hop to a
+//	         grounded per-document answer + page citations. No chunking,
+//	         no embeddings — every document is reasoned over exactly like
+//	         the single-document /v1/answer/treewalk.
+//	reduce — one LLM call reads the per-document answers (each labelled
+//	         with its title) and writes one coherent answer, citing the
+//	         documents it drew on with [n] markers.
+//
+// max_depth controls the per-document tree-walk hop budget (0 = the
+// engine's full/default depth). max_docs bounds how many documents are
+// tree-walked (0 = all supplied) — a cost valve for large collections.
+type AnswerStoreHandler struct {
+	logger          *slog.Logger
+	db              storeTreeLoader
+	treewalk        *retrieval.TreeWalkStrategy
+	treeWalkEnabled bool
+	llm             llmgate.Client
+	llmModel        string
+}
+
+// NewAnswerStoreHandler creates an AnswerStoreHandler. It returns 501 at
+// request time when the tree-walk strategy or LLM is not configured.
 func NewAnswerStoreHandler(
 	logger *slog.Logger,
-	store storage.Storage,
-	multiDoc *retrieval.MultiDoc,
+	db storeTreeLoader,
+	treewalk *retrieval.TreeWalkStrategy,
+	treeWalkCfg enginecfg.TreeWalkBlock,
 	llm llmgate.Client,
 	llmModel string,
 ) *AnswerStoreHandler {
 	return &AnswerStoreHandler{
-		logger:   logger,
-		storage:  store,
-		multiDoc: multiDoc,
-		llm:      llm,
-		llmModel: llmModel,
+		logger:          logger,
+		db:              db,
+		treewalk:        treewalk,
+		treeWalkEnabled: treeWalkCfg.Enabled,
+		llm:             llm,
+		llmModel:        llmModel,
 	}
 }
 
 type answerStoreRequest struct {
-	DocumentIDs       []tree.DocumentID `json:"document_ids"`
-	Query             string            `json:"query"`
-	Model             string            `json:"model"`
-	MaxSectionsPerDoc int               `json:"max_sections_per_doc"`
-	MaxTokens         int               `json:"max_tokens"`
+	DocumentIDs []tree.DocumentID `json:"document_ids"`
+	Query       string            `json:"query"`
+	Model       string            `json:"model"`
+	MaxDepth    int               `json:"max_depth"` // per-doc tree-walk hop budget; 0 = full
+	MaxDocs     int               `json:"max_docs"`  // cap documents tree-walked; 0 = all
+	MaxTokens   int               `json:"max_tokens"`
 }
 
-// evidenceBlock is one source-labelled snippet handed to the reducer.
-type evidenceBlock struct {
-	index      int // 1-based global citation index
+// docAnswer is one document's tree-walk result in the map stage.
+type docAnswer struct {
+	index      int // 1-based citation index (assigned to contributing docs)
 	docID      tree.DocumentID
 	docTitle   string
+	answer     string
+	confidence float64
 	startPage  int
 	endPage    int
 	sectionIDs []tree.SectionID
-	content    string
 }
 
 const (
-	storeAnswerDefaultSectionsPerDoc = 3
-	storeAnswerEvidenceBudget        = 14000 // chars of evidence sent to the reducer
-	storeAnswerQuoteLen              = 240
+	storeAnswerMapConcurrency = 6
+	storeAnswerQuoteLen       = 240
 )
 
 // HandleAnswerStore is POST /v1/answer/store.
@@ -99,13 +112,14 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusBadRequest, "document_ids (non-empty) and query are required")
 		return
 	}
-	if h.multiDoc == nil || h.llm == nil {
-		writeErr(w, http.StatusNotImplemented, "store answers require an LLM-backed configuration")
+	if h.llm == nil || h.treewalk == nil || !h.treeWalkEnabled {
+		writeErr(w, http.StatusNotImplemented, "store answers require the tree-walk strategy + an LLM (retrieval.treewalk.enabled=true)")
 		return
 	}
-	perDoc := body.MaxSectionsPerDoc
-	if perDoc <= 0 {
-		perDoc = storeAnswerDefaultSectionsPerDoc
+
+	docIDs := body.DocumentIDs
+	if body.MaxDocs > 0 && len(docIDs) > body.MaxDocs {
+		docIDs = docIDs[:body.MaxDocs]
 	}
 	model := body.Model
 	if model == "" {
@@ -114,25 +128,26 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 
 	started := time.Now()
 
-	// ── MAP ───────────────────────────────────────────────────────
-	budget := retrieval.ContextBudget{ModelName: body.Model, MaxTokens: 100000, ReservedForPrompt: 4000, MaxParallelCalls: 8}
-	md, err := h.multiDoc.Query(r.Context(), orgID, storeID(r), body.DocumentIDs, body.Query, budget)
-	if err != nil {
-		h.logger.Error("answer/store: map failed", "err", err)
-		writeErr(w, http.StatusInternalServerError, "store retrieval failed: "+err.Error())
-		return
+	// ── MAP: full tree-walk on every document, in parallel ─────────
+	perDoc, mapUsage := h.mapTreeWalk(r.Context(), orgID, storeID(r), docIDs, body.Query, model, body.MaxDepth)
+
+	// Keep only documents that produced a real, non-refusal answer.
+	contributing := make([]docAnswer, 0, len(perDoc))
+	for _, d := range perDoc {
+		if isNonAnswer(d.answer) {
+			continue
+		}
+		d.index = len(contributing) + 1
+		contributing = append(contributing, d)
 	}
 
-	evidence, matched := h.gatherEvidence(r.Context(), md, perDoc)
-	totalUsage := md.TotalUsage
-
-	// No document surfaced anything relevant → honest refusal.
-	if len(evidence) == 0 {
+	totalUsage := mapUsage
+	if len(contributing) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"query":                  body.Query,
-			"answer":                 "The documents in this store do not appear to address this query.",
+			"answer":                 "The documents in this collection do not appear to address this query.",
 			"citations":              []any{},
-			"documents_searched":     len(body.DocumentIDs),
+			"documents_searched":     len(docIDs),
 			"documents_with_matches": 0,
 			"confidence":             0.0,
 			"usage":                  usageMap(totalUsage),
@@ -141,8 +156,8 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// ── REDUCE ────────────────────────────────────────────────────
-	answer, citedIdx, synthUsage, err := h.synthesise(r.Context(), model, body.Query, evidence, body.MaxTokens)
+	// ── REDUCE: synthesise the per-document answers ────────────────
+	answer, citedIdx, synthUsage, err := h.synthesise(r.Context(), model, body.Query, contributing, body.MaxTokens)
 	if err != nil {
 		h.logger.Error("answer/store: reduce failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "answer synthesis failed: "+err.Error())
@@ -150,118 +165,115 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 	}
 	totalUsage.Add(synthUsage)
 
-	citations := buildStoreCitations(evidence, citedIdx)
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":                  body.Query,
 		"answer":                 answer,
-		"citations":              citations,
-		"documents_searched":     len(body.DocumentIDs),
-		"documents_with_matches": matched,
+		"citations":              buildStoreCitations(contributing, citedIdx),
+		"documents_searched":     len(docIDs),
+		"documents_with_matches": len(contributing),
 		"usage":                  usageMap(totalUsage),
 		"elapsed_ms":             time.Since(started).Milliseconds(),
 	})
 }
 
-// gatherEvidence turns the per-document retrieval result into a flat,
-// globally-indexed, source-labelled evidence list, newest-relevance
-// first (documents that matched more sections lead), capped by the
-// evidence char budget. Returns the evidence and the count of documents
-// that contributed at least one block.
-func (h *AnswerStoreHandler) gatherEvidence(ctx context.Context, md *retrieval.MultiDocResult, perDoc int) ([]evidenceBlock, int) {
-	// Deterministic doc order: more selected sections first, then by id.
-	type docEntry struct {
-		id tree.DocumentID
-		dr *retrieval.DocResult
-	}
-	docs := make([]docEntry, 0, len(md.Documents))
-	for id, dr := range md.Documents {
-		docs = append(docs, docEntry{id, dr})
-	}
-	sort.Slice(docs, func(i, j int) bool {
-		if len(docs[i].dr.SelectedIDs) != len(docs[j].dr.SelectedIDs) {
-			return len(docs[i].dr.SelectedIDs) > len(docs[j].dr.SelectedIDs)
-		}
-		return docs[i].id < docs[j].id
-	})
-
+// mapTreeWalk runs the full tree-walk on each document concurrently and
+// returns each document's grounded answer + citations, plus the summed
+// usage. Per-document failures are logged and skipped (partial results
+// are fine). maxDepth overrides the per-document hop budget (0 = default).
+func (h *AnswerStoreHandler) mapTreeWalk(ctx context.Context, orgID, storeID string, docIDs []tree.DocumentID, query, model string, maxDepth int) ([]docAnswer, retrieval.Usage) {
 	var (
-		out     []evidenceBlock
-		spent   int
-		matched int
-		idx     = 1
+		mu    sync.Mutex
+		out   = make([]docAnswer, 0, len(docIDs))
+		usage retrieval.Usage
 	)
-	for _, d := range docs {
-		if d.dr.Tree == nil {
-			continue
-		}
-		contributed := false
-		for i, sid := range d.dr.SelectedIDs {
-			if i >= perDoc || spent >= storeAnswerEvidenceBudget {
-				break
+	budget := retrieval.ContextBudget{ModelName: model, MaxTokens: 100000, ReservedForPrompt: 4000}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(storeAnswerMapConcurrency)
+	for _, docID := range docIDs {
+		g.Go(func() error {
+			t, err := h.db.LoadTree(gctx, docID, orgID, storeID)
+			if err != nil || t == nil {
+				h.logger.Warn("answer/store: load tree", "doc", docID, "err", err)
+				return nil
 			}
-			sec := d.dr.Tree.FindByID(sid)
-			if sec == nil || sec.ContentRef == "" {
-				continue
+			// Per-request copy so a hop override never mutates the shared
+			// strategy other goroutines are reading.
+			perReq := *h.treewalk
+			perReq.OnEvent = nil // non-streaming
+			if maxDepth > 0 {
+				perReq.MaxHops = maxDepth
 			}
-			content := h.loadContent(ctx, sec.ContentRef)
-			if strings.TrimSpace(content) == "" {
-				continue
+			res, err := perReq.SelectWithCost(gctx, t, query, budget)
+			if err != nil {
+				h.logger.Warn("answer/store: treewalk", "doc", docID, "err", err)
+				return nil
 			}
-			remaining := storeAnswerEvidenceBudget - spent
-			if len(content) > remaining {
-				content = content[:remaining]
+
+			// Resolve cited page ranges → section ids + a page span.
+			var (
+				secIDs           []tree.SectionID
+				minStart, maxEnd int
+				seen             = map[tree.SectionID]struct{}{}
+			)
+			for _, pr := range res.CitedPages {
+				if minStart == 0 || pr[0] < minStart {
+					minStart = pr[0]
+				}
+				if pr[1] > maxEnd {
+					maxEnd = pr[1]
+				}
+				for _, id := range retrieval.SectionIDsOverlapping(t, pr[0], pr[1]) {
+					if _, dup := seen[id]; !dup {
+						seen[id] = struct{}{}
+						secIDs = append(secIDs, id)
+					}
+				}
 			}
-			spent += len(content)
-			out = append(out, evidenceBlock{
-				index:      idx,
-				docID:      d.id,
-				docTitle:   d.dr.Tree.Title,
-				startPage:  sec.PageStart,
-				endPage:    sec.PageEnd,
-				sectionIDs: []tree.SectionID{sid},
-				content:    content,
+
+			mu.Lock()
+			out = append(out, docAnswer{
+				docID:      docID,
+				docTitle:   t.Title,
+				answer:     strings.TrimSpace(res.Reasoning),
+				confidence: res.Confidence,
+				startPage:  minStart,
+				endPage:    maxEnd,
+				sectionIDs: secIDs,
 			})
-			idx++
-			contributed = true
-		}
-		if contributed {
-			matched++
-		}
+			usage.Add(res.Usage)
+			mu.Unlock()
+			return nil
+		})
 	}
-	return out, matched
+	_ = g.Wait()
+
+	// Deterministic order: highest confidence first, then title.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].confidence != out[j].confidence {
+			return out[i].confidence > out[j].confidence
+		}
+		return out[i].docTitle < out[j].docTitle
+	})
+	return out, usage
 }
 
-func (h *AnswerStoreHandler) loadContent(ctx context.Context, ref string) string {
-	rc, _, err := h.storage.Get(ctx, ref)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = rc.Close() }()
-	raw, err := io.ReadAll(rc)
-	if err != nil {
-		return ""
-	}
-	return string(raw)
-}
-
-// synthesise runs the single reducer LLM call. It returns the answer
-// text (with [n] citation markers), the set of cited evidence indices,
-// and usage.
-func (h *AnswerStoreHandler) synthesise(ctx context.Context, model, query string, evidence []evidenceBlock, maxTokens int) (string, []int, retrieval.Usage, error) {
+// synthesise runs the single reducer LLM call over the per-document
+// answers. Returns the final answer (with [n] markers), the cited doc
+// indices, and usage.
+func (h *AnswerStoreHandler) synthesise(ctx context.Context, model, query string, docs []docAnswer, maxTokens int) (string, []int, retrieval.Usage, error) {
 	var ev strings.Builder
-	for _, b := range evidence {
-		pages := formatPageRange(b.startPage, b.endPage)
-		title := b.docTitle
+	for _, d := range docs {
+		title := d.docTitle
 		if title == "" {
-			title = string(b.docID)
+			title = string(d.docID)
 		}
-		fmt.Fprintf(&ev, "[%d] %s", b.index, title)
-		if pages != "" {
-			fmt.Fprintf(&ev, " (%s)", pages)
+		fmt.Fprintf(&ev, "[%d] %s", d.index, title)
+		if p := formatPageRange(d.startPage, d.endPage); p != "" {
+			fmt.Fprintf(&ev, " (%s)", p)
 		}
 		ev.WriteString(":\n")
-		ev.WriteString(strings.TrimSpace(b.content))
+		ev.WriteString(d.answer)
 		ev.WriteString("\n\n")
 	}
 
@@ -274,7 +286,7 @@ func (h *AnswerStoreHandler) synthesise(ctx context.Context, model, query string
 		Temperature: 0,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: storeAnswerSystemPrompt},
-			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nEVIDENCE:\n%s\nReply with ONLY the JSON object.", query, ev.String())},
+			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nPER-DOCUMENT ANSWERS:\n%s\nReply with ONLY the JSON object.", query, ev.String())},
 		},
 	}
 	resp, err := h.llm.Complete(ctx, req)
@@ -288,21 +300,23 @@ func (h *AnswerStoreHandler) synthesise(ctx context.Context, model, query string
 		CostUSD:      resp.Usage.CostUSD,
 		LLMCalls:     1,
 	}
-
-	answer, cited := parseStoreAnswer(resp.Content, len(evidence))
+	answer, cited := parseStoreAnswer(resp.Content, len(docs))
 	return answer, cited, usage, nil
 }
 
-const storeAnswerSystemPrompt = `You answer a question using ONLY the supplied EVIDENCE, which is drawn from several documents in a collection. Each evidence block is prefixed with a number in brackets, e.g. [1], [2].
+const storeAnswerSystemPrompt = `You are given a QUESTION and a set of ANSWERS, each produced by carefully reading ONE document in a collection. Each is prefixed with a number in brackets, e.g. [1], [2], and its source title.
+
+Your job is to write ONE coherent answer to the question by synthesising across these per-document answers.
 
 RULES:
-- Answer ONLY from the evidence. Never invent facts. If the evidence does not answer the question, say so plainly.
-- Cite every claim inline with the bracketed number(s) of the evidence you used, e.g. "Consent must be freely given [1]." Cite the specific block(s) that support each statement.
-- Synthesise across documents when the answer draws on more than one — the whole point is one coherent answer over the collection.
-- Be concise and well-structured. Use short paragraphs or a short list.
+- Use ONLY the supplied per-document answers. Do not invent facts.
+- Cite the document(s) you draw on inline with their bracketed number, e.g. "Consent must be freely given [1]." Cite every claim.
+- Synthesise: when several documents contribute, combine them into one answer and note agreements or differences. When only some are relevant, use only those.
+- If none of the answers actually address the question, say so plainly.
+- Be concise and well-structured.
 
 Reply with EXACTLY one JSON object, no markdown fences:
-{"answer":"<answer text with [n] citation markers>","cited":[<the evidence numbers you actually cited>]}`
+{"answer":"<answer text with [n] citation markers>","cited":[<the document numbers you cited>]}`
 
 // storeAnswerJSON is the reducer's expected output shape.
 type storeAnswerJSON struct {
@@ -324,7 +338,6 @@ func parseStoreAnswer(raw string, maxIdx int) (string, []int) {
 			}
 		}
 	}
-	// Fallback: use the raw text and scrape [n] markers from it.
 	return s, scrapeMarkers(s, maxIdx)
 }
 
@@ -365,43 +378,55 @@ func scrapeMarkers(s string, maxIdx int) []int {
 	return dedupeInRange(nums, maxIdx)
 }
 
-// buildStoreCitations turns the cited evidence indices into the response
-// citations array, preserving cited order and carrying document id/title,
-// page range, section ids, and a short verbatim quote.
-func buildStoreCitations(evidence []evidenceBlock, cited []int) []map[string]any {
-	byIdx := make(map[int]evidenceBlock, len(evidence))
-	for _, b := range evidence {
-		byIdx[b.index] = b
+// buildStoreCitations turns the cited document indices into the response
+// citations array — one citation per contributing document, carrying its
+// id, title, page span, section ids, and a short quote from its answer.
+func buildStoreCitations(docs []docAnswer, cited []int) []map[string]any {
+	byIdx := make(map[int]docAnswer, len(docs))
+	for _, d := range docs {
+		byIdx[d.index] = d
 	}
-	// If the model cited nothing parseable, fall back to citing all
-	// evidence so the user still sees the sources the answer used.
-	if len(cited) == 0 {
-		for _, b := range evidence {
-			cited = append(cited, b.index)
+	if len(cited) == 0 { // model cited nothing parseable → show all sources
+		for _, d := range docs {
+			cited = append(cited, d.index)
 		}
 	}
 	out := make([]map[string]any, 0, len(cited))
 	for _, n := range cited {
-		b, ok := byIdx[n]
+		d, ok := byIdx[n]
 		if !ok {
 			continue
 		}
 		c := map[string]any{
-			"index":       b.index,
-			"document_id": b.docID,
-			"section_ids": b.sectionIDs,
-			"quote":       snippet(b.content, storeAnswerQuoteLen),
+			"index":       d.index,
+			"document_id": d.docID,
+			"section_ids": d.sectionIDs,
+			"quote":       snippet(d.answer, storeAnswerQuoteLen),
+			"confidence":  d.confidence,
 		}
-		if b.docTitle != "" {
-			c["document_title"] = b.docTitle
+		if d.docTitle != "" {
+			c["document_title"] = d.docTitle
 		}
-		if b.startPage > 0 {
-			c["start_page"] = b.startPage
-			c["end_page"] = b.endPage
+		if d.startPage > 0 {
+			c["start_page"] = d.startPage
+			c["end_page"] = d.endPage
 		}
 		out = append(out, c)
 	}
 	return out
+}
+
+// isNonAnswer reports whether a per-document tree-walk answer is a refusal
+// or empty, so it can be dropped from the synthesis.
+func isNonAnswer(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if len(s) < 3 {
+		return true
+	}
+	return strings.Contains(s, "does not address") ||
+		strings.Contains(s, "not address this query") ||
+		strings.Contains(s, "no relevant information") ||
+		strings.Contains(s, "does not contain")
 }
 
 func snippet(s string, n int) string {

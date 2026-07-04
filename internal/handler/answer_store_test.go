@@ -45,13 +45,13 @@ func TestParseStoreAnswer(t *testing.T) {
 }
 
 func TestBuildStoreCitations(t *testing.T) {
-	evidence := []evidenceBlock{
-		{index: 1, docID: "doc_a", docTitle: "GDPR", startPage: 32, endPage: 33, sectionIDs: []tree.SectionID{"sec_1"}, content: "Consent must be freely given, specific, informed and unambiguous."},
-		{index: 2, docID: "doc_b", docTitle: "PRISMA", startPage: 4, endPage: 4, sectionIDs: []tree.SectionID{"sec_2"}, content: "Report the review using the checklist."},
+	docs := []docAnswer{
+		{index: 1, docID: "doc_a", docTitle: "GDPR", startPage: 32, endPage: 33, sectionIDs: []tree.SectionID{"sec_1"}, answer: "Consent must be freely given, specific, informed and unambiguous."},
+		{index: 2, docID: "doc_b", docTitle: "PRISMA", startPage: 4, endPage: 4, sectionIDs: []tree.SectionID{"sec_2"}, answer: "Report the review using the checklist."},
 	}
 
 	t.Run("cited subset in order with metadata", func(t *testing.T) {
-		cits := buildStoreCitations(evidence, []int{2})
+		cits := buildStoreCitations(docs, []int{2})
 		if len(cits) != 1 {
 			t.Fatalf("want 1 citation, got %d", len(cits))
 		}
@@ -63,8 +63,8 @@ func TestBuildStoreCitations(t *testing.T) {
 		}
 	})
 
-	t.Run("empty cited falls back to all evidence", func(t *testing.T) {
-		cits := buildStoreCitations(evidence, nil)
+	t.Run("empty cited falls back to all documents", func(t *testing.T) {
+		cits := buildStoreCitations(docs, nil)
 		if len(cits) != 2 {
 			t.Fatalf("want 2 (fallback to all), got %d", len(cits))
 		}
