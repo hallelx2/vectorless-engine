@@ -7,9 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -127,6 +129,34 @@ func (h *DocumentsHandler) HandleListDocuments(w http.ResponseWriter, r *http.Re
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// sanitizeTitle coerces a document title into a value safe for the
+// Postgres text column: valid UTF-8, no C0 control chars (except none —
+// titles are single-line), whitespace-collapsed and trimmed. Invalid
+// byte sequences (a client that mangled a non-ASCII char in the multipart
+// field) are dropped rather than replaced so the title stays clean. An
+// all-garbage title collapses to "" and the caller falls back to the doc id.
+func sanitizeTitle(s string) string {
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "")
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == utf8.RuneError {
+			continue
+		}
+		if r < 0x20 { // drop control chars incl. tab/newline — titles are one line
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(multiSpaceRe.ReplaceAllString(b.String(), " "))
+}
+
+// multiSpaceRe collapses runs of whitespace in a sanitized title.
+var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
 
 // sourceTypeFromContentType collapses an HTTP Content-Type to the
 // short tag the dashboard's source-type badge expects.
@@ -249,6 +279,12 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 	if title == "" {
 		title = filename
 	}
+	// Sanitize before the DB write: a title with invalid UTF-8 bytes
+	// (e.g. a client that mangled an em-dash) would otherwise make the
+	// Postgres insert fail with "db write failed" and 500 the whole
+	// ingest. Coerce to valid UTF-8 and drop control chars so a bad
+	// title byte can never fail the upload.
+	title = sanitizeTitle(title)
 	if title == "" {
 		title = string(docID)
 	}

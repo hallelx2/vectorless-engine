@@ -714,7 +714,9 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 		// Watermarked PDFs whose overlay text shares a Y coordinate with
 		// the real title produce mojibake like "GGlloobbaall SSttrraatteeggyy"
 		// — we'd rather keep the original filename than show that to a user.
-		if err := store.SetDocumentTitle(ctx, docID, doc.Title); err != nil {
+		// cleanForLLM strips any invalid-UTF-8 bytes so the title write can
+		// never fail the persist.
+		if err := store.SetDocumentTitle(ctx, docID, cleanForLLM(doc.Title)); err != nil {
 			return err
 		}
 	}

@@ -1477,12 +1477,42 @@ var boilerplateFragments = []string{
 	"or scholarly",
 }
 
+// isRepeatedMarkerLine reports whether a row is a run of the same short
+// token repeated — the artifact of an icon glyph rendered as text and
+// stamped once per item, e.g. the ORCID "iD" logo repeated once per author
+// on a paper's byline ("iD iD iD iD"). Real prose never repeats an
+// identical ≤2-character token as the majority of a ≥3-token line, so
+// dropping these is safe and removes the junk author-block "headings"
+// (e.g. PRISMA's contributor page) the font heuristic would otherwise
+// surface as sections.
+func isRepeatedMarkerLine(s string) bool {
+	fields := strings.Fields(s)
+	if len(fields) < 3 {
+		return false
+	}
+	counts := map[string]int{}
+	for _, f := range fields {
+		if len([]rune(f)) <= 2 {
+			counts[f]++
+		}
+	}
+	for _, c := range counts {
+		if c*100 >= len(fields)*60 { // ≥60% of the line is one short token
+			return true
+		}
+	}
+	return false
+}
+
 // isBoilerplateLine reports whether a row is publisher/license noise.
 // Matches the curated signature list, the bare arXiv id stamp
-// ("arXiv:2401.01234v2 [cs.CL] 5 Jan 2024"), and short license-tail
-// fragments.
+// ("arXiv:2401.01234v2 [cs.CL] 5 Jan 2024"), short license-tail
+// fragments, and repeated icon-glyph marker rows (ORCID "iD iD iD").
 func isBoilerplateLine(s string) bool {
 	low := strings.ToLower(strings.TrimSpace(s))
+	if isRepeatedMarkerLine(low) {
+		return true
+	}
 	for _, sig := range boilerplateSignatures {
 		if strings.Contains(low, sig) {
 			return true
