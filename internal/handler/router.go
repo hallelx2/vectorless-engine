@@ -147,6 +147,7 @@ func Router(d Deps) http.Handler {
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
 	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay)
 	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk)
+	answerStore := NewAnswerStoreHandler(d.Logger, d.Storage, d.MultiDoc, d.LLM, d.LLMModel)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
 
 	// ── Connect-RPC Handlers (generated stubs, three-transport) ───
@@ -204,6 +205,9 @@ func Router(d Deps) http.Handler {
 		// runs the page-based agentic loop end-to-end.
 		r.Post("/answer", answer.HandleAnswer)
 		r.Post("/answer/treewalk", answerTreeWalk.HandleAnswerTreeWalk)
+		// Store answer: map-reduce a question across many documents into
+		// ONE synthesised answer with per-document citations.
+		r.Post("/answer/store", answerStore.HandleAnswerStore)
 	})
 
 	// Internal: queue webhook (QStash).
