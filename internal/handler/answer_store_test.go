@@ -45,13 +45,13 @@ func TestParseStoreAnswer(t *testing.T) {
 }
 
 func TestBuildStoreCitations(t *testing.T) {
-	docs := []docAnswer{
-		{index: 1, docID: "doc_a", docTitle: "GDPR", startPage: 32, endPage: 33, sectionIDs: []tree.SectionID{"sec_1"}, answer: "Consent must be freely given, specific, informed and unambiguous."},
-		{index: 2, docID: "doc_b", docTitle: "PRISMA", startPage: 4, endPage: 4, sectionIDs: []tree.SectionID{"sec_2"}, answer: "Report the review using the checklist."},
+	secs := []relevantSection{
+		{index: 1, docID: "doc_a", docTitle: "GDPR", sectionID: "sec_1", sectionTitle: "Consent", startPage: 32, endPage: 33, content: "Consent must be freely given, specific, informed and unambiguous."},
+		{index: 2, docID: "doc_b", docTitle: "PRISMA", sectionID: "sec_2", sectionTitle: "Reporting", startPage: 4, endPage: 4, content: "Report the review using the checklist."},
 	}
 
 	t.Run("cited subset in order with metadata", func(t *testing.T) {
-		cits := buildStoreCitations(docs, []int{2})
+		cits := buildStoreCitations(secs, []int{2})
 		if len(cits) != 1 {
 			t.Fatalf("want 1 citation, got %d", len(cits))
 		}
@@ -63,12 +63,22 @@ func TestBuildStoreCitations(t *testing.T) {
 		}
 	})
 
-	t.Run("empty cited falls back to all documents", func(t *testing.T) {
-		cits := buildStoreCitations(docs, nil)
+	t.Run("empty cited falls back to all sections", func(t *testing.T) {
+		cits := buildStoreCitations(secs, nil)
 		if len(cits) != 2 {
 			t.Fatalf("want 2 (fallback to all), got %d", len(cits))
 		}
 	})
+}
+
+func TestParseRelevant(t *testing.T) {
+	got := parseRelevant(`{"relevant":[2,5,2,99,0]}`, 6)
+	if len(got) != 2 || got[0] != 2 || got[1] != 5 {
+		t.Errorf("parseRelevant = %v, want [2 5]", got)
+	}
+	if len(parseRelevant("nonsense no json", 6)) != 0 {
+		t.Errorf("expected empty on non-JSON with no markers")
+	}
 }
 
 func TestFormatPageRange(t *testing.T) {

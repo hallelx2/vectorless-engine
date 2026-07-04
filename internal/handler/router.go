@@ -147,7 +147,7 @@ func Router(d Deps) http.Handler {
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
 	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay)
 	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk)
-	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.TreeWalkStrategy, d.TreeWalk, d.LLM, d.LLMModel)
+	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
 
 	// ── Connect-RPC Handlers (generated stubs, three-transport) ───
