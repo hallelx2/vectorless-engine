@@ -1152,6 +1152,17 @@ func extractPDFRows(doc pdftable.Document) ([]pdfRow, error) {
 			return b
 		}
 		for _, wd := range words {
+			// Drop rotated / vertical text runs — arXiv left-margin
+			// stamps, page-edge watermarks, rotated figure labels. These
+			// are page furniture, not body prose, and pdftable reads a
+			// rotated run in an order that surfaces as reversed text
+			// ("3202 guA" for a rotated "Aug 2023", "]LC.sc[" for
+			// "[cs.CL]"), which then pollutes the outline with junk
+			// headings/titles. Upright left-to-right / right-to-left
+			// prose (including real RTL languages) is kept.
+			if isRotatedRun(wd.Upright, wd.Direction) {
+				continue
+			}
 			b := find(wd.Y1)
 			b.words = append(b.words, wd)
 			if wd.FontSize > b.maxFS {
@@ -1529,6 +1540,24 @@ func looksLikeHeading(s string) bool {
 		return false
 	}
 	return true
+}
+
+// isRotatedRun reports whether a pdftable word run is rotated / vertical
+// text — page furniture (margin stamps, watermarks, rotated labels)
+// rather than body prose. pdftable marks such a run as not Upright and/or
+// with a vertical reading Direction ("ttb"/"btt"); it reads them in an
+// order that surfaces as reversed text, so dropping them keeps the outline
+// clean. Upright horizontal prose in either LTR or RTL scripts is body
+// text and is never dropped.
+func isRotatedRun(upright bool, direction string) bool {
+	if !upright {
+		return true
+	}
+	switch strings.ToLower(direction) {
+	case "ttb", "btt":
+		return true
+	}
+	return false
 }
 
 // isBoldFont reports whether a PDF font name denotes a bold weight. SEC filing
