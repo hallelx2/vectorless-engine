@@ -178,10 +178,11 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 	}
 
 	var (
-		filename    string
-		contentType string
-		body        io.Reader
-		size        int64
+		filename      string
+		contentType   string
+		body          io.Reader
+		size          int64
+		titleOverride string
 	)
 
 	ct := r.Header.Get("Content-Type")
@@ -201,12 +202,15 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		contentType = header.Header.Get("Content-Type")
 		body = file
 		size = header.Size
+		// Optional multipart "title" field overrides the discovered title.
+		titleOverride = strings.TrimSpace(r.FormValue("title"))
 
 	case strings.HasPrefix(ct, "application/json"):
 		var payload struct {
 			Filename    string `json:"filename"`
 			ContentType string `json:"content_type"`
 			Content     string `json:"content"`
+			Title       string `json:"title"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -220,6 +224,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		contentType = payload.ContentType
 		body = strings.NewReader(payload.Content)
 		size = int64(len(payload.Content))
+		titleOverride = strings.TrimSpace(payload.Title)
 
 	default:
 		writeErr(w, http.StatusUnsupportedMediaType,
@@ -240,7 +245,10 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	title := filename
+	title := titleOverride
+	if title == "" {
+		title = filename
+	}
 	if title == "" {
 		title = string(docID)
 	}
@@ -281,6 +289,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		ContentType: contentType,
 		Filename:    filename,
 		SourceRef:   key,
+		Title:       titleOverride,
 		Profile:     r.Header.Get("X-Vectorless-Profile"),
 	})
 	if err := h.queue.Enqueue(ctx, queue.Job{
