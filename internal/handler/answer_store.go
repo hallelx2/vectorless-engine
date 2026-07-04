@@ -9,78 +9,86 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hallelx2/llmgate"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
+// storeTreeLoader is the narrow slice of *db.Pool the store handler needs
+// to materialise each document's section tree. *db.Pool satisfies it.
+type storeTreeLoader interface {
+	LoadTree(ctx context.Context, docID tree.DocumentID, orgID, storeID string) (*tree.Tree, error)
+}
+
 // AnswerStoreHandler answers a question across a SET of documents (a
 // "store" / collection) and synthesises a SINGLE grounded answer with
-// per-document citations. It is the map-reduce companion to the
-// single-document tree-walk:
+// per-section, per-document citations. It is reasoning-first over
+// structure + summaries — the Vectorless primitive, no chunking, no
+// embeddings:
 //
-//	map    — retrieval.MultiDoc fans the strategy across every document
-//	         and returns the relevant sections per document.
-//	reduce — one LLM call reads the gathered, source-labelled evidence
-//	         and writes one answer, citing sources with [n] markers.
+//  1. reason over each document's STRUCTURE + SUMMARIES (its llms.txt-style
+//     outline) to SELECT the sections whose full text is relevant.
+//  2. fetch the FULL content of every selected relevant section.
+//  3. GENERATE one answer from that full content, citing the sections and
+//     documents it drew on.
 //
-// The caller passes the document_ids that make up the store (the
-// dashboard resolves store → its ready documents); the org + store scope
-// come from the injected headers, so a key can only ever read its own
-// documents.
+// max_docs bounds how many documents are considered (0 = all). max_sections
+// caps the total relevant sections whose full content is pulled (0 = all
+// relevant). A content budget caps the total characters handed to the
+// generator so a huge selection still fits the model context.
 type AnswerStoreHandler struct {
 	logger   *slog.Logger
+	db       storeTreeLoader
 	storage  storage.Storage
-	multiDoc *retrieval.MultiDoc
 	llm      llmgate.Client
 	llmModel string
 }
 
-// NewAnswerStoreHandler creates an AnswerStoreHandler. llm/multiDoc may be
-// nil in configurations without an LLM; the handler then returns 501.
+// NewAnswerStoreHandler creates an AnswerStoreHandler. It returns 501 at
+// request time when no LLM is configured.
 func NewAnswerStoreHandler(
 	logger *slog.Logger,
+	db storeTreeLoader,
 	store storage.Storage,
-	multiDoc *retrieval.MultiDoc,
 	llm llmgate.Client,
 	llmModel string,
 ) *AnswerStoreHandler {
-	return &AnswerStoreHandler{
-		logger:   logger,
-		storage:  store,
-		multiDoc: multiDoc,
-		llm:      llm,
-		llmModel: llmModel,
-	}
+	return &AnswerStoreHandler{logger: logger, db: db, storage: store, llm: llm, llmModel: llmModel}
 }
 
 type answerStoreRequest struct {
-	DocumentIDs       []tree.DocumentID `json:"document_ids"`
-	Query             string            `json:"query"`
-	Model             string            `json:"model"`
-	MaxSectionsPerDoc int               `json:"max_sections_per_doc"`
-	MaxTokens         int               `json:"max_tokens"`
+	DocumentIDs []tree.DocumentID `json:"document_ids"`
+	Query       string            `json:"query"`
+	Model       string            `json:"model"`
+	MaxDocs     int               `json:"max_docs"`     // cap documents considered; 0 = all
+	MaxSections int               `json:"max_sections"` // cap relevant sections pulled; 0 = all
+	MaxTokens   int               `json:"max_tokens"`
 }
 
-// evidenceBlock is one source-labelled snippet handed to the reducer.
-type evidenceBlock struct {
-	index      int // 1-based global citation index
-	docID      tree.DocumentID
-	docTitle   string
-	startPage  int
-	endPage    int
-	sectionIDs []tree.SectionID
-	content    string
+// relevantSection is one selected section with its full content, ready to
+// hand to the generator.
+type relevantSection struct {
+	index        int // 1-based global citation index
+	docID        tree.DocumentID
+	docTitle     string
+	sectionID    tree.SectionID
+	sectionTitle string
+	startPage    int
+	endPage      int
+	content      string
 }
 
 const (
-	storeAnswerDefaultSectionsPerDoc = 3
-	storeAnswerEvidenceBudget        = 14000 // chars of evidence sent to the reducer
-	storeAnswerQuoteLen              = 240
+	storeMapConcurrency  = 6
+	storeContentBudget   = 40000 // total chars of full section content sent to the generator
+	storeSectionCharsCap = 8000  // per-section content cap
+	storeAnswerQuoteLen  = 240
 )
 
 // HandleAnswerStore is POST /v1/answer/store.
@@ -99,13 +107,14 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusBadRequest, "document_ids (non-empty) and query are required")
 		return
 	}
-	if h.multiDoc == nil || h.llm == nil {
+	if h.llm == nil {
 		writeErr(w, http.StatusNotImplemented, "store answers require an LLM-backed configuration")
 		return
 	}
-	perDoc := body.MaxSectionsPerDoc
-	if perDoc <= 0 {
-		perDoc = storeAnswerDefaultSectionsPerDoc
+
+	docIDs := body.DocumentIDs
+	if body.MaxDocs > 0 && len(docIDs) > body.MaxDocs {
+		docIDs = docIDs[:body.MaxDocs]
 	}
 	model := body.Model
 	if model == "" {
@@ -114,122 +123,312 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 
 	started := time.Now()
 
-	// ── MAP ───────────────────────────────────────────────────────
-	budget := retrieval.ContextBudget{ModelName: body.Model, MaxTokens: 100000, ReservedForPrompt: 4000, MaxParallelCalls: 8}
-	md, err := h.multiDoc.Query(r.Context(), orgID, storeID(r), body.DocumentIDs, body.Query, budget)
-	if err != nil {
-		h.logger.Error("answer/store: map failed", "err", err)
-		writeErr(w, http.StatusInternalServerError, "store retrieval failed: "+err.Error())
-		return
-	}
+	// ── 1+2. Per document: reason over structure+summaries → select
+	// relevant sections → fetch their full content (parallel). ──────
+	sections, docsMatched, mapUsage := h.selectRelevant(r.Context(), orgID, storeID(r), docIDs, body.Query, model, body.MaxSections)
+	totalUsage := mapUsage
 
-	evidence, matched := h.gatherEvidence(r.Context(), md, perDoc)
-	totalUsage := md.TotalUsage
-
-	// No document surfaced anything relevant → honest refusal.
-	if len(evidence) == 0 {
+	if len(sections) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"query":                  body.Query,
-			"answer":                 "The documents in this store do not appear to address this query.",
+			"answer":                 "No sections in this collection appear relevant to the query.",
 			"citations":              []any{},
-			"documents_searched":     len(body.DocumentIDs),
+			"documents_searched":     len(docIDs),
 			"documents_with_matches": 0,
-			"confidence":             0.0,
+			"sections_used":          0,
 			"usage":                  usageMap(totalUsage),
 			"elapsed_ms":             time.Since(started).Milliseconds(),
 		})
 		return
 	}
 
-	// ── REDUCE ────────────────────────────────────────────────────
-	answer, citedIdx, synthUsage, err := h.synthesise(r.Context(), model, body.Query, evidence, body.MaxTokens)
+	// ── 3. Generate one answer from the full section content. ──────
+	answer, cited, synthUsage, err := h.generate(r.Context(), model, body.Query, sections, body.MaxTokens)
 	if err != nil {
-		h.logger.Error("answer/store: reduce failed", "err", err)
-		writeErr(w, http.StatusInternalServerError, "answer synthesis failed: "+err.Error())
+		h.logger.Error("answer/store: generate failed", "err", err)
+		writeErr(w, http.StatusInternalServerError, "answer generation failed: "+err.Error())
 		return
 	}
 	totalUsage.Add(synthUsage)
 
-	citations := buildStoreCitations(evidence, citedIdx)
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":                  body.Query,
 		"answer":                 answer,
-		"citations":              citations,
-		"documents_searched":     len(body.DocumentIDs),
-		"documents_with_matches": matched,
+		"citations":              buildStoreCitations(sections, cited),
+		"documents_searched":     len(docIDs),
+		"documents_with_matches": docsMatched,
+		"sections_used":          len(sections),
 		"usage":                  usageMap(totalUsage),
 		"elapsed_ms":             time.Since(started).Milliseconds(),
 	})
 }
 
-// gatherEvidence turns the per-document retrieval result into a flat,
-// globally-indexed, source-labelled evidence list, newest-relevance
-// first (documents that matched more sections lead), capped by the
-// evidence char budget. Returns the evidence and the count of documents
-// that contributed at least one block.
-func (h *AnswerStoreHandler) gatherEvidence(ctx context.Context, md *retrieval.MultiDocResult, perDoc int) ([]evidenceBlock, int) {
-	// Deterministic doc order: more selected sections first, then by id.
-	type docEntry struct {
-		id tree.DocumentID
-		dr *retrieval.DocResult
-	}
-	docs := make([]docEntry, 0, len(md.Documents))
-	for id, dr := range md.Documents {
-		docs = append(docs, docEntry{id, dr})
-	}
-	sort.Slice(docs, func(i, j int) bool {
-		if len(docs[i].dr.SelectedIDs) != len(docs[j].dr.SelectedIDs) {
-			return len(docs[i].dr.SelectedIDs) > len(docs[j].dr.SelectedIDs)
-		}
-		return docs[i].id < docs[j].id
-	})
+// manifestRef maps a manifest index to a section id + whether it carries
+// content directly.
+type manifestRef struct {
+	id         tree.SectionID
+	hasContent bool
+}
 
+// selectRelevant runs, per document and in parallel: load tree → render
+// the structure+summary outline → LLM-select the relevant sections →
+// fetch their full content. It returns the flat list of relevant sections
+// (globally indexed), the number of documents that contributed at least
+// one section, and the summed selection usage. A total content budget
+// (and optional max_sections) bounds the material.
+func (h *AnswerStoreHandler) selectRelevant(ctx context.Context, orgID, storeID string, docIDs []tree.DocumentID, query, model string, maxSections int) ([]relevantSection, int, retrieval.Usage) {
+	type docPick struct {
+		secs  []relevantSection
+		usage retrieval.Usage
+	}
 	var (
-		out     []evidenceBlock
+		mu    sync.Mutex
+		picks = make(map[tree.DocumentID]docPick, len(docIDs))
+	)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(storeMapConcurrency)
+	for _, docID := range docIDs {
+		g.Go(func() error {
+			t, err := h.db.LoadTree(gctx, docID, orgID, storeID)
+			if err != nil || t == nil || t.Root == nil {
+				h.logger.Warn("answer/store: load tree", "doc", docID, "err", err)
+				return nil
+			}
+			manifest, refs := buildSectionManifest(t.Root)
+			if len(refs) == 0 {
+				return nil
+			}
+			idxs, u, err := h.selectSections(gctx, model, query, t.Title, manifest, len(refs))
+			if err != nil {
+				h.logger.Warn("answer/store: select", "doc", docID, "err", err)
+				return nil
+			}
+
+			// Resolve selected indices → content-bearing sections
+			// (a selected internal node pulls its content leaves).
+			var out []relevantSection
+			seen := map[tree.SectionID]struct{}{}
+			for _, n := range idxs {
+				if n < 1 || n > len(refs) {
+					continue
+				}
+				sec := t.FindByID(refs[n-1].id)
+				if sec == nil {
+					continue
+				}
+				for _, cs := range collectContentSections(sec) {
+					if _, dup := seen[cs.ID]; dup {
+						continue
+					}
+					seen[cs.ID] = struct{}{}
+					content := h.loadContent(gctx, cs.ContentRef)
+					if strings.TrimSpace(content) == "" {
+						continue
+					}
+					out = append(out, relevantSection{
+						docID:        docID,
+						docTitle:     t.Title,
+						sectionID:    cs.ID,
+						sectionTitle: cs.Title,
+						startPage:    cs.PageStart,
+						endPage:      cs.PageEnd,
+						content:      content,
+					})
+				}
+			}
+
+			mu.Lock()
+			picks[docID] = docPick{secs: out, usage: u}
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	// Assemble in caller-supplied document order for determinism, apply
+	// the total content budget + optional max_sections, and assign global
+	// citation indices.
+	var (
+		flat    []relevantSection
 		spent   int
 		matched int
+		usage   retrieval.Usage
 		idx     = 1
 	)
-	for _, d := range docs {
-		if d.dr.Tree == nil {
+	for _, docID := range docIDs {
+		p, ok := picks[docID]
+		if !ok {
 			continue
 		}
-		contributed := false
-		for i, sid := range d.dr.SelectedIDs {
-			if i >= perDoc || spent >= storeAnswerEvidenceBudget {
+		usage.Add(p.usage)
+		if len(p.secs) == 0 {
+			continue
+		}
+		matched++
+		for _, s := range p.secs {
+			if maxSections > 0 && len(flat) >= maxSections {
 				break
 			}
-			sec := d.dr.Tree.FindByID(sid)
-			if sec == nil || sec.ContentRef == "" {
-				continue
+			if spent >= storeContentBudget {
+				break
 			}
-			content := h.loadContent(ctx, sec.ContentRef)
-			if strings.TrimSpace(content) == "" {
-				continue
+			if len(s.content) > storeSectionCharsCap {
+				s.content = s.content[:storeSectionCharsCap]
 			}
-			remaining := storeAnswerEvidenceBudget - spent
-			if len(content) > remaining {
-				content = content[:remaining]
+			if remaining := storeContentBudget - spent; len(s.content) > remaining {
+				s.content = s.content[:remaining]
 			}
-			spent += len(content)
-			out = append(out, evidenceBlock{
-				index:      idx,
-				docID:      d.id,
-				docTitle:   d.dr.Tree.Title,
-				startPage:  sec.PageStart,
-				endPage:    sec.PageEnd,
-				sectionIDs: []tree.SectionID{sid},
-				content:    content,
-			})
+			spent += len(s.content)
+			s.index = idx
 			idx++
-			contributed = true
-		}
-		if contributed {
-			matched++
+			flat = append(flat, s)
 		}
 	}
-	return out, matched
+	return flat, matched, usage
+}
+
+// selectSections asks the model, over a document's structure+summary
+// outline (NOT its full text), which sections' full content is relevant.
+func (h *AnswerStoreHandler) selectSections(ctx context.Context, model, query, docTitle, manifest string, maxIdx int) ([]int, retrieval.Usage, error) {
+	req := llmgate.Request{
+		Model:       model,
+		MaxTokens:   256,
+		Temperature: 0,
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: storeSelectSystemPrompt},
+			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nDOCUMENT: %s\nSECTION OUTLINE (number, title, summary):\n%s\nReply with ONLY the JSON object.", query, docTitle, manifest)},
+		},
+	}
+	resp, err := h.llm.Complete(ctx, req)
+	if err != nil {
+		return nil, retrieval.Usage{}, err
+	}
+	u := retrieval.Usage{
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+		CostUSD:      resp.Usage.CostUSD,
+		LLMCalls:     1,
+	}
+	return parseRelevant(resp.Content, maxIdx), u, nil
+}
+
+const storeSelectSystemPrompt = `You are given a QUESTION and the OUTLINE of ONE document — its sections, each with a number in brackets [n], a title, and a one-line summary. You are NOT given the section text.
+
+Identify which sections' FULL text you would need to read to answer the question. Choose by relevance, favouring precision: pick the sections that actually bear on the question, not every loosely related one. If none are relevant, return an empty list.
+
+Reply with EXACTLY one JSON object, no markdown fences:
+{"relevant":[<the section numbers you would read>]}`
+
+// generate produces the final answer from the FULL content of the
+// selected sections, citing the sections it uses with [n] markers.
+func (h *AnswerStoreHandler) generate(ctx context.Context, model, query string, sections []relevantSection, maxTokens int) (string, []int, retrieval.Usage, error) {
+	var ev strings.Builder
+	for _, s := range sections {
+		title := s.docTitle
+		if title == "" {
+			title = string(s.docID)
+		}
+		fmt.Fprintf(&ev, "[%d] %s", s.index, title)
+		if s.sectionTitle != "" {
+			fmt.Fprintf(&ev, " › %s", s.sectionTitle)
+		}
+		if p := formatPageRange(s.startPage, s.endPage); p != "" {
+			fmt.Fprintf(&ev, " (%s)", p)
+		}
+		ev.WriteString(":\n")
+		ev.WriteString(strings.TrimSpace(s.content))
+		ev.WriteString("\n\n")
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	req := llmgate.Request{
+		Model:       model,
+		MaxTokens:   maxTokens,
+		Temperature: 0,
+		Messages: []llmgate.Message{
+			{Role: llmgate.RoleSystem, Content: storeGenerateSystemPrompt},
+			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nSECTIONS:\n%s\nReply with ONLY the JSON object.", query, ev.String())},
+		},
+	}
+	resp, err := h.llm.Complete(ctx, req)
+	if err != nil {
+		return "", nil, retrieval.Usage{}, err
+	}
+	usage := retrieval.Usage{
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+		CostUSD:      resp.Usage.CostUSD,
+		LLMCalls:     1,
+	}
+	answer, cited := parseStoreAnswer(resp.Content, len(sections))
+	return answer, cited, usage, nil
+}
+
+const storeGenerateSystemPrompt = `You answer a QUESTION using ONLY the supplied SECTIONS, which are the full text of the relevant sections drawn from several documents in a collection. Each section is prefixed with a number in brackets [n] and its document title / page range.
+
+RULES:
+- Answer ONLY from the sections. Never invent facts. If they do not answer the question, say so plainly.
+- Cite every claim inline with the bracketed number(s) of the section(s) it rests on, e.g. "Consent must be freely given [1]."
+- Synthesise across documents when the answer draws on more than one — one coherent answer over the collection.
+- Be concise and well-structured.
+
+Reply with EXACTLY one JSON object, no markdown fences:
+{"answer":"<answer text with [n] citation markers>","cited":[<the section numbers you cited>]}`
+
+// buildSectionManifest renders a document's structure+summary outline as
+// a numbered, indented list and returns the render plus the ordered
+// index→section refs. Every non-root section gets a number; the LLM
+// selects by number and we map back via refs.
+func buildSectionManifest(root *tree.Section) (string, []manifestRef) {
+	var (
+		b    strings.Builder
+		refs []manifestRef
+	)
+	var walk func(s *tree.Section, depth int)
+	walk = func(s *tree.Section, depth int) {
+		for _, c := range s.Children {
+			refs = append(refs, manifestRef{id: c.ID, hasContent: strings.TrimSpace(c.ContentRef) != ""})
+			n := len(refs)
+			title := strings.TrimSpace(c.Title)
+			if title == "" {
+				title = string(c.ID)
+			}
+			fmt.Fprintf(&b, "[%d]%s %s", n, strings.Repeat("  ", depth), title)
+			if pr := formatPageRange(c.PageStart, c.PageEnd); pr != "" {
+				fmt.Fprintf(&b, " (%s)", pr)
+			}
+			if sum := strings.Join(strings.Fields(c.Summary), " "); sum != "" {
+				fmt.Fprintf(&b, " — %s", sum)
+			}
+			b.WriteByte('\n')
+			walk(c, depth+1)
+		}
+	}
+	walk(root, 0)
+	return b.String(), refs
+}
+
+// collectContentSections returns the content-bearing sections rooted at
+// sec: sec itself if it has content, plus any descendants that do. A
+// selected heading therefore pulls the full text of its subsection.
+func collectContentSections(sec *tree.Section) []*tree.Section {
+	var out []*tree.Section
+	var walk func(s *tree.Section)
+	walk = func(s *tree.Section) {
+		if strings.TrimSpace(s.ContentRef) != "" {
+			out = append(out, s)
+		}
+		for _, c := range s.Children {
+			walk(c)
+		}
+	}
+	walk(sec)
+	return out
 }
 
 func (h *AnswerStoreHandler) loadContent(ctx context.Context, ref string) string {
@@ -245,75 +444,35 @@ func (h *AnswerStoreHandler) loadContent(ctx context.Context, ref string) string
 	return string(raw)
 }
 
-// synthesise runs the single reducer LLM call. It returns the answer
-// text (with [n] citation markers), the set of cited evidence indices,
-// and usage.
-func (h *AnswerStoreHandler) synthesise(ctx context.Context, model, query string, evidence []evidenceBlock, maxTokens int) (string, []int, retrieval.Usage, error) {
-	var ev strings.Builder
-	for _, b := range evidence {
-		pages := formatPageRange(b.startPage, b.endPage)
-		title := b.docTitle
-		if title == "" {
-			title = string(b.docID)
-		}
-		fmt.Fprintf(&ev, "[%d] %s", b.index, title)
-		if pages != "" {
-			fmt.Fprintf(&ev, " (%s)", pages)
-		}
-		ev.WriteString(":\n")
-		ev.WriteString(strings.TrimSpace(b.content))
-		ev.WriteString("\n\n")
-	}
+// ── output parsing + citation building ─────────────────────────────
 
-	if maxTokens <= 0 {
-		maxTokens = 1024
-	}
-	req := llmgate.Request{
-		Model:       model,
-		MaxTokens:   maxTokens,
-		Temperature: 0,
-		Messages: []llmgate.Message{
-			{Role: llmgate.RoleSystem, Content: storeAnswerSystemPrompt},
-			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nEVIDENCE:\n%s\nReply with ONLY the JSON object.", query, ev.String())},
-		},
-	}
-	resp, err := h.llm.Complete(ctx, req)
-	if err != nil {
-		return "", nil, retrieval.Usage{}, err
-	}
-	usage := retrieval.Usage{
-		InputTokens:  resp.Usage.InputTokens,
-		OutputTokens: resp.Usage.OutputTokens,
-		TotalTokens:  resp.Usage.TotalTokens,
-		CostUSD:      resp.Usage.CostUSD,
-		LLMCalls:     1,
-	}
-
-	answer, cited := parseStoreAnswer(resp.Content, len(evidence))
-	return answer, cited, usage, nil
+type relevantJSON struct {
+	Relevant []int `json:"relevant"`
 }
 
-const storeAnswerSystemPrompt = `You answer a question using ONLY the supplied EVIDENCE, which is drawn from several documents in a collection. Each evidence block is prefixed with a number in brackets, e.g. [1], [2].
+// parseRelevant extracts the selected section numbers from the selector's
+// reply, tolerant of code fences / prose, clamped to [1,maxIdx].
+func parseRelevant(raw string, maxIdx int) []int {
+	s := strings.TrimSpace(raw)
+	if i := strings.IndexByte(s, '{'); i >= 0 {
+		if j := strings.LastIndexByte(s, '}'); j > i {
+			var parsed relevantJSON
+			if err := json.Unmarshal([]byte(s[i:j+1]), &parsed); err == nil {
+				return dedupeInRange(parsed.Relevant, maxIdx)
+			}
+		}
+	}
+	return dedupeInRange(scrapeMarkers(s, maxIdx), maxIdx)
+}
 
-RULES:
-- Answer ONLY from the evidence. Never invent facts. If the evidence does not answer the question, say so plainly.
-- Cite every claim inline with the bracketed number(s) of the evidence you used, e.g. "Consent must be freely given [1]." Cite the specific block(s) that support each statement.
-- Synthesise across documents when the answer draws on more than one — the whole point is one coherent answer over the collection.
-- Be concise and well-structured. Use short paragraphs or a short list.
-
-Reply with EXACTLY one JSON object, no markdown fences:
-{"answer":"<answer text with [n] citation markers>","cited":[<the evidence numbers you actually cited>]}`
-
-// storeAnswerJSON is the reducer's expected output shape.
 type storeAnswerJSON struct {
 	Answer string `json:"answer"`
 	Cited  []int  `json:"cited"`
 }
 
-// parseStoreAnswer extracts the answer + cited indices from the model's
-// reply, tolerant of code fences / surrounding prose. Falls back to the
-// raw text (and citation markers scraped from it) when the JSON can't be
-// parsed, so a formatting slip never drops the answer.
+// parseStoreAnswer extracts the answer + cited indices from the generator
+// reply, tolerant of code fences / prose. Falls back to the raw text (and
+// scraped [n] markers) so a formatting slip never drops the answer.
 func parseStoreAnswer(raw string, maxIdx int) (string, []int) {
 	s := strings.TrimSpace(raw)
 	if i := strings.IndexByte(s, '{'); i >= 0 {
@@ -324,7 +483,6 @@ func parseStoreAnswer(raw string, maxIdx int) (string, []int) {
 			}
 		}
 	}
-	// Fallback: use the raw text and scrape [n] markers from it.
 	return s, scrapeMarkers(s, maxIdx)
 }
 
@@ -345,7 +503,6 @@ func dedupeInRange(idx []int, maxIdx int) []int {
 	return out
 }
 
-// scrapeMarkers pulls [n] indices out of answer prose (fallback path).
 func scrapeMarkers(s string, maxIdx int) []int {
 	var nums []int
 	for i := 0; i < len(s); i++ {
@@ -365,39 +522,40 @@ func scrapeMarkers(s string, maxIdx int) []int {
 	return dedupeInRange(nums, maxIdx)
 }
 
-// buildStoreCitations turns the cited evidence indices into the response
-// citations array, preserving cited order and carrying document id/title,
-// page range, section ids, and a short verbatim quote.
-func buildStoreCitations(evidence []evidenceBlock, cited []int) []map[string]any {
-	byIdx := make(map[int]evidenceBlock, len(evidence))
-	for _, b := range evidence {
-		byIdx[b.index] = b
+// buildStoreCitations turns cited section indices into the response
+// citations — one per cited section, carrying document + section
+// provenance and a short quote from the section's full content.
+func buildStoreCitations(sections []relevantSection, cited []int) []map[string]any {
+	byIdx := make(map[int]relevantSection, len(sections))
+	for _, s := range sections {
+		byIdx[s.index] = s
 	}
-	// If the model cited nothing parseable, fall back to citing all
-	// evidence so the user still sees the sources the answer used.
-	if len(cited) == 0 {
-		for _, b := range evidence {
-			cited = append(cited, b.index)
+	if len(cited) == 0 { // generator cited nothing parseable → show all sources
+		for _, s := range sections {
+			cited = append(cited, s.index)
 		}
 	}
 	out := make([]map[string]any, 0, len(cited))
 	for _, n := range cited {
-		b, ok := byIdx[n]
+		s, ok := byIdx[n]
 		if !ok {
 			continue
 		}
 		c := map[string]any{
-			"index":       b.index,
-			"document_id": b.docID,
-			"section_ids": b.sectionIDs,
-			"quote":       snippet(b.content, storeAnswerQuoteLen),
+			"index":       s.index,
+			"document_id": s.docID,
+			"section_ids": []tree.SectionID{s.sectionID},
+			"quote":       snippet(s.content, storeAnswerQuoteLen),
 		}
-		if b.docTitle != "" {
-			c["document_title"] = b.docTitle
+		if s.docTitle != "" {
+			c["document_title"] = s.docTitle
 		}
-		if b.startPage > 0 {
-			c["start_page"] = b.startPage
-			c["end_page"] = b.endPage
+		if s.sectionTitle != "" {
+			c["section_title"] = s.sectionTitle
+		}
+		if s.startPage > 0 {
+			c["start_page"] = s.startPage
+			c["end_page"] = s.endPage
 		}
 		out = append(out, c)
 	}
