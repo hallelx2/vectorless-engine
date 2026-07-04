@@ -67,6 +67,13 @@ type Payload struct {
 	ContentType string          `json:"content_type"`
 	Filename    string          `json:"filename"`
 	SourceRef   string          `json:"source_ref"` // storage key of the original bytes
+	// Title, when set, is an explicit caller-supplied document title that
+	// overrides whatever the parser discovers from the content. It is
+	// "sticky": persistTree will NOT overwrite it with the parsed title.
+	// Useful when the PDF's own title text is unreliable (rotated arXiv
+	// margin stamps, ORCID iD markers, letter-spaced cover pages) or the
+	// caller simply wants a curated display name. Empty = auto-discover.
+	Title string `json:"title,omitempty"`
 	// Profile selects domain-aware structuring/summarization prompts
 	// ("generic", "research", "medical"). Empty = generic. Sourced from
 	// the document's store (the control plane injects X-Vectorless-Profile).
@@ -376,7 +383,7 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 	}
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
-	if err := p.persistTree(ctx, p.DB, pl.DocumentID, parsed); err != nil {
+	if err := p.persistTree(ctx, p.DB, pl.DocumentID, parsed, pl.Title); err != nil {
 		p.fail(ctx, p.DB, pl.DocumentID, "persist tree", err)
 		return err
 	}
@@ -674,7 +681,7 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 	}
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
-	if err := p.persistTree(ctx, store, pl.DocumentID, parsed); err != nil {
+	if err := p.persistTree(ctx, store, pl.DocumentID, parsed, pl.Title); err != nil {
 		p.fail(ctx, store, pl.DocumentID, "persist tree", err)
 		return err
 	}
@@ -695,13 +702,18 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 // The DB operations go through the narrow docPersister interface so the
 // persist path can be exercised (e.g. by the minimal-mode test) without
 // a live Postgres; production callers pass p.DB, which satisfies it.
-func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tree.DocumentID, doc *parser.ParsedDoc) error {
-	// Only overwrite the row's title (which was seeded with the
-	// filename at upload time) when the parsed title looks usable.
-	// Watermarked PDFs whose overlay text shares a Y coordinate with
-	// the real title produce mojibake like "GGlloobbaall SSttrraatteeggyy"
-	// — we'd rather keep the original filename than show that to a user.
-	if doc.Title != "" && !isLikelyMojibakeTitle(doc.Title) {
+func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tree.DocumentID, doc *parser.ParsedDoc, titleOverride string) error {
+	// An explicit caller-supplied title is sticky: keep it and never let
+	// the parsed title clobber it. The row was already seeded with this
+	// value at upload time, so there is nothing to write here.
+	if strings.TrimSpace(titleOverride) != "" {
+		// no-op: the override is already the row's title.
+	} else if doc.Title != "" && !isLikelyMojibakeTitle(doc.Title) {
+		// Otherwise only overwrite the row's title (seeded with the
+		// filename at upload time) when the parsed title looks usable.
+		// Watermarked PDFs whose overlay text shares a Y coordinate with
+		// the real title produce mojibake like "GGlloobbaall SSttrraatteeggyy"
+		// — we'd rather keep the original filename than show that to a user.
 		if err := store.SetDocumentTitle(ctx, docID, doc.Title); err != nil {
 			return err
 		}

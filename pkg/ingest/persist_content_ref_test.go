@@ -9,6 +9,43 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
 )
 
+// TestPersistTree_TitleOverrideIsSticky verifies that an explicit
+// caller-supplied title is never clobbered by the parsed title, while a
+// blank override still lets a usable parsed title through.
+func TestPersistTree_TitleOverrideIsSticky(t *testing.T) {
+	store, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	p := &Pipeline{Storage: store}
+	doc := &parser.ParsedDoc{
+		Title: "Some Parsed Title",
+		Sections: []parser.Section{
+			{Level: 1, Title: "S", Content: "body", PageStart: 1, PageEnd: 1},
+		},
+	}
+
+	// With an override, persistTree must NOT push the parsed title (the row
+	// already carries the override from upload time → SetDocumentTitle
+	// stays uncalled, so the fake's title remains empty).
+	fake := &fakeDocStore{}
+	if err := p.persistTree(context.Background(), fake, "doc_x", doc, "Attention Is All You Need"); err != nil {
+		t.Fatalf("persistTree (override): %v", err)
+	}
+	if fake.title != "" {
+		t.Errorf("override present: parsed title must not overwrite it; SetDocumentTitle called with %q", fake.title)
+	}
+
+	// With no override, a usable parsed title IS applied.
+	fake2 := &fakeDocStore{}
+	if err := p.persistTree(context.Background(), fake2, "doc_y", doc, ""); err != nil {
+		t.Fatalf("persistTree (no override): %v", err)
+	}
+	if fake2.title != "Some Parsed Title" {
+		t.Errorf("no override: parsed title should apply, got %q", fake2.title)
+	}
+}
+
 // TestPersistTree_ContentRefMatchesStoredObjects is the HAL-316 regression:
 // a leaf only gets a ContentRef when its content was actually written. An
 // empty-after-clean leaf must get NO ref (and no stored object), so later
@@ -35,7 +72,7 @@ func TestPersistTree_ContentRefMatchesStoredObjects(t *testing.T) {
 		},
 	}
 
-	if err := p.persistTree(context.Background(), fake, "doc_x", doc); err != nil {
+	if err := p.persistTree(context.Background(), fake, "doc_x", doc, ""); err != nil {
 		t.Fatalf("persistTree: %v", err)
 	}
 
