@@ -1,0 +1,22 @@
+name: security
+
+# Caller workflow. This exact file is SYNCED into every target repo by dev-standards,
+# so each repo runs the same security scanners on every PR with zero per-repo config.
+# It also runs here, scanning dev-standards itself.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  security:
+    # Local reference — the reusable file is synced into THIS repo too, so each repo
+    # is self-contained and this works whether dev-standards is public or private.
+    uses: ./.github/workflows/security.reusable.yml
+    secrets: inherit
