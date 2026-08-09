@@ -32,7 +32,7 @@ jobs:
       AR_REPO: ${{ vars.AR_REPO }}
     steps:
       - name: Checkout (at the tag / triggering ref)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Authenticate to GCP (WIF)
         uses: google-github-actions/auth@v2
