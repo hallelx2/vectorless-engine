@@ -1,0 +1,8 @@
+# Tuning for the FinanceBench bulk-ingest run. Only the two settings that are
+# NOT env-overridable live here; everything else comes from --local defaults +
+# env (GLM creds, absolute storage root, minimal ingest mode).
+database:
+  max_conns: 40          # avoid pool exhaustion under concurrent ingest
+queue:
+  river:
+    num_workers: 4       # lower concurrency = fewer overlapping large-file reads

@@ -1,0 +1,23 @@
+name: notify-deploy
+
+# On a push to main or a v* tag, tell vectorless-deploy to build + deploy
+# the engine to the Lightsail starter box. Needs a repo secret
+# DEPLOY_DISPATCH_TOKEN (PAT with 'repo' scope on hallelx2/vectorless-deploy).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deploy
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+          repository: hallelx2/vectorless-deploy
+          event-type: deploy-engine
+          client-payload: |
+            {"ref": "${{ github.ref_name }}", "sha": "${{ github.sha }}"}
