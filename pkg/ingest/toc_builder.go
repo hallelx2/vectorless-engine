@@ -78,6 +78,28 @@ type TOCBuilder struct {
 	// for TOCBuilder literals in tests. The pipeline sets it from
 	// Pipeline.LLMCallTimeout (default 90s).
 	LLMCallTimeout time.Duration
+
+	// Judge optionally routes the two yes/no phases — TOC detection and
+	// title verification — to a System One model, which answers a whole
+	// batch of questions against one reading of the state instead of one
+	// question per round-trip.
+	//
+	// Nil means the generative path runs exactly as before, and that is
+	// the default. A Judge is an accelerator, never a dependency: a
+	// self-hoster without a TypeSafe key must see identical behaviour.
+	//
+	// See toc_judge.go for the batching and for why it is sized by
+	// measured tokens rather than page count.
+	Judge llmgate.Judge
+
+	// JudgeThreshold is the probability above which a Noul answer counts
+	// as yes. Zero means 0.5.
+	//
+	// Worth recalibrating per corpus rather than inheriting. The
+	// generative prompts returned a self-reported yes/no; a System One
+	// model returns a calibrated probability, and those are different
+	// quantities even when both live in [0,1].
+	JudgeThreshold float64
 }
 
 // Usage is the cumulative LLM accounting returned by Build. Mirrors
@@ -128,7 +150,15 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	}
 
 	// Phase 1: detect. Scan the leading pages for a TOC.
-	tocPages := b.detectTOCPages(ctx, pages, tocCheck, &usage)
+	//
+	// A Judge answers the whole prefix in a couple of batched requests;
+	// without one this is a sequential call per page. handled=false
+	// means the Judge declined or failed, and the generative path runs
+	// unchanged.
+	tocPages, handled := b.detectTOCPagesJudge(ctx, pages, tocCheck, &usage)
+	if !handled {
+		tocPages = b.detectTOCPages(ctx, pages, tocCheck, &usage)
+	}
 
 	// Phase 2: extract.
 	var nodes []tree.TOCNode
@@ -149,7 +179,11 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// starts the section. Mismatches clear the page (set to 0)
 	// rather than making one up — downstream treats zero as
 	// open/unknown.
-	b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
+	if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
+		applyJudgeVerdicts(nodes, verdicts)
+	} else {
+		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
+	}
 
 	// Derive end pages from sibling order. Done last so verified
 	// start pages drive the derivation.
@@ -217,7 +251,7 @@ Please note: abstract, summary, notation list, figure list, table list, etc. are
 
 	req := llmgate.Request{
 		Model:       b.Model,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   400,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: tocDetectorSystemPrompt},
@@ -272,7 +306,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 
 	req := llmgate.Request{
 		Model:       b.Model,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   4096,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: tocExtractorSystemPrompt},
@@ -310,7 +344,7 @@ Return ONLY a JSON object: {"nodes": [{"structure": "1", "title": "...", "physic
 
 	req := llmgate.Request{
 		Model:       b.Model,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   4096,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: tocExtractorSystemPrompt},
@@ -437,7 +471,7 @@ Directly return the final JSON structure. Do not output anything else.`, title, 
 
 	req := llmgate.Request{
 		Model:       b.Model,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   400,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: tocVerifySystemPrompt},

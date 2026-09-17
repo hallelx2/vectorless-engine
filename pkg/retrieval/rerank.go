@@ -147,7 +147,7 @@ func (r *ReRanker) ReRank(ctx context.Context, query string, candidates []Sectio
 			{Role: llmgate.RoleUser, Content: prompt},
 		},
 		MaxTokens:   1024,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		JSONMode:    true,
 		JSONSchema:  []byte(reRankJSONSchema),
 	}

@@ -79,7 +79,7 @@ func (e *SpanExtractor) Extract(ctx context.Context, sectionContent, query strin
 			{Role: llmgate.RoleUser, Content: user},
 		},
 		MaxTokens:   512,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		JSONMode:    true,
 		JSONSchema:  []byte(spanJSONSchema),
 	}

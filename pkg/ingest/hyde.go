@@ -149,7 +149,7 @@ func (p *Pipeline) candidateQuestionsFor(ctx context.Context, s db.Section, prof
 
 	req := llmgate.Request{
 		Model:       model,
-		Temperature: 0.2, // a smidgen of variety so questions don't collapse
+		Temperature: llmgate.Float64(0.2), // a smidgen of variety so questions don't collapse
 		MaxTokens:   600,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: system},

@@ -286,7 +286,7 @@ func (s *TreeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, que
 			Model:       model,
 			Messages:    msgs,
 			MaxTokens:   1536, // answers can be longer than agentic's selections
-			Temperature: 0,
+			Temperature: llmgate.Float64(0),
 		}
 		resp, err := s.LLM.Complete(ctx, req)
 		if err != nil {
@@ -612,7 +612,7 @@ func (s *TreeWalkStrategy) forceDone(ctx context.Context, msgs *[]llmgate.Messag
 		Model:       model,
 		Messages:    *msgs,
 		MaxTokens:   1536,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 	}
 	resp, err := s.LLM.Complete(ctx, req)
 	if err != nil {

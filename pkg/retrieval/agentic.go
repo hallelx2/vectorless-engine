@@ -137,7 +137,7 @@ func (a *AgenticStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, quer
 			Model:       model,
 			Messages:    msgs,
 			MaxTokens:   1024,
-			Temperature: 0,
+			Temperature: llmgate.Float64(0),
 		}
 		resp, err := a.LLM.Complete(ctx, req)
 		if err != nil {
