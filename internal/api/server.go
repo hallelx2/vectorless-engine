@@ -1093,7 +1093,7 @@ func synthesiseAnswer(ctx context.Context, client llmgate.Client, model, query s
 			{Role: llmgate.RoleUser, Content: b.String()},
 		},
 		MaxTokens:   maxAnswerTokens,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 	}
 	resp, err := client.Complete(ctx, req)
 	if err != nil {

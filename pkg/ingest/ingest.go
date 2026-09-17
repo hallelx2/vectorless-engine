@@ -983,7 +983,7 @@ func (p *Pipeline) summaryFor(ctx context.Context, s db.Section, childLines []st
 func (p *Pipeline) legacyOneLineSummary(ctx context.Context, s db.Section, body, profile string) (string, error) {
 	resp, err := completeWithTimeout(ctx, p.LLM, llmgate.Request{
 		Model:       p.SummaryModel,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   260,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: summarySystemPrompt(profile)},
@@ -1020,7 +1020,7 @@ func (p *Pipeline) legacyOneLineSummary(ctx context.Context, s db.Section, body,
 func (p *Pipeline) structuredSummaryFor(ctx context.Context, s db.Section, body, profile string) *tree.SummaryAxes {
 	req := llmgate.Request{
 		Model:       p.SummaryModel,
-		Temperature: 0.0,
+		Temperature: llmgate.Float64(0),
 		MaxTokens:   600,
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: summaryAxesSystemPrompt(profile)},

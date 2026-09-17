@@ -159,7 +159,7 @@ func (c *ChunkedTree) reasonOverSliceWithCost(ctx context.Context, sl Slice, que
 			{Role: llmgate.RoleUser, Content: prompt},
 		},
 		MaxTokens:   2048,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		JSONMode:    true,
 		JSONSchema:  []byte(selectionJSONSchema),
 	}

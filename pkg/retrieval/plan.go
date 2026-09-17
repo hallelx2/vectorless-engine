@@ -272,7 +272,7 @@ func runPlanningWithRetry(ctx context.Context, client llmgate.Client, model, que
 			{Role: llmgate.RoleUser, Content: user},
 		},
 		MaxTokens:   512,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		JSONMode:    true,
 		JSONSchema:  []byte(planningJSONSchema),
 	}

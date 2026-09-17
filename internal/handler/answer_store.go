@@ -294,7 +294,7 @@ func (h *AnswerStoreHandler) selectSections(ctx context.Context, model, query, d
 	req := llmgate.Request{
 		Model:       model,
 		MaxTokens:   256,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: storeSelectSystemPrompt},
 			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nDOCUMENT: %s\nSECTION OUTLINE (number, title, summary):\n%s\nReply with ONLY the JSON object.", query, docTitle, manifest)},
@@ -348,7 +348,7 @@ func (h *AnswerStoreHandler) generate(ctx context.Context, model, query string, 
 	req := llmgate.Request{
 		Model:       model,
 		MaxTokens:   maxTokens,
-		Temperature: 0,
+		Temperature: llmgate.Float64(0),
 		Messages: []llmgate.Message{
 			{Role: llmgate.RoleSystem, Content: storeGenerateSystemPrompt},
 			{Role: llmgate.RoleUser, Content: fmt.Sprintf("QUESTION:\n%s\n\nSECTIONS:\n%s\nReply with ONLY the JSON object.", query, ev.String())},
