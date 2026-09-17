@@ -14,7 +14,7 @@ require (
 	github.com/aws/smithy-go v1.25.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
-	github.com/hallelx2/llmgate v0.3.0
+	github.com/hallelx2/llmgate v0.4.0
 	github.com/hallelx2/pdftable v0.4.0
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.9.2
@@ -132,15 +132,3 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260729162451-8efbd57d26e0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-// TEMPORARY — MUST NOT MERGE.
-//
-// The Judge seam is merged on llmgate main but the latest tag is v0.3.0,
-// which predates it. Publishing a module version is irreversible, so
-// that release is a deliberate decision rather than something to do in
-// passing; see HAL-550, which says the next llmgate release has to be a
-// breaking bump anyway (Temperature became *float64, and this branch
-// migrates 19 call sites for it).
-//
-// Remove this line and require the tagged version before merging.
-replace github.com/hallelx2/llmgate => /home/hallelx2/dev/vectorless/llmgate
