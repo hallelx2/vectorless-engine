@@ -65,18 +65,41 @@ var (
 	reNoise = regexp.MustCompile(`(?i)^(?:page(?:\s*no\.?)?|table\s+of\s+contents|contents|index)$`)
 )
 
+var (
+	// reGluedLabel: the parser sometimes drops the space between an
+	// item number and its title — "Item 1Business", "Item 1ARisk
+	// Factors" (WALMART_2020_10K).
+	reGluedLabel = regexp.MustCompile(`\b((?i:item|note|part))\s*(\d+[A-C]?)([A-Z][a-z])`)
+	// reInlinePart is a part label appearing mid-line, before the item
+	// that opens it: "PART II Item 5.", "Part III. Item 10".
+	reRoman   = regexp.MustCompile(`(?i)^(?:[ivxlc]+|\d+)\.?$`)
+	rePartTok = regexp.MustCompile(`(?i)^part$`)
+	// reLabelNum: the number after an entry label — 1, 1A, 12., 7A.
+	reLabelNum = regexp.MustCompile(`(?i)^\d+[a-c]?\.?$`)
+)
+
 // parseContentsEntries turns the text of the contents pages into
 // candidate entries, in reading order.
 //
 // The parser runs entries together on one line — "Item 1. Business 3
 // Item 1A. Risk Factors 20 …" — so an entry closes at a 1–3 digit page
 // number that is followed by the end of the line or by something that
-// opens an entry: a label like Item, a dotted number, or a capitalised
-// word. "Item 6 [Reserved] 35" survives because "[Reserved]" opens
-// nothing; "Form 10-K Summary 96" because "10-K" is not a page number.
-// A trailing "2 Table of Contents" footer has no page after it and is
+// opens an entry: a label like Item, a number, or a capitalised word.
+// "Item 6 [Reserved] 35" survives because "[Reserved]" opens nothing;
+// "Form 10-K Summary 96" because "10-K" is not a page number. A
+// trailing "2 Table of Contents" footer has no page after it and is
 // dropped.
+//
+// Shapes met on FinanceBench and handled here: a part label inline
+// before its first item; a title wrapped so that its page number lands
+// mid-title ("… Issuer Purchases of 20 Equity Securities Item 6."),
+// where the words before the next label are the previous entry's tail;
+// an item with no page number at all ("Item 1. Business" alone on its
+// line); the space missing between an item number and its title; and
+// the same line emitted twice, once truncated in bold, by the parser's
+// empty-leaf fold.
 func parseContentsEntries(text string) []contentsEntry {
+	text = reGluedLabel.ReplaceAllString(text, "$1 $2 $3")
 	var out []contentsEntry
 	inPart := false
 	for _, raw := range strings.Split(text, "\n") {
@@ -85,16 +108,25 @@ func parseContentsEntries(text string) []contentsEntry {
 			continue
 		}
 		if m := rePartHeader.FindStringSubmatch(line); m != nil {
-			// A part header, possibly at the end of a title line. Only
-			// the part becomes an entry; the rest of the line is the
-			// table's own title.
-			out = append(out, contentsEntry{Title: strings.ToUpper(strings.Join(strings.Fields(m[1]), " ")), Depth: 1, Container: true})
+			out = append(out, partEntry(m[1]))
 			inPart = true
 			continue
 		}
 		toks := strings.Fields(line)
 		var cur []string
 		flush := func(page int) {
+			if len(cur) == 0 {
+				return
+			}
+			// A label later in the run means what precedes it is the
+			// previous entry's wrapped tail, not this entry's title.
+			if k := firstLabelAt(cur); k > 0 {
+				tail := cleanContentsTitle(strings.Join(cur[:k], " "))
+				if j := lastRealEntry(out); j >= 0 && tail != "" && !reNoise.MatchString(tail) {
+					out[j].Title = out[j].Title + " " + tail
+				}
+				cur = cur[k:]
+			}
 			title := cleanContentsTitle(strings.Join(cur, " "))
 			cur = nil
 			if title == "" || reNoise.MatchString(title) || !hasLetter(title) || len(title) < 3 {
@@ -104,17 +136,103 @@ func parseContentsEntries(text string) []contentsEntry {
 		}
 		for i := 0; i < len(toks); i++ {
 			t := toks[i]
-			if rePageNum.MatchString(t) && len(cur) > 0 && (i+1 == len(toks) || opensEntry(toks[i+1])) {
+			// A column label at the start of the run ("Page").
+			if len(cur) == 0 && reNoise.MatchString(strings.Trim(t, ".:")) {
+				continue
+			}
+			// A part label inline, before the item that opens it.
+			if rePartTok.MatchString(t) && i+1 < len(toks) && reRoman.MatchString(toks[i+1]) {
+				if len(cur) > 0 && firstLabelAt(cur) == 0 {
+					flush(0) // an item with no page number, closed by the next part
+				}
+				cur = nil
+				out = append(out, partEntry(t+" "+toks[i+1]))
+				inPart = true
+				i++
+				continue
+			}
+			// A number right after a label is the label's number ("Item 1
+			// Business"), never a page.
+			afterLabel := len(cur) > 0 && reEntryLabel.MatchString(cur[len(cur)-1])
+			if rePageNum.MatchString(t) && len(cur) > 0 && !afterLabel && (i+1 == len(toks) || opensEntry(toks[i+1])) {
 				n, _ := strconv.Atoi(t)
 				flush(n)
 				continue
 			}
 			cur = append(cur, t)
 		}
-		// Whatever is left had no page number: a wrapped title fragment
-		// or a footer. Neither is an entry on its own.
+		// What is left had no page number. An item-labelled run is still
+		// an entry — "Item 1. Business" alone on its line; the resolver
+		// finds its page. Anything else is a wrapped fragment or footer.
+		if len(cur) > 0 && firstLabelAt(cur) == 0 {
+			flush(0)
+		}
 	}
-	return out
+	return dedupEntries(out)
+}
+
+func partEntry(label string) contentsEntry {
+	label = strings.TrimRight(strings.Join(strings.Fields(label), " "), ".:")
+	return contentsEntry{Title: strings.ToUpper(label), Depth: 1, Container: true}
+}
+
+// firstLabelAt returns the index of the first "Item 1A"-shaped label in
+// the run, or -1.
+func firstLabelAt(toks []string) int {
+	for i := 0; i+1 < len(toks); i++ {
+		if reEntryLabel.MatchString(toks[i]) && reLabelNum.MatchString(toks[i+1]) {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastRealEntry(es []contentsEntry) int {
+	for j := len(es) - 1; j >= 0; j-- {
+		if !es[j].Container {
+			return j
+		}
+	}
+	return -1
+}
+
+// dedupEntries drops an exact repeat (the parser's bold-fold emits a
+// truncated copy of a line before the line itself) and a page-less
+// entry whose title is a prefix of a fuller one.
+func dedupEntries(es []contentsEntry) []contentsEntry {
+	var out []contentsEntry
+	seen := map[string]bool{}
+	for _, e := range es {
+		if e.Container {
+			out = append(out, e)
+			continue
+		}
+		k := normalise(e.Title) + "|" + strconv.Itoa(e.Printed)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	// Prefix fragments without a page.
+	kept := out[:0]
+	for i, e := range out {
+		if !e.Container && e.Printed == 0 {
+			n := normalise(e.Title)
+			frag := false
+			for j, o := range out {
+				if j != i && !o.Container && len(normalise(o.Title)) > len(n) && strings.HasPrefix(normalise(o.Title), n) {
+					frag = true
+					break
+				}
+			}
+			if frag {
+				continue
+			}
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // opensEntry reports whether a token can begin a new contents entry.
@@ -123,7 +241,8 @@ func opensEntry(tok string) bool {
 		return true
 	}
 	r := []rune(tok)[0]
-	return unicode.IsUpper(r)
+	// A digit opens "15(a)(1) Financial Statements" and "2 Methods".
+	return unicode.IsUpper(r) || unicode.IsDigit(r)
 }
 
 // entryDepth derives the outline depth from the title's own numbering.

@@ -333,3 +333,75 @@ func TestBuildRecordsAFailedJudgeExtraction(t *testing.T) {
 		t.Errorf("fallback tree: %+v", nodes)
 	}
 }
+
+func TestParseContentsShapesFromTheCorpus(t *testing.T) {
+	t.Run("walmart: glued item numbers and an inline part after a column label", func(t *testing.T) {
+		es := parseContentsEntries("Page Part I Item 1Business 7 Item 1ARisk Factors 14 Item 2Properties 24 Part II Item 5Market for Registrant's Common Equity 29")
+		if e := hasTitle(es, "Item 1 Business"); e == nil || e.Printed != 7 {
+			t.Errorf("Item 1: %+v in %v", e, titlesOf(es))
+		}
+		if e := hasTitle(es, "Item 1A Risk Factors"); e == nil || e.Printed != 14 {
+			t.Errorf("Item 1A: %+v", e)
+		}
+		if e := hasTitle(es, "PART II"); e == nil || !e.Container {
+			t.Errorf("inline PART II not a container: %v", titlesOf(es))
+		}
+		if e := hasTitle(es, "Item 5 Market for Registrant's Common Equity"); e == nil || e.Depth != 2 {
+			t.Errorf("Item 5 under Part II: %+v", e)
+		}
+		if hasTitle(es, "Page") != nil || hasTitle(es, "Page Part I Item 1 Business") != nil {
+			t.Errorf("column label leaked: %v", titlesOf(es))
+		}
+	})
+	t.Run("verizon: item without a page, page number inside a wrapped title", func(t *testing.T) {
+		es := parseContentsEntries("PART I\nItem 1. Business\nItem 1A. Risk Factors 14 PART II Item 5. Market for Registrant’s Common Equity, Related Stockholder Matters and Issuer Purchases of 20 Equity Securities Item 6. [Reserved] 21")
+		if e := hasTitle(es, "Item 1. Business"); e == nil || e.Printed != 0 {
+			t.Errorf("Item 1 without a page should still be an entry: %+v %v", e, titlesOf(es))
+		}
+		if e := hasTitle(es, "Item 5. Market for Registrant’s Common Equity, Related Stockholder Matters and Issuer Purchases of Equity Securities"); e == nil || e.Printed != 20 {
+			t.Errorf("wrapped tail not re-attached: %v", titlesOf(es))
+		}
+		if e := hasTitle(es, "Item 6. [Reserved]"); e == nil || e.Printed != 21 {
+			t.Errorf("Item 6: %+v", e)
+		}
+		if hasTitle(es, "Equity Securities Item 6. [Reserved]") != nil {
+			t.Errorf("tail glued to the next entry: %v", titlesOf(es))
+		}
+	})
+	t.Run("oracle: part with a trailing dot inline", func(t *testing.T) {
+		es := parseContentsEntries("Page PART I. Item 1. Business 3 PART II. Item 5. Market 21")
+		if e := hasTitle(es, "PART I"); e == nil || !e.Container {
+			t.Errorf("PART I.: %v", titlesOf(es))
+		}
+		if e := hasTitle(es, "Item 1. Business"); e == nil || e.Printed != 3 || e.Depth != 2 {
+			t.Errorf("Item 1: %+v", e)
+		}
+	})
+	t.Run("pfizer: parenthesised sub-entries", func(t *testing.T) {
+		es := parseContentsEntries("ITEM 15. EXHIBITS, FINANCIAL STATEMENT SCHEDULES 111 15(a)(1) Financial Statements 111 15(a)(2) Financial Statement Schedules 111 15(a)(3) Exhibits 111 ITEM 16. FORM 10-K SUMMARY 116")
+		if e := hasTitle(es, "ITEM 15. EXHIBITS, FINANCIAL STATEMENT SCHEDULES"); e == nil || e.Printed != 111 {
+			t.Errorf("Item 15 did not close at its page: %v", titlesOf(es))
+		}
+		if e := hasTitle(es, "15(a)(2) Financial Statement Schedules"); e == nil || e.Printed != 111 {
+			t.Errorf("sub-entry: %v", titlesOf(es))
+		}
+	})
+	t.Run("3m: bold-fold duplicates and a truncated copy", func(t *testing.T) {
+		es := parseContentsEntries("**Geographic Area 38 Critical Accounting Estimates 39 New**\nGeographic Area 38 Critical Accounting Estimates 39 New Accounting Pronouncements 42 Financial Condition and Liquidity 43")
+		n := 0
+		for _, e := range es {
+			if e.Title == "Geographic Area" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("duplicate entry kept %d times: %v", n, titlesOf(es))
+		}
+		if hasTitle(es, "New") != nil {
+			t.Errorf("truncated fragment 'New' kept: %v", titlesOf(es))
+		}
+		if e := hasTitle(es, "New Accounting Pronouncements"); e == nil || e.Printed != 42 {
+			t.Errorf("full entry missing: %v", titlesOf(es))
+		}
+	})
+}
