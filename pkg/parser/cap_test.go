@@ -47,12 +47,13 @@ func TestCapLeafSections_MergesDownToCap(t *testing.T) {
 	if got := countLeafSections(capped); got > 400 {
 		t.Errorf("after cap: %d leaves, want <= 400", got)
 	}
-	// No content should be lost. Merges insert a "\n\n" separator between
-	// two non-empty bodies, so the total grows by at most 2 chars per
-	// merge (< 1000 merges) but never shrinks below the original.
+	// No content should be lost — and the absorbed leaf's title is kept
+	// as a "**leaf**" heading line, so each merge (< 1000 of them) adds
+	// that plus two "\n\n" separators; the total never shrinks.
 	orig := 1000 * 50
-	if got := totalContentLen(capped); got < orig || got > orig+2*1000 {
-		t.Errorf("content not preserved: got %d chars, want in [%d, %d]", got, orig, orig+2*1000)
+	perMerge := len("**leaf**") + 4
+	if got := totalContentLen(capped); got < orig || got > orig+perMerge*1000 {
+		t.Errorf("content not preserved: got %d chars, want in [%d, %d]", got, orig, orig+perMerge*1000)
 	}
 }
 
@@ -122,10 +123,12 @@ func TestCapLeafSections_SingleLeafParentsReduce(t *testing.T) {
 	if got := countLeafSections(capped); got > 400 {
 		t.Errorf("after cap: %d leaves, want <= 400 (the bug let 1465 through)", got)
 	}
-	// No content lost. Collapses/merges insert at most a "\n\n" (2 chars)
-	// per fold; with < 1000 folds total the upper bound is generous.
-	if got := totalContentLen(capped); got < orig || got > orig+2*1000 {
-		t.Errorf("content not preserved: got %d chars, want in [%d, %d]", got, orig, orig+2*1000)
+	// No content lost. Every collapse or merge keeps the absorbed title
+	// ("**body**" or "**heading**", at most 11 chars) plus two "\n\n"
+	// separators; with < 2000 folds the upper bound is generous.
+	perFold := len("**heading**") + 4
+	if got := totalContentLen(capped); got < orig || got > orig+perFold*2000 {
+		t.Errorf("content not preserved: got %d chars, want in [%d, %d]", got, orig, orig+perFold*2000)
 	}
 }
 
@@ -253,4 +256,39 @@ func totalContentLen(sections []Section) int {
 		n += totalContentLen(sections[i].Children)
 	}
 	return n
+}
+
+// Merging two leaves under the cap keeps the absorbed leaf's title as a
+// heading line in the merged body. A 10-K's "Item 2. Properties" used to
+// disappear after the one-word "Item 1B. Unresolved Staff Comments".
+func TestCapLeafSections_MergeKeepsTheAbsorbedTitle(t *testing.T) {
+	tree := []Section{{Level: 1, Title: "PART I", Children: []Section{
+		{Level: 2, Title: "Item 1B. Unresolved Staff Comments", Content: "None.", PageStart: 20, PageEnd: 20},
+		{Level: 2, Title: "Item 2. Properties", Content: "We consider our plants suitable.", PageStart: 20, PageEnd: 20},
+		{Level: 2, Title: "Item 7. MD&A", Content: strings.Repeat("z", 5000), PageStart: 22, PageEnd: 40},
+	}}}
+	out := capLeafSections(tree, 2)
+	kids := out[0].Children
+	if len(kids) != 2 {
+		t.Fatalf("want 2 leaves after cap, got %d", len(kids))
+	}
+	m := kids[0]
+	if m.Title != "Item 1B. Unresolved Staff Comments" {
+		t.Errorf("survivor title changed: %q", m.Title)
+	}
+	want := "None.\n\n**Item 2. Properties**\n\nWe consider our plants suitable."
+	if m.Content != want {
+		t.Errorf("merged content\n got %q\nwant %q", m.Content, want)
+	}
+}
+
+func TestAbsorbChildIntoParentKeepsTheChildTitle(t *testing.T) {
+	p := Section{Title: "PART I", Content: "", PageStart: 3}
+	absorbChildIntoParent(&p, Section{Title: "Item 1. Business", Content: "Founded in 1982.", PageStart: 3, PageEnd: 5})
+	if want := "**Item 1. Business**\n\nFounded in 1982."; p.Content != want {
+		t.Errorf("got %q want %q", p.Content, want)
+	}
+	if p.PageEnd != 5 {
+		t.Errorf("page end not unioned: %d", p.PageEnd)
+	}
 }

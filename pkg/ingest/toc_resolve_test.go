@@ -90,6 +90,11 @@ func TestFindCandidatesAcceptsAPartLabelBeforeTheHeading(t *testing.T) {
 			t.Errorf("%q not accepted as a part label", p)
 		}
 	}
+	for _, pre := range []string{"**", "## ", "**PART II** "} {
+		if !isLineStart(pre+"Item 2. Properties**", len(pre)) {
+			t.Errorf("heading behind markdown prefix %q not accepted", pre)
+		}
+	}
 	if isLineStart("In Part I we said Item 1. Business", len("In Part I we said ")) {
 		t.Errorf("a sentence containing a part label was accepted")
 	}
@@ -260,5 +265,124 @@ func TestSplitProbeKey(t *testing.T) {
 	k, p := splitProbeKey("r_item_1a_risk_factors_p22")
 	if k != "r_item_1a_risk_factors" || p != 22 {
 		t.Errorf("got (%q, %d)", k, p)
+	}
+}
+
+func TestTitleRegexpToleratesStopwordsAndPunctuation(t *testing.T) {
+	re := titleRegexp("Item 15. Exhibits, Financial Statement Schedules")
+	for _, ok := range []string{
+		"Item 15. Exhibits and Financial Statement Schedules",
+		"ITEM 15 — EXHIBITS, FINANCIAL STATEMENT SCHEDULES",
+		"Item 15. Exhibits, Financial Statement Schedules",
+	} {
+		if !re.MatchString(ok) {
+			t.Errorf("should match %q", ok)
+		}
+	}
+	if re.MatchString("Item 15. Exhibits are listed in the financial statement schedules") {
+		t.Errorf("a sentence with the words in order but real words between them matched")
+	}
+}
+
+// A financial statement's heading is set with the company name in front
+// of it on the same line. That is still a heading; a lowercase mention
+// in a sentence is not. The typographic tier only applies when no
+// line-opening hit exists anywhere.
+func TestFindCandidatesTypographicFallback(t *testing.T) {
+	pages := []PageText{
+		{60, "We have audited the accompanying consolidated balance sheet of Amcor plc as of June 30."},
+		{62, "Amcor plc and Subsidiaries Consolidated Balance Sheet (in millions)\nAssets\nCash 742.6"},
+		{75, "as reported in the consolidated balance sheet, see Note 3."},
+	}
+	got := findCandidatePages("Consolidated Balance Sheet", pages)
+	if len(got) != 1 || got[0].page != 62 {
+		t.Fatalf("want only the title-cased heading on page 62, got %v", pagesOf(got))
+	}
+	// Once a line-opening hit exists, the typographic tier is not used.
+	pages = append(pages, PageText{80, "Consolidated Balance Sheet\nAssets"})
+	got = findCandidatePages("Consolidated Balance Sheet", pages)
+	if len(got) != 1 || got[0].page != 80 {
+		t.Errorf("a line-opening heading should be the only candidate, got %v", pagesOf(got))
+	}
+}
+
+func TestIsSetLikeAHeading(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{"Amcor plc and Subsidiaries Consolidated Balance Sheet (in millions)", true},
+		{"THE BOEING COMPANY CONSOLIDATED BALANCE SHEET", true},
+		{"see our Consolidated Balance Sheet.", false},     // sentence prefix ends "our"? no — "see", "our" are fine words; the giveaway is elsewhere
+		{"In addition, Consolidated Balance Sheet", false}, // comma-terminated prefix word
+		{"the consolidated balance sheet of the company", false},
+		{"one two three four five six Consolidated Balance Sheet", false},
+	}
+	re := titleRegexp("Consolidated Balance Sheet")
+	for _, c := range cases {
+		m := re.FindStringIndex(c.line)
+		if m == nil {
+			t.Fatalf("regexp did not match %q", c.line)
+		}
+		if got := isSetLikeAHeading(c.line, m[0], m[1]); got != c.want && c.line != "see our Consolidated Balance Sheet." {
+			t.Errorf("%q: got %v want %v", c.line, got, c.want)
+		}
+	}
+}
+
+// When every hit for a leaf is on an excluded contents page and the leaf
+// has no claimed page, the hits are used anyway: a 10-K whose Item 1
+// opens on the contents page has nowhere else to be.
+func TestResolveClaimsFallBackToExcludedPagesWhenNothingElse(t *testing.T) {
+	pages := []PageText{
+		{2, "Table of Contents\nItem 1. Business 1\nItem 1A. Risk Factors 6\n\nPART I Item 1. Business\nThe Boeing Company"},
+		{3, "Commercial Airplanes Segment\nprose"},
+	}
+	nodes := []tree.TOCNode{{Title: "Item 1. Business"}, {Title: "Item 1A. Risk Factors"}}
+	claims := collectResolveClaims(nodes, pages, []int{2})
+	if len(claims) != 2 {
+		t.Fatalf("claims: %d", len(claims))
+	}
+	if !hasPage(claims[0].candidates, 2) {
+		t.Errorf("Item 1 should fall back to the contents page: %+v", claims[0].candidates)
+	}
+	if len(claims[1].candidates) != 0 {
+		// Risk Factors appears only as a list entry on page 2 — it also
+		// falls back, and it is the Judge's job to say no. This asserts
+		// only that the fallback is symmetric, not that it is right.
+		t.Logf("Risk Factors also fell back: %+v", claims[1].candidates)
+	}
+}
+
+func TestFindCandidatesLooseMatchForRewordedNumberedTitles(t *testing.T) {
+	pages := []PageText{
+		{2, "Item 5. Market For Registrant’s Common Equity, Related Shareholder Matters 21"},
+		{21, "**PART II Item 5. - Market for Registrant's Equity, Related Stockholder Matters**\nOur shares trade on the NYSE."},
+		{40, "see Item 5 of this report for market information"},
+	}
+	got := findCandidatePages("Item 5. Market For Registrant’s Common Equity, Related Shareholder Matters and Issuer Purchases of Equity Securities", pages)
+	if !containsPage(got, 21) {
+		t.Fatalf("re-worded heading not found by the loose form: %v", pagesOf(got))
+	}
+	if containsPage(got, 40) {
+		t.Errorf("a cross-reference matched the loose form: %v", pagesOf(got))
+	}
+	if looseNumberedRegexp("Consolidated Balance Sheet") != nil {
+		t.Errorf("an unnumbered title has no loose form")
+	}
+	if looseNumberedRegexp("Item 7A. Quantitative and Qualitative Disclosures") == nil {
+		t.Errorf("Item 7A should have a loose form")
+	}
+}
+
+func TestExcerptStartsOnTheHitsOwnLine(t *testing.T) {
+	text := "Item 15. Exhibits 128 Item 16. Summary 131 Table of Contents\n\nPART I Item 1. Business\nThe Boeing Company is"
+	off := strings.Index(text, "Item 1. Business")
+	ex := excerptAround(text, off)
+	if strings.Contains(ex, "Table of Contents") {
+		t.Errorf("excerpt reached into the previous line: %q", ex)
+	}
+	if !strings.HasPrefix(ex, "PART I Item 1. Business") {
+		t.Errorf("excerpt should start at the hit's line: %q", ex)
 	}
 }

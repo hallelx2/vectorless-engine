@@ -6,7 +6,9 @@ import (
 	"log"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/hallelx2/llmgate"
 
@@ -54,9 +56,9 @@ import (
 // It makes the extraction body window irrelevant to page accuracy, and it
 // works for any document, not only ones with a numbered contents page.
 
-// Window around a located heading that is shown to the Judge: a little
-// before, so a cross-reference's sentence is visible as such, and enough
-// after to see a section actually begin. This replaces sending the page
+// Window around a located heading that is shown to the Judge: its own
+// line up to excerptBefore characters back, and enough after to see a
+// section actually begin. This replaces sending the page
 // head, which missed every section that was third or later on a shared
 // page — Items 3 and 4 of a 10-K after 1B and 2, 9B and 9C after 9 and
 // 9A. Go finds the exact spot; the model only has to confirm it.
@@ -100,7 +102,7 @@ type pageHit struct {
 // and spacing differences between a contents entry and a body heading:
 // "Item 1A. Risk Factors" must find "ITEM 1A — RISK FACTORS".
 func titleRegexp(title string) *regexp.Regexp {
-	words := strings.Fields(normalise(title))
+	words := contentWords(title)
 	if len(words) == 0 {
 		return nil
 	}
@@ -113,17 +115,47 @@ func titleRegexp(title string) *regexp.Regexp {
 	for i, w := range words {
 		parts[i] = regexp.QuoteMeta(w)
 	}
-	return regexp.MustCompile(`(?i)` + strings.Join(parts, `[^a-z0-9]+`))
+	// Between two content words, any punctuation and any run of
+	// stopwords: "Exhibits, Financial Statement Schedules" in the
+	// contents is "Exhibits and Financial Statement Schedules" on its
+	// page (BOEING_2022_10K, Item 15).
+	sep := `[^a-z0-9]+(?:(?:` + strings.Join(stopwords, "|") + `)[^a-z0-9]+)*`
+	return regexp.MustCompile(`(?i)` + strings.Join(parts, sep))
 }
 
-// findCandidatePages returns where the title appears as a HEADING —
-// opening a line — on any page, in page order. A mention inside a line
-// is a cross-reference, not a section, and is not a candidate.
+// stopwords are dropped from a title before matching and tolerated
+// between its words on the page.
+var stopwords = []string{"and", "of", "the", "to", "for", "a", "an", "in", "on", "or"}
+
+// contentWords is the normalised title minus stopwords.
+func contentWords(title string) []string {
+	var out []string
+	for _, w := range strings.Fields(normalise(title)) {
+		stop := false
+		for _, sw := range stopwords {
+			if w == sw {
+				stop = true
+				break
+			}
+		}
+		if !stop {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// findCandidatePages returns where the title appears as a HEADING on any
+// page, in page order. A mention inside a sentence is a cross-reference,
+// not a section, and is not a candidate.
 //
-// There is deliberately no fallback to "the title appears somewhere in
-// the page head": that admitted every "see Item 1A" cross-reference as a
-// candidate and cost a question each. Measured on ADOBE_2022_10K the
-// heading-only rule lost none of the pages the head rule found.
+// Two tiers. A hit that opens its line is a heading. Only when a title
+// has NO such hit anywhere does the second tier apply: a hit that is set
+// like a heading — every content word capitalised in the text itself —
+// with at most a few words before it on the line. That is how a
+// financial statement is titled: "Amcor plc and Subsidiaries Consolidated
+// Balance Sheet (in millions)". A lowercase "see the consolidated balance
+// sheet" is never a candidate.
 func findCandidatePages(title string, pages []PageText) []pageHit {
 	if len(normalise(title)) < 8 {
 		return nil
@@ -133,7 +165,58 @@ func findCandidatePages(title string, pages []PageText) []pageHit {
 		return nil
 	}
 
-	var out []pageHit
+	lineStart, typographic := scanPages(re, pages)
+	// A numbered section is often re-worded on its own page: "Item 5.
+	// Market For Registrant's Common Equity, ..." in the contents is
+	// "Item 5. - Market for Registrant's Equity, ..." on page 21 of
+	// AMCOR_2020_10K. The label, number and first word are distinctive
+	// enough to add as candidates; the Judge sees the page and decides.
+	if loose := looseNumberedRegexp(title); loose != nil {
+		ls, ty := scanPages(loose, pages)
+		lineStart = unionHits(lineStart, ls)
+		typographic = unionHits(typographic, ty)
+	}
+	out := lineStart
+	if len(out) == 0 {
+		out = typographic
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].page < out[j].page })
+	return out
+}
+
+// unionHits merges two hit lists, one hit per page, the first list's
+// offset winning.
+func unionHits(a, b []pageHit) []pageHit {
+	out := append([]pageHit(nil), a...)
+	for _, h := range b {
+		if !hasPage(out, h.page) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// numberedLabels open the titles that looseNumberedRegexp applies to.
+var numberedLabels = map[string]bool{"item": true, "part": true, "note": true, "section": true, "chapter": true, "article": true}
+
+// looseNumberedRegexp matches a numbered title by its label, number and
+// first content word only. Nil for titles that are not numbered, or too
+// short for the loose form to be any looser.
+func looseNumberedRegexp(title string) *regexp.Regexp {
+	words := contentWords(title)
+	if len(words) < 4 || !numberedLabels[words[0]] {
+		return nil
+	}
+	if _, err := strconv.Atoi(strings.TrimRight(words[1], "abcdefghijklmnopqrstuvwxyz")); err != nil {
+		return nil
+	}
+	sep := `[^a-z0-9]+(?:(?:` + strings.Join(stopwords, "|") + `)[^a-z0-9]+)*`
+	return regexp.MustCompile(`(?i)` + regexp.QuoteMeta(words[0]) + sep + regexp.QuoteMeta(words[1]) + sep + regexp.QuoteMeta(words[2]) + `\b`)
+}
+
+// scanPages finds each page's first line-opening hit and, failing that,
+// its first typographic-heading hit.
+func scanPages(re *regexp.Regexp, pages []PageText) (lineStart, typographic []pageHit) {
 	for _, p := range pages {
 		if p.PageNumber <= 0 {
 			continue
@@ -142,15 +225,63 @@ func findCandidatePages(title string, pages []PageText) []pageHit {
 		if len(text) > scanChars {
 			text = text[:scanChars]
 		}
+		foundLS, foundTypo := false, false
 		for _, m := range re.FindAllStringIndex(text, -1) {
-			if isLineStart(text, m[0]) {
-				out = append(out, pageHit{page: p.PageNumber, offset: m[0]})
+			switch {
+			case !foundLS && isLineStart(text, m[0]):
+				lineStart = append(lineStart, pageHit{page: p.PageNumber, offset: m[0]})
+				foundLS = true
+			case !foundTypo && isSetLikeAHeading(text, m[0], m[1]):
+				typographic = append(typographic, pageHit{page: p.PageNumber, offset: m[0]})
+				foundTypo = true
+			}
+			if foundLS {
 				break
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].page < out[j].page })
-	return out
+	return lineStart, typographic
+}
+
+// maxHeadingPrefixWords is how many words may precede a typographic
+// heading on its line — a company name, not a sentence.
+const maxHeadingPrefixWords = 5
+
+// isSetLikeAHeading reports whether the match at [lo,hi) is capitalised
+// the way a heading is and sits near the start of its line.
+func isSetLikeAHeading(text string, lo, hi int) bool {
+	ls := lo
+	for ls > 0 && text[ls-1] != '\n' {
+		ls--
+	}
+	prefix := strings.Fields(text[ls:lo])
+	if len(prefix) > maxHeadingPrefixWords {
+		return false
+	}
+	for _, w := range prefix {
+		// A sentence before the match, not a label: "see the", "in our".
+		if strings.HasSuffix(w, ".") || strings.HasSuffix(w, ",") || strings.HasSuffix(w, ";") {
+			return false
+		}
+	}
+	match := text[lo:hi]
+	for _, w := range strings.Fields(match) {
+		r := []rune(w)[0]
+		if unicode.IsLetter(r) && !unicode.IsUpper(r) && !isStopword(strings.ToLower(w)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isStopword(w string) bool {
+	w = strings.Trim(w, ".,;:()")
+	for _, sw := range stopwords {
+		if w == sw {
+			return true
+		}
+	}
+	return false
 }
 
 // rePartLabel is the one thing allowed before a heading on its line: the
@@ -167,15 +298,26 @@ func isLineStart(text string, off int) bool {
 	for lo > 0 && text[lo-1] != '\n' {
 		lo--
 	}
-	prefix := strings.TrimSpace(text[lo:off])
+	// The parser marks a heading it folded into a neighbour's body as
+	// **bold**; a markdown source may use #. Neither is content.
+	prefix := strings.TrimSpace(strings.Trim(text[lo:off], " \t*_#"))
 	return prefix == "" || rePartLabel.MatchString(prefix)
 }
 
-// excerptAround cuts the window the Judge is shown.
+// excerptAround cuts the window the Judge is shown: from the start of
+// the hit's own line, since a heading opens its line and a typographic
+// hit's label prefix is on the same line, through enough text after it
+// to see the section begin. Nothing from earlier lines — on a page that
+// opens a section beneath its contents list (BOEING_2022_10K, Item 1)
+// the lines above are the list, and showing them made the Judge read the
+// heading as one more entry.
 func excerptAround(text string, off int) string {
-	lo := off - excerptBefore
-	if lo < 0 {
-		lo = 0
+	lo := off
+	for lo > 0 && text[lo-1] != '\n' {
+		lo--
+	}
+	if off-lo > excerptBefore {
+		lo = off - excerptBefore
 	}
 	hi := off + excerptAfter
 	if hi > len(text) {
@@ -223,10 +365,20 @@ func collectResolveClaims(nodes []tree.TOCNode, pages []PageText, exclude []int)
 			seen[key]++
 
 			var cands []pageHit
-			for _, h := range findCandidatePages(n.Title, pages) {
+			hits := findCandidatePages(n.Title, pages)
+			for _, h := range hits {
 				if !skip[h.page] {
 					cands = append(cands, h)
 				}
+			}
+			if len(cands) == 0 && len(hits) > 0 && n.StartPage == 0 {
+				// Every hit is on a contents page. Usually that means the
+				// title only appears in the list — but a 10-K whose Item 1
+				// starts on the same page as its contents (BOEING_2022_10K)
+				// has nowhere else to be found. Exclusion is a preference
+				// when it would otherwise leave nothing; the Judge is told
+				// to say no to a list entry.
+				cands = hits
 			}
 			if n.StartPage > 0 && !skip[n.StartPage] && !hasPage(cands, n.StartPage) {
 				// Extraction's guess is a candidate too — shown from its
