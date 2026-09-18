@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -35,20 +36,23 @@ import (
 )
 
 type dump struct {
-	Doc      string         `json:"doc"`
-	Pages    int            `json:"pages"`
-	Seconds  float64        `json:"seconds"`
-	Requests int            `json:"requests"`
-	InTokens int            `json:"in_tokens"`
-	CostUSD  float64        `json:"cost_usd"`
-	Nodes    []tree.TOCNode `json:"nodes"`
-	Err      string         `json:"err,omitempty"`
+	Doc        string         `json:"doc"`
+	Pages      int            `json:"pages"`
+	Seconds    float64        `json:"seconds"`
+	Requests   int            `json:"requests"`
+	InTokens   int            `json:"in_tokens"`
+	CostUSD    float64        `json:"cost_usd"`
+	Generative int            `json:"generative_calls"`
+	Degraded   []string       `json:"degraded,omitempty"`
+	Nodes      []tree.TOCNode `json:"nodes"`
+	Err        string         `json:"err,omitempty"`
 }
 
 func main() {
 	docs := flag.String("docs", "", "directory of PDFs")
 	out := flag.String("out", "", "directory for per-document tree JSON")
 	noJudge := flag.Bool("no-judge", false, "run detection/verification on the chat model instead")
+	judgeOnly := flag.Bool("judge-only", false, "no chat model at all: any generative call fails loudly, so the tree is provably Judge-built")
 	minimal := flag.Bool("minimal", false, "TOCBuilder.MinimalContext: prefilter + truncation + two-stage scan")
 	// 300s, not the pipeline's 90s default: GLM's extraction call on the
 	// z.ai gateway routinely exceeds 90s on a 100+ page filing, and a
@@ -91,13 +95,18 @@ func main() {
 		}
 		d.Pages = len(pages)
 
-		b := &ingest.TOCBuilder{LLM: client, Judge: judge, LLMCallTimeout: *callTimeout, MinimalContext: *minimal}
+		llm := client
+		if *judgeOnly {
+			llm = refusingClient{}
+		}
+		b := &ingest.TOCBuilder{LLM: llm, Judge: judge, LLMCallTimeout: *callTimeout, MinimalContext: *minimal}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		start := time.Now()
 		nodes, usage, err := b.Build(ctx, pages)
 		cancel()
 		d.Seconds = time.Since(start).Seconds()
 		d.Requests, d.InTokens, d.CostUSD = usage.LLMCalls, usage.InputTokens, usage.CostUSD
+		d.Generative, d.Degraded = usage.GenerativeCalls, usage.Degraded
 		if err != nil {
 			d.Err = err.Error()
 		}
@@ -105,8 +114,8 @@ func main() {
 		write(*out, d)
 
 		leaves := countLeaves(nodes)
-		fmt.Printf("  %-28s %4d pages  %6.1fs  %3d req  %3d leaves  $%.4f %s\n",
-			name, d.Pages, d.Seconds, d.Requests, leaves, d.CostUSD, d.Err)
+		fmt.Printf("  %-28s %4d pages  %6.1fs  %3d req  %d gen  %3d leaves  $%.4f %s %s\n",
+			name, d.Pages, d.Seconds, d.Requests, d.Generative, leaves, d.CostUSD, d.Err, strings.Join(d.Degraded, "; "))
 	}
 }
 
@@ -216,3 +225,13 @@ func dotEnv(key string) string {
 	}
 	return ""
 }
+
+// refusingClient is the chat model for -judge-only: every call fails,
+// so a tree can only have come from the Judge.
+type refusingClient struct{}
+
+func (refusingClient) Complete(context.Context, llmgate.Request) (*llmgate.Response, error) {
+	return nil, errors.New("tocdump -judge-only: a generative call was attempted")
+}
+
+func (refusingClient) CountTokens(_ context.Context, s string) (int, error) { return len(s) / 4, nil }

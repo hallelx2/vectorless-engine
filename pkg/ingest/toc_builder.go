@@ -137,6 +137,11 @@ type Usage struct {
 	CostUSD      float64
 	LLMCalls     int
 
+	// GenerativeCalls counts the chat-completion calls among LLMCalls.
+	// Zero on a Judge-only build; the number to watch when the goal is
+	// to have no generative call in the TOC stage at all.
+	GenerativeCalls int
+
 	// Degraded lists the Judge-path steps that could not complete and
 	// what Build did instead. Empty means every step ran as configured.
 	// A document built with a non-empty Degraded is not wrong, but it is
@@ -162,6 +167,7 @@ func (u *Usage) add(r *llmgate.Response) {
 	u.TotalTokens += r.Usage.TotalTokens
 	u.CostUSD += r.Usage.CostUSD
 	u.LLMCalls++
+	u.GenerativeCalls++
 }
 
 // Build runs the three-phase pipeline on pages and returns a
@@ -199,15 +205,34 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	}
 
 	// Phase 2: extract.
+	//
+	// With a Judge and a contents page, code lists the entries and the
+	// Judge confirms them — one request, seconds. The generative
+	// extractor runs only when the contents did not parse into enough
+	// entries to trust, or when the Judge failed (recorded as a
+	// degradation, since it is minutes and a body window instead).
 	var nodes []tree.TOCNode
+	var printed map[string]int
 	var err error
-	if len(tocPages) > 0 {
-		nodes, err = b.extractFromTOCPages(ctx, pages, tocPages, &usage)
-	} else {
-		nodes, err = b.generateNoTOC(ctx, pages, &usage)
+	extracted := false
+	if len(tocPages) > 0 && b.Judge != nil {
+		var handled bool
+		nodes, printed, handled, err = b.extractFromTOCPagesJudge(ctx, pages, tocPages, &usage)
+		if err != nil {
+			log.Printf("toc: judge extraction failed, falling back to the generative extractor: %v", err)
+			usage.degrade("extraction", "generative extractor after a failed Judge request: "+err.Error())
+		}
+		extracted = handled && err == nil
 	}
-	if err != nil {
-		return nil, usage, err
+	if !extracted {
+		if len(tocPages) > 0 {
+			nodes, err = b.extractFromTOCPages(ctx, pages, tocPages, &usage)
+		} else {
+			nodes, err = b.generateNoTOC(ctx, pages, &usage)
+		}
+		if err != nil {
+			return nil, usage, err
+		}
 	}
 	if len(nodes) == 0 {
 		return nil, usage, nil
@@ -235,6 +260,12 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		b.resolvePagesOrKeep(ctx, nodes, pages, tocPages, &usage)
 	} else {
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
+	}
+
+	// Leaves the resolver could not place get their printed page plus
+	// the offset the resolved leaves agree on.
+	if n := calibrateFromPrinted(nodes, printed, lastPage(pages)); n > 0 {
+		log.Printf("toc: %d leaves placed from printed page numbers", n)
 	}
 
 	// Derive end pages from sibling order. Done last so verified
