@@ -6,7 +6,7 @@
 **Issues:** HAL-1367 (every 10-K leaf loses its page), HAL-1366 (minimum context)
 **Question:** extraction returns correct titles and no pages on every long filing, because the generative call sees 48k of a 500k-character body. Can code find the candidates and a Judge pick the page, in one or two requests, without widening that window?
 
-## Result: yes. Every gold evidence page in 17 filings lands inside a leaf, median span 25 pages, at two requests and under a cent per document.
+## Result: yes. Every gold evidence page in 19 filings lands inside a leaf, median span 36 pages against 183, at two requests and under a cent per document.
 
 Resolver only, applied to the tree the baseline produced, page 0 → resolved:
 
@@ -26,7 +26,7 @@ For scale: the baseline's extraction call that produced these trees took
 zero. Elapsed here includes Jev contents-page detection (one request) and
 resolution (one request); the spread is the API, not the document.
 
-## The evidence-page gate, 17 of 21 filings
+## The evidence-page gate, 19 of 21 filings
 
 `coverage.py` asks the question that matters for retrieval: is each gold
 evidence page inside some leaf, and how big is that leaf? A
@@ -34,7 +34,7 @@ whole-document leaf covers everything and locates nothing, so both
 columns count.
 
 The honest baseline is the eleven trees the original binary produced,
-whose leaves had no pages. Six more trees came from a 900-second re-run
+whose leaves had no pages. Eight more trees came from a 900-second re-run
 with the new binary, whose `Build` already resolves pages, so they are
 "after" on both sides and are excluded from the before row.
 
@@ -42,16 +42,16 @@ with the new binary, whose `Build` already resolves pages, so they are
 |---|---|---|---|---|---|---|---|
 | baseline trees, GLM extraction, no resolver | 11 | 16 / 20 | 0.800 | **183 p** | 1,840 s | 32 | $0.246 |
 | same trees, resolved on Jev | 11 | **20 / 20** | **1.000** | **36 p** | 699 s | 20 | $0.0046 |
-| all 17 usable trees, resolved | 17 | **36 / 36** | **1.000** | **25 p** | 979 s | 32 | $0.0080 |
+| all 19 usable trees, resolved | 19 | **44 / 44** | **1.000** | **36 p** | 828 s | 36 | $0.0089 |
 
-Leaves with a page across the 17: **205 → 441 of 479**. Of the 205
-before, 192 belong to the six re-run trees; the eleven old-binary trees
+Leaves with a page across the 19: **238 → 496 of 543**. Of the 238
+before, 225 belong to the eight re-run trees; the eleven old-binary trees
 had 13 between them.
 
 The baseline's 0.800 is not location: with no leaf pages,
 `deriveEndPages` gives the first leaf of each part the whole part, so a
 gold page is "covered" by a 183-page leaf. Resolved, the tightest leaf
-holding a gold page is 25 pages at the median, and every gold page in
+holding a gold page is 36 pages at the median, and every gold page in
 the set is inside one.
 
 The resolver's build time is Jev API latency in this window — two
@@ -79,17 +79,24 @@ Per document, leaves with a page before → after:
 | JOHNSON_JOHNSON_2022_10K | 36 | 30 → 30 | re-run tree |
 | KRAFTHEINZ_2019_10K | 63 | 55 → 55 | re-run tree |
 | ORACLE_2021_10K | 22 | 22 → 22 | re-run tree |
+| PFIZER_2021_10K | 40 | 33 → 33 | re-run tree, extraction 840 s |
+| VERIZON_2022_10K | 24 | 0 → 22 | re-run tree; Build's own resolver left 0, `tocresolve` placed 22 — see below |
 
 Not in the set: GENERALMILLS_2020_10K (parser returns one page,
-HAL-1365), NIKE_2019_10K (GLM extraction exceeded 900 s twice),
-PFIZER_2021_10K and VERIZON_2022_10K (extraction still running when this
-was measured). The four are all extraction, the one generative call left
-in this phase, which took 103–828 s per document against the resolver's
-two requests.
+HAL-1365) and NIKE_2019_10K (GLM extraction exceeded 900 s twice). Both
+are outside the resolver. Extraction is the one generative call left in
+this phase and took 103–840 s per document against the resolver's two
+requests.
 
-The 38 leaves still unplaced on 3M, Johnson & Johnson, Kraft Heinz and
-Intel are the next thing to look at; they are deeper note-level titles
-and have not been examined yet.
+VERIZON is worth a look: the re-run's `Build` ran the resolver and left
+every leaf at 0, while `tocresolve` on the same tree placed 22 of 24
+minutes later. The likely cause is a failed Judge request inside Build
+(logged, falls back to the generative verifier, which rejects the
+printed page numbers) — the same silent-degradation shape as HAL-1364.
+
+The 47 leaves still unplaced on 3M, Johnson & Johnson, Kraft Heinz,
+Pfizer and Intel are the next thing to look at; they are deeper
+note-level titles and have not been examined yet.
 
 ## What it took, in the order each step recovered pages
 
