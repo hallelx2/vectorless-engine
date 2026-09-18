@@ -204,7 +204,15 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// starts the section. Mismatches clear the page (set to 0)
 	// rather than making one up — downstream treats zero as
 	// open/unknown.
-	if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
+	// With a Judge, resolution subsumes verification: it searches every
+	// page head for each title and asks whether the title BEGINS the page,
+	// with extraction's guess as one candidate among the hits. That is
+	// verification with search, and it is what makes the extraction body
+	// window irrelevant to page accuracy (HAL-1367). Plain verification
+	// remains the fallback when resolution cannot run.
+	if resolved, handled := b.resolvePagesJudge(ctx, nodes, pages, tocPages, &usage); handled {
+		applyResolvedPages(nodes, resolved)
+	} else if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
 		applyJudgeVerdicts(nodes, verdicts)
 	} else {
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
@@ -857,7 +865,31 @@ func flattenForVerify(nodes []tree.TOCNode) []*tree.TOCNode {
 // end pages cap at their parent's, which is what readers expect
 // for a TOC.
 func deriveEndPages(nodes []tree.TOCNode, docLastPage int) {
+	inheritParentStarts(nodes)
 	deriveEndPagesIn(nodes, docLastPage)
+}
+
+// inheritParentStarts gives a container with no page of its own — a
+// "PART II" whose only content is its items — the first page any of its
+// children start on. Without it the container has no EndPage, and every
+// child in the previous part that shares a start page with a sibling
+// falls through to the document's last page as its end (HAL-1367).
+func inheritParentStarts(nodes []tree.TOCNode) {
+	for i := range nodes {
+		n := &nodes[i]
+		if len(n.Nodes) == 0 {
+			continue
+		}
+		inheritParentStarts(n.Nodes)
+		if n.StartPage > 0 {
+			continue
+		}
+		for _, c := range n.Nodes {
+			if c.StartPage > 0 && (n.StartPage == 0 || c.StartPage < n.StartPage) {
+				n.StartPage = c.StartPage
+			}
+		}
+	}
 }
 
 func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {

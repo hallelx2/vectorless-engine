@@ -69,3 +69,58 @@ func BenchDetectTOCFanout(ctx context.Context, b *TOCBuilder, pages []PageText, 
 // validation, so the filter can be checked against every real TOC page
 // before it is trusted to skip anything.
 func PrefilterAny(text string) bool { return prefilterTOC(text).Any() }
+
+// BenchResolvePages runs Judge-backed page resolution alone, over an
+// already-extracted tree. Exists so the resolver can be validated on a
+// real document without paying for extraction again.
+func BenchResolvePages(ctx context.Context, b *TOCBuilder, nodes []tree.TOCNode, pages []PageText, exclude []int) (Usage, bool) {
+	var usage Usage
+	resolved, handled := b.resolvePagesJudge(ctx, nodes, pages, exclude, &usage)
+	if handled {
+		applyResolvedPages(nodes, resolved)
+	}
+	return usage, handled
+}
+
+// BenchFinalise derives end pages and stamps IDs, as the tail of Build
+// does, so a resolved tree is comparable to a built one.
+func BenchFinalise(nodes []tree.TOCNode, pages []PageText) {
+	deriveEndPages(nodes, lastPage(pages))
+	stampNodeIDs(nodes, "")
+}
+
+// BenchLikelyTOCPages returns pages the structural pre-filter rates as
+// contents pages, for a caller that has a tree but did not run detection.
+// The bar is high on purpose: a wrongly-excluded body page loses one
+// candidate; a wrongly-included contents page wins every question.
+func BenchLikelyTOCPages(pages []PageText) []int {
+	var out []int
+	for _, p := range pages {
+		if s := prefilterTOC(p.Text); s.Keyword && (s.Items >= 3 || s.Entries >= 5) {
+			out = append(out, p.PageNumber)
+		}
+	}
+	return out
+}
+
+// BenchCandidate is one leaf's candidate set, for a command that wants to
+// show why a leaf did or did not resolve.
+type BenchCandidate struct {
+	Title   string
+	Claimed int
+	Pages   []int
+}
+
+// BenchCandidates returns what the resolver would ask about, without
+// asking. Pure code: no Judge, no cost.
+func BenchCandidates(nodes []tree.TOCNode, pages []PageText, exclude []int) []BenchCandidate {
+	var out []BenchCandidate
+	for _, c := range collectResolveClaims(nodes, pages, exclude) {
+		bc := BenchCandidate{Title: c.title, Claimed: c.claimed}
+		for _, h := range c.candidates {
+			bc.Pages = append(bc.Pages, h.page)
+		}
+		out = append(out, bc)
+	}
+	return out
+}

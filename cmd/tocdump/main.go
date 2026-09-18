@@ -169,7 +169,16 @@ func buildClient() (llmgate.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return retry.New(retry.Config{MaxRetries: 3})(c), nil
+	// A per-minute rate limit needs backoff measured in tens of seconds,
+	// not the default 500ms-doubling that tops out around 3.5s total.
+	// Three retries at that pace against z.ai's [1302] "Rate limit reached
+	// for requests" burned a whole 21-document run to 0-leaf trees on
+	// 2026-09-18. Six retries from 5s, capped at 60s, rides out a window.
+	return retry.New(retry.Config{
+		MaxRetries: 6,
+		BaseDelay:  5 * time.Second,
+		MaxDelay:   60 * time.Second,
+	})(c), nil
 }
 
 func readPages(path string) ([]ingest.PageText, error) {

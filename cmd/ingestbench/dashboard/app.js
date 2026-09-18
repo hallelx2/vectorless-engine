@@ -6,9 +6,14 @@
 
 const POLL_MS = 1000;
 const ARM = {
-  jev:        { label: 'Jev',  color: '#ff5a00', chip: 'jev' },
-  generative: { label: 'GLM',  color: '#3f3f46', chip: 'gen' },
+  jev:          { label: 'Jev',      color: '#ff5a00', chip: 'jev' },
+  'jev-min':    { label: 'Jev min',  color: '#ff9a5c', chip: 'jev' },
+  'jev-fanout': { label: 'Jev fan',  color: '#c94800', chip: 'jev' },
+  generative:   { label: 'GLM',      color: '#3f3f46', chip: 'gen' },
 };
+// Any arm not listed still renders, in a neutral colour, rather than
+// throwing on arm(x).color and blanking the whole chart.
+const arm = a => ARM[a] || { label: a, color: '#a1a1aa', chip: 'gen' };
 
 let events = [], lastLen = -1;
 
@@ -87,14 +92,15 @@ function docgrid() {
   document.getElementById('docgrid').innerHTML = pr.map(p => {
     const d = detects().filter(x => x.doc === p.doc);
     const live = [...running].some(k => k.startsWith(p.doc + '|'));
-    const chips = ['jev', 'generative'].map(a => {
+    const armsSeen = [...new Set(detects().concat(starts()).map(e => e.arm))];
+    const chips = armsSeen.map(a => {
       const e = d.find(x => x.arm === a);
-      if (e) return `<span class="chip ${ARM[a].chip}">${ARM[a].label} ${e.seconds.toFixed(1)}s · ${e.requests}r</span>`;
-      if (running.has(p.doc + '|' + a)) return `<span class="chip run pulsing">${ARM[a].label} running</span>`;
+      if (e) return `<span class="chip ${arm(a).chip}">${arm(a).label} ${e.seconds.toFixed(1)}s · ${e.requests}r</span>`;
+      if (running.has(p.doc + '|' + a)) return `<span class="chip run pulsing">${arm(a).label} running</span>`;
       return '';
     }).join('');
 
-    const pct = (d.length / 2) * 100;
+    const pct = armsSeen.length ? (d.length / armsSeen.length) * 100 : 0;
     return `<div class="doc ${live ? 'active' : d.length === 2 ? 'done' : ''}">
       <div class="n">${p.doc.replace(/_/g, ' ')}</div>
       <div class="m">${p.pages} pages · parsed ${p.seconds.toFixed(1)}s</div>
@@ -162,12 +168,13 @@ function charts() {
   const docs = [...new Set(detects().map(e => e.doc))].sort();
 
   const lat = [], req = [];
-  for (const d of docs) for (const a of ['jev', 'generative']) {
+  const armsSeen = [...new Set(detects().map(e => e.arm))];
+  for (const d of docs) for (const a of armsSeen) {
     const e = detects().find(x => x.doc === d && x.arm === a);
     if (!e) continue;
     const short = d.replace(/_/g, ' ').replace(/ 10K$/, '');
-    lat.push({ label: `${short} · ${ARM[a].label}`, v: e.seconds, t: fmtS(e.seconds), color: ARM[a].color });
-    req.push({ label: `${short} · ${ARM[a].label}`, v: e.requests, t: `${e.requests}`, color: ARM[a].color });
+    lat.push({ label: `${short} · ${arm(a).label}`, v: e.seconds, t: fmtS(e.seconds), color: arm(a).color });
+    req.push({ label: `${short} · ${arm(a).label}`, v: e.requests, t: `${e.requests}`, color: arm(a).color });
   }
   hbars('chart-latency', lat, 'detection phase only; parsing is shared and excluded');
   hbars('chart-requests', req, 'one batched request vs one call per scanned page');
@@ -197,7 +204,7 @@ function totals() {
     const e = byArm(a); if (!e.length) return '';
     const c = sum(e, x => x.cost_usd);
     return `<tr>
-      <td><span class="badge ${a === 'jev' ? 'badge-ember' : 'badge-filled'}">${ARM[a].label}</span></td>
+      <td><span class="badge ${a === 'jev' ? 'badge-ember' : 'badge-filled'}">${arm(a).label}</span></td>
       <td class="num">${e.length}</td>
       <td class="num">${sum(e, x => x.requests)}</td>
       <td class="num">${fmtN(sum(e, x => x.in_tokens))}</td>
@@ -230,7 +237,7 @@ function timeline() {
     lanes[l] = it.time;
     bars += `<div class="tl-lane" title="${it.doc} · ${it.arm} · ${it.seconds.toFixed(1)}s"
       style="left:${(it.t0 / maxT) * 100}%;width:${Math.max(.5, ((it.time - it.t0) / maxT) * 100)}%;
-      top:${10 + l * 22}px;background:${ARM[it.arm].color}"></div>`;
+      top:${10 + l * 22}px;background:${arm(it.arm).color}"></div>`;
   }
   let ticks = '';
   for (let i = 0; i <= 4; i++) ticks += `<div class="tl-tick" style="left:${(i / 4) * 100}%">${fmtS((i / 4) * maxT)}</div>`;
