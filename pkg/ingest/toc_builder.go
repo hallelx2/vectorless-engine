@@ -105,6 +105,11 @@ type TOCBuilder struct {
 	// to earn its place.
 	MinimalContext bool
 
+	// SplitLeavesOver, when > 0, splits any leaf spanning more pages than
+	// this into sub-leaves at its internal headings, confirmed by the
+	// Judge (HAL-1374). Zero leaves the tree at contents-page grain.
+	SplitLeavesOver int
+
 	// DetectChars caps the characters of each page sent to detection when
 	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
 	// declares itself in its first couple of thousand characters; the
@@ -271,6 +276,15 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// Derive end pages from sibling order. Done last so verified
 	// start pages drive the derivation.
 	deriveEndPages(nodes, lastPage(pages))
+
+	// Split the leaves that are too big to cite or to read, at their
+	// own internal headings (HAL-1374). Needs the spans, so it runs
+	// after end pages; adds its own children's end pages.
+	if b.SplitLeavesOver > 0 {
+		if n := b.splitLargeLeaves(ctx, nodes, pages, b.SplitLeavesOver, &usage); n > 0 {
+			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, b.SplitLeavesOver)
+		}
+	}
 
 	// Stamp stable node IDs onto every node so callers / external
 	// consumers have an opaque handle independent of position.
