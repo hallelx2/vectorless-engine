@@ -170,6 +170,18 @@ type Pipeline struct {
 	// per-stage semaphore). Default applied by NewPipeline: 12.
 	GlobalLLMConcurrency int
 
+	// Judge, when non-nil, answers the TOC stage's judgements —
+	// contents-page detection and page resolution — in one batched
+	// request each. Without it those steps run on LLM, one generative
+	// call per page, and long filings lose every leaf's page (HAL-1367).
+	// Wired from config llm.judge by cmd/server and cmd/engine; nil in
+	// Pipeline literals that do not set it, which keeps the old path.
+	Judge llmgate.Judge
+
+	// JudgeThreshold is the Noul probability at or above which a Judge
+	// answer counts as yes. Zero selects TOCBuilder's default.
+	JudgeThreshold float64
+
 	// TOCEnabled toggles the LLM-built table-of-contents stage. The
 	// stage runs after summarize+HyDE on PDF inputs and persists the
 	// resulting tree on documents.toc_tree (JSONB). Failures are
@@ -460,6 +472,12 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		Concurrency:    p.TOCConcurrency,
 		TOCCheckPages:  p.TOCCheckPages,
 		LLMCallTimeout: p.LLMCallTimeout,
+		Judge:          p.Judge,
+		JudgeThreshold: p.JudgeThreshold,
+		// The minimum-context path: prefilter, truncation, two-stage
+		// scan. Measured on FinanceBench as the fastest detection that
+		// lost nothing (HAL-1366).
+		MinimalContext: p.Judge != nil,
 	}
 	nodes, usage, err := builder.Build(ctx, pages)
 	if err != nil {
@@ -470,7 +488,13 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		"llm_calls", usage.LLMCalls,
 		"input_tokens", usage.InputTokens,
 		"output_tokens", usage.OutputTokens,
+		"judge", p.Judge != nil,
 	)
+	// A degraded build is not a failed one, but it is not what was
+	// configured either, and it must not look like success in the log.
+	for _, d := range usage.Degraded {
+		log.Warn("ingest: toc-builder degraded", "step", d)
+	}
 	if len(nodes) == 0 {
 		return nil
 	}

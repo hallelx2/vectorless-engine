@@ -136,6 +136,19 @@ type Usage struct {
 	TotalTokens  int
 	CostUSD      float64
 	LLMCalls     int
+
+	// Degraded lists the Judge-path steps that could not complete and
+	// what Build did instead. Empty means every step ran as configured.
+	// A document built with a non-empty Degraded is not wrong, but it is
+	// not what was asked for, and the caller must be able to see that:
+	// VERIZON_2022_10K once ingested with no page on any leaf after a
+	// single failed Judge request, and reported success (HAL-1369).
+	Degraded []string
+}
+
+// degrade records a Judge-path step that fell back.
+func (u *Usage) degrade(step, what string) {
+	u.Degraded = append(u.Degraded, step+": "+what)
 }
 
 // add folds the per-response usage from one LLM call into the
@@ -210,10 +223,16 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// verification with search, and it is what makes the extraction body
 	// window irrelevant to page accuracy (HAL-1367). Plain verification
 	// remains the fallback when resolution cannot run.
-	if resolved, handled := b.resolvePagesJudge(ctx, nodes, pages, tocPages, &usage); handled {
-		applyResolvedPages(nodes, resolved)
-	} else if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
-		applyJudgeVerdicts(nodes, verdicts)
+	//
+	// A failed Judge request is not "no Judge". The generative verifier
+	// asks about extraction's printed page numbers, which are wrong for
+	// every leaf past the cover of a long filing, so falling to it after
+	// a transport failure zeroes the tree and looks like success
+	// (HAL-1369). With a Judge configured, resolution is retried once
+	// with a fresh budget; if it still fails, extraction's pages are
+	// kept as they are and the degradation is recorded on Usage.
+	if b.Judge != nil {
+		b.resolvePagesOrKeep(ctx, nodes, pages, tocPages, &usage)
 	} else {
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
 	}
@@ -227,6 +246,36 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	stampNodeIDs(nodes, "")
 
 	return nodes, usage, nil
+}
+
+// resolverAttempts is how many times Build asks the Judge to resolve
+// pages before keeping extraction's. Two: the first failure is almost
+// always transport, and a resolver batch is two cheap requests.
+const resolverAttempts = 2
+
+// resolvePagesOrKeep runs Judge page resolution with one retry. On
+// exhaustion it leaves the tree exactly as extraction produced it and
+// records the fact; it never routes a Judge-path document through the
+// generative verifier.
+func (b *TOCBuilder) resolvePagesOrKeep(ctx context.Context, nodes []tree.TOCNode, pages []PageText, exclude []int, usage *Usage) {
+	var lastErr error
+	for attempt := 1; attempt <= resolverAttempts; attempt++ {
+		resolved, handled, err := b.resolvePagesJudgeErr(ctx, nodes, pages, exclude, usage)
+		if err == nil {
+			if handled {
+				applyResolvedPages(nodes, resolved)
+			}
+			// handled=false with no error means there was nothing to
+			// resolve (no leaves with titles); extraction's pages stand.
+			return
+		}
+		lastErr = err
+		log.Printf("toc: judge page resolution attempt %d/%d failed: %v", attempt, resolverAttempts, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	usage.degrade("page resolution", fmt.Sprintf("kept extraction's pages after %d failed Judge attempts: %v", resolverAttempts, lastErr))
 }
 
 // detectTOCPages scans the first tocCheck pages with the
