@@ -90,9 +90,12 @@ requests.
 
 VERIZON is worth a look: the re-run's `Build` ran the resolver and left
 every leaf at 0, while `tocresolve` on the same tree placed 22 of 24
-minutes later. The likely cause is a failed Judge request inside Build
-(logged, falls back to the generative verifier, which rejects the
-printed page numbers) — the same silent-degradation shape as HAL-1364.
+minutes later. Confirmed from the log: `toc: judge page resolution
+failed, falling back: typesafe: request failed` — one Judge request
+failed after retries, Build fell back to the generative verifier, and
+that verifier rejects printed page numbers. The document ingested with
+no pages and reported success — the same silent-degradation shape as
+HAL-1364, now in the resolver path (HAL-1369).
 
 The 47 leaves still unplaced on 3M, Johnson & Johnson, Kraft Heinz,
 Pfizer and Intel are the next thing to look at; they are deeper
