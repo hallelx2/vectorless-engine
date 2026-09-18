@@ -77,7 +77,10 @@ type JudgeNavigator struct {
 	Threshold float64
 
 	// MaxLeaves bounds how many sections' pages are gathered. Zero
-	// selects 5.
+	// means the page budget alone decides: sections are taken in rank
+	// order until CoarsePages are gathered. A fixed count of five was
+	// right for a 23-leaf 10-K and wrong for one split into 80 —
+	// five one-page notes and the budget went unused (HAL-1374).
 	MaxLeaves int
 
 	// MaxPages bounds how many pages are judged in full. Zero selects 40.
@@ -115,7 +118,6 @@ type JudgeNavigator struct {
 
 const (
 	defaultNavThreshold  = 0.5
-	defaultNavMaxLeaves  = 5
 	defaultNavMaxPages   = 40
 	defaultNavCoarse     = 120
 	defaultNavHeadChars  = 700
@@ -137,7 +139,7 @@ func (n *JudgeNavigator) maxLeaves() int {
 	if n.MaxLeaves > 0 {
 		return n.MaxLeaves
 	}
-	return defaultNavMaxLeaves
+	return 1 << 30 // the page budget governs
 }
 
 func (n *JudgeNavigator) maxPages() int {

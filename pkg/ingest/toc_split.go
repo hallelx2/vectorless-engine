@@ -158,8 +158,8 @@ func (b *TOCBuilder) subLeavesFromContents(ctx context.Context, leaf *tree.TOCNo
 	}
 	var subs []tree.TOCNode
 	for i, e := range entries {
-		if !keep[i] || e.Container {
-			continue
+		if !keep[i] || e.Container || normalise(e.Title) == normalise(leaf.Title) {
+			continue // the leaf's own title is not a sub-section of it
 		}
 		subs = append(subs, tree.TOCNode{Title: e.Title})
 	}
@@ -316,7 +316,7 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 	}
 	var subs []tree.TOCNode
 	for i, c := range cands {
-		if keep[i] {
+		if keep[i] && normalise(c.text) != normalise(leaf.Title) {
 			subs = append(subs, tree.TOCNode{Title: c.text, StartPage: c.page})
 		}
 	}

@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -282,5 +283,29 @@ func TestReferencedLeaves(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "b,c,a" {
 		t.Errorf("got %v want [b c a] — and Note 2 must not match Note 21, Item 1 must not match Item 1A", ids)
+	}
+}
+
+// On a finely split tree, sections are taken in rank order until the
+// page budget is full — not a fixed five.
+func TestNavigateFillsThePageBudgetOnAFineTree(t *testing.T) {
+	j, _ := navJudge("note", "needle")
+	n := &JudgeNavigator{Judge: j, MaxPages: 10, CoarsePages: 30}
+	var leaves []NavLeaf
+	for i := 1; i <= 40; i++ {
+		leaves = append(leaves, NavLeaf{ID: fmt.Sprint(i), Title: fmt.Sprintf("Note %d - Topic", i), Start: 60 + i, End: 60 + i})
+	}
+	load := func(_ context.Context, l NavLeaf) ([]NavPage, error) {
+		return []NavPage{{Number: l.Start, Text: "prose"}}, nil
+	}
+	res, err := n.Navigate(context.Background(), "q", leaves, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Selected) != 30 {
+		t.Errorf("one-page leaves should be gathered up to the coarse budget of 30, got %d", len(res.Selected))
+	}
+	if len(res.Pages) != 10 {
+		t.Errorf("full read should be MaxPages=10, got %d", len(res.Pages))
 	}
 }
