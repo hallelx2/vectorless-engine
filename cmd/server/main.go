@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -143,7 +144,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init llm: %w", err)
 	}
-	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, store, pool)
+	judge, err := buildJudge(cfg.Engine.LLM.Judge)
+	if err != nil {
+		logger.Error("judge: config invalid", "err", err)
+		os.Exit(1)
+	}
+	if judge != nil {
+		logger.Info("judge: typesafe enabled — TOC stage and judgewalk retrieval run on the Judge")
+	} else {
+		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
+	}
+	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, judge, store, pool)
 
 	// Wrap with caching if enabled in engine config.
 	if cfg.Engine.Retrieval.Cache.Enabled {
@@ -170,7 +181,7 @@ func run() error {
 	// running engine without a redeploy. Built from the raw client so
 	// each override behaves identically to booting with that strategy
 	// as the default (no shared cache wrapper across overrides).
-	strategies := buildStrategySet(cfg.Engine.Retrieval, llmClient, store, pool)
+	strategies := buildStrategySet(cfg.Engine.Retrieval, llmClient, judge, store, pool)
 
 	// Replay store: every /v1/answer and /v1/answer/treewalk response
 	// is stamped with a deterministic trace_token and its body bytes
@@ -203,16 +214,6 @@ func run() error {
 	}
 
 	// ── Ingest pipeline ───────────────────────────────────────────
-	judge, err := buildJudge(cfg.Engine.LLM.Judge)
-	if err != nil {
-		logger.Error("judge: config invalid", "err", err)
-		os.Exit(1)
-	}
-	if judge != nil {
-		logger.Info("judge: typesafe enabled — contents-page detection and page resolution run on the Judge")
-	} else {
-		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
-	}
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                     pool,
 		Storage:                store,
@@ -460,8 +461,14 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 // retrieval.strategy. The DB pool is threaded through so the
 // treewalk strategy can wire a TOC provider that reads
 // documents.toc_tree (the other strategies ignore it).
-func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) retrieval.Strategy {
+func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, judge llmgate.Judge, store storage.Storage, pool *db.Pool) retrieval.Strategy {
 	switch c.Strategy {
+	case "judgewalk":
+		if judge == nil {
+			log.Printf("retrieval: strategy judgewalk needs llm.judge configured; using treewalk")
+			return buildTreeWalkStrategy(c, client, store, pool)
+		}
+		return buildJudgeWalkStrategy(judge, store)
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
 	case "chunked-tree":
@@ -493,20 +500,34 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, store sto
 // from the same config blocks the default builder reads, so an
 // override behaves identically to booting with that strategy as the
 // default.
-func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, store storage.Storage, pool *db.Pool) map[string]retrieval.Strategy {
+func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge llmgate.Judge, store storage.Storage, pool *db.Pool) map[string]retrieval.Strategy {
 	agentic := retrieval.NewAgentic(client, storageFetcher{s: store})
 	if c.Agentic.MaxHops > 0 {
 		agentic.MaxHops = c.Agentic.MaxHops
 	}
 	agentic.ModelOverride = c.Agentic.Model
 
-	return map[string]retrieval.Strategy{
+	set := map[string]retrieval.Strategy{
 		"single-pass":  retrieval.NewSinglePass(client),
 		"chunked-tree": retrieval.NewChunkedTree(client),
 		"agentic":      agentic,
 		"treewalk":     buildTreeWalkStrategy(c, client, store, pool),
 		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
+	if judge != nil {
+		set["judgewalk"] = buildJudgeWalkStrategy(judge, store)
+	}
+	return set
+}
+
+// buildJudgeWalkStrategy constructs navigation on the Judge: the tree's
+// leaves ranked in one request, the best sections' bodies ranked in one
+// or two more, no generative call (HAL-1371). Selectable per request as
+// strategy=judgewalk whenever llm.judge is configured.
+func buildJudgeWalkStrategy(judge llmgate.Judge, store storage.Storage) *retrieval.JudgeWalkStrategy {
+	s := retrieval.NewJudgeWalkStrategy(judge)
+	s.PageLoader = storagePageLoader{s: store}
+	return s
 }
 
 // buildTreeWalkStrategy constructs the page-based agentic strategy

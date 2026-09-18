@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -126,7 +127,17 @@ func run() error {
 			return fmt.Errorf("init llm: %w", err)
 		}
 	}
-	strategy := buildStrategy(cfg.Retrieval, llmClient, store)
+	judge, err := buildJudge(cfg.LLM.Judge)
+	if err != nil {
+		logger.Error("judge: config invalid", "err", err)
+		os.Exit(1)
+	}
+	if judge != nil {
+		logger.Info("judge: typesafe enabled — TOC stage and judgewalk retrieval run on the Judge")
+	} else {
+		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
+	}
+	strategy := buildStrategy(cfg.Retrieval, llmClient, judge, store)
 
 	// Wrap with caching if enabled.
 	if cfg.Retrieval.Cache.Enabled {
@@ -205,16 +216,6 @@ func run() error {
 		)
 	}
 
-	judge, err := buildJudge(cfg.LLM.Judge)
-	if err != nil {
-		logger.Error("judge: config invalid", "err", err)
-		os.Exit(1)
-	}
-	if judge != nil {
-		logger.Info("judge: typesafe enabled — contents-page detection and page resolution run on the Judge")
-	} else {
-		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
-	}
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                     pool,
 		Storage:                store,
@@ -517,8 +518,16 @@ func buildLLMFrom(c config.LLMConfig, provider, apiKey, baseURL, model string) (
 	}
 }
 
-func buildStrategy(c config.RetrievalConfig, client llmgate.Client, store storage.Storage) retrieval.Strategy {
+func buildStrategy(c config.RetrievalConfig, client llmgate.Client, judge llmgate.Judge, store storage.Storage) retrieval.Strategy {
 	switch c.Strategy {
+	case "judgewalk":
+		if judge == nil {
+			log.Printf("retrieval: strategy judgewalk needs llm.judge configured; using treewalk")
+			return buildTreeWalkStrategy(c, client, store)
+		}
+		s := retrieval.NewJudgeWalkStrategy(judge)
+		s.PageLoader = storagePageLoader{s: store}
+		return s
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
 	case "chunked-tree":
