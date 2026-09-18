@@ -910,9 +910,15 @@ func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
 		if end <= 0 {
 			end = ceiling
 		}
-		// EndPage can never precede StartPage; clear to zero when
-		// the data conflicts.
-		if n.StartPage > 0 && end >= n.StartPage {
+		// A section can never end before the page it starts on. When
+		// the next part opens on this section's own page — Item 9B
+		// and Item 10 of a 10-K routinely share one — the sibling
+		// arithmetic says "end on the page before"; the truth is the
+		// section is one page long.
+		if n.StartPage > 0 {
+			if end < n.StartPage {
+				end = n.StartPage
+			}
 			n.EndPage = end
 		}
 		// Recurse with the child ceiling = this node's EndPage (or
@@ -922,6 +928,12 @@ func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
 			childCeiling = ceiling
 		}
 		deriveEndPagesIn(n.Nodes, childCeiling)
+		// A container spans at least as far as its last child.
+		for _, c := range n.Nodes {
+			if c.EndPage > n.EndPage {
+				n.EndPage = c.EndPage
+			}
+		}
 	}
 }
 

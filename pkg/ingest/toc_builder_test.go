@@ -345,6 +345,35 @@ func TestEndPageDerivationAcrossPartsSharingAPage(t *testing.T) {
 	}
 }
 
+// Item 9B closes Part II on page 73 and Item 10 opens Part III on the
+// same page 73. Sibling arithmetic gives Part II an end of 72, which is
+// before 9B starts; 9B is one page long and Part II reaches page 73.
+func TestEndPageWhenTheNextPartOpensOnTheSamePage(t *testing.T) {
+	root := []tree.TOCNode{
+		{Structure: "2", Title: "PART II", Nodes: []tree.TOCNode{
+			{Structure: "2.1", Title: "Item 9A", StartPage: 71},
+			{Structure: "2.2", Title: "Item 9B", StartPage: 73},
+		}},
+		{Structure: "3", Title: "PART III", Nodes: []tree.TOCNode{
+			{Structure: "3.1", Title: "Item 10", StartPage: 73},
+			{Structure: "3.2", Title: "Item 15", StartPage: 74},
+		}},
+	}
+	deriveEndPages(root, 83)
+	if got := root[0].Nodes[1].EndPage; got != 73 {
+		t.Errorf("Item 9B.EndPage: got %d want 73", got)
+	}
+	if got := root[0].Nodes[0].EndPage; got != 72 {
+		t.Errorf("Item 9A.EndPage: got %d want 72", got)
+	}
+	if got := root[0].EndPage; got != 73 {
+		t.Errorf("PART II.EndPage: got %d want 73 (reaches its last child)", got)
+	}
+	if got := root[1].Nodes[0].EndPage; got != 73 {
+		t.Errorf("Item 10.EndPage: got %d want 73", got)
+	}
+}
+
 // TestAssembleHierarchyNestsByStructure makes sure dotted
 // structure indices group correctly. "1.1" nests under "1",
 // "2.1.1" three levels deep, etc.
