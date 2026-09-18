@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -80,7 +81,7 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			if n.StartPage <= 0 || n.EndPage < n.StartPage || n.EndPage-n.StartPage+1 <= over {
 				continue
 			}
-			subs, err := b.splitLeaf(ctx, n, pages, byPage, usage)
+			subs, err := b.splitLeaf(ctx, n, pages, byPage, over, usage)
 			if err != nil {
 				log.Printf("toc: split %q failed, leaf kept whole: %v", n.Title, err)
 				usage.degrade("leaf split", fmt.Sprintf("%q kept whole: %v", n.Title, err))
@@ -103,7 +104,7 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 
 // splitLeaf returns the sub-leaves of one leaf, with start pages, in
 // page order.
-func (b *TOCBuilder) splitLeaf(ctx context.Context, leaf *tree.TOCNode, pages []PageText, byPage map[int]string, usage *Usage) ([]tree.TOCNode, error) {
+func (b *TOCBuilder) splitLeaf(ctx context.Context, leaf *tree.TOCNode, pages []PageText, byPage map[int]string, over int, usage *Usage) ([]tree.TOCNode, error) {
 	var leafPages []PageText
 	for _, p := range pages {
 		if p.PageNumber >= leaf.StartPage && p.PageNumber <= leaf.EndPage {
@@ -130,7 +131,7 @@ func (b *TOCBuilder) splitLeaf(ctx context.Context, leaf *tree.TOCNode, pages []
 	if len(cands) < splitMinEntries {
 		return nil, nil
 	}
-	return b.subLeavesFromHeadings(ctx, leaf, cands, usage)
+	return b.subLeavesFromHeadings(ctx, leaf, cands, over, usage)
 }
 
 // nestedContents finds a page inside the leaf that reads as a table of
@@ -272,9 +273,9 @@ func looksLikeSubHeading(line string) bool {
 
 // subLeavesFromHeadings asks the Judge, for each candidate, whether a
 // sub-section of the leaf begins at that line.
-func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNode, cands []headingCandidate, usage *Usage) ([]tree.TOCNode, error) {
+func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNode, cands []headingCandidate, over int, usage *Usage) ([]tree.TOCNode, error) {
 	th := b.judgeThreshold()
-	keep := make([]bool, len(cands))
+	prob := make([]float64, len(cands))
 	const perBatch = 80
 	for start := 0; start < len(cands); start += perBatch {
 		end := start + perBatch
@@ -311,17 +312,44 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 			}
 			var i int
 			fmt.Sscanf(qk, "h_%d", &i)
-			keep[i] = p > th
+			prob[i] = p
 		}
+	}
+	// Headings found without an index are the weaker source, so the
+	// budget is tighter: about one sub-leaf per half-threshold of
+	// pages, the most confident kept, then put back in page order.
+	// Without this every threshold produced the same 68 leaves per
+	// filing — the per-page cap, not the content, was deciding.
+	type scored struct {
+		n tree.TOCNode
+		p float64
+	}
+	var ss []scored
+	for i, c := range cands {
+		if prob[i] > th && normalise(c.text) != normalise(leaf.Title) {
+			ss = append(ss, scored{tree.TOCNode{Title: c.text, StartPage: c.page}, prob[i]})
+		}
+	}
+	span := leaf.EndPage - leaf.StartPage + 1
+	max := span * 2 / over
+	if max < splitMinEntries {
+		max = splitMinEntries
+	}
+	sort.SliceStable(ss, func(i, j int) bool { return ss[i].p > ss[j].p })
+	if len(ss) > max {
+		ss = ss[:max]
 	}
 	var subs []tree.TOCNode
-	for i, c := range cands {
-		if keep[i] && normalise(c.text) != normalise(leaf.Title) {
-			subs = append(subs, tree.TOCNode{Title: c.text, StartPage: c.page})
+	seenPage := map[int]bool{}
+	for _, x := range ss {
+		if seenPage[x.n.StartPage] {
+			continue
 		}
+		seenPage[x.n.StartPage] = true
+		subs = append(subs, x.n)
 	}
 	sortByStart(subs)
-	return capSubLeaves(subs, leaf), nil
+	return subs, nil
 }
 
 func sortByStart(ns []tree.TOCNode) {
