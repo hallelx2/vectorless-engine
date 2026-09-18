@@ -376,6 +376,32 @@ type LLMConfig struct {
 	Anthropic AnthropicBlock `yaml:"anthropic"`
 	OpenAI    OpenAIBlock    `yaml:"openai"`
 	Gemini    GeminiBlock    `yaml:"gemini"`
+
+	// Judge configures the System One model that answers the pipeline's
+	// judgements — contents-page detection and page resolution — in one
+	// batched request each, instead of a generative call per page. Left
+	// empty, those steps run on the generative driver above, one call at
+	// a time, and a 10-K's leaves lose their pages (HAL-1367).
+	Judge JudgeBlock `yaml:"judge"`
+}
+
+// JudgeBlock configures the Judge. Only TypeSafe is supported today; the
+// Judge is enabled exactly when an API key is present.
+type JudgeBlock struct {
+	TypeSafe TypeSafeBlock `yaml:"typesafe"`
+
+	// Threshold is the Noul probability at or above which a Judge answer
+	// counts as yes. Zero selects the builder's default (0.5).
+	Threshold float64 `yaml:"threshold"`
+}
+
+// TypeSafeBlock configures the TypeSafe System One provider.
+type TypeSafeBlock struct {
+	APIKey string `yaml:"api_key"`
+	// BaseURL overrides the endpoint. Empty = api.typesafe.ai.
+	BaseURL string `yaml:"base_url"`
+	// Model overrides the model alias. Empty = the provider's default.
+	Model string `yaml:"model"`
 }
 
 // AnthropicBlock configures the Anthropic provider.
@@ -902,6 +928,13 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("VLE_GEMINI_API_KEY"); v != "" {
 		c.LLM.Gemini.APIKey = v
+	}
+	// The Judge key accepts the deploy layer's VLS_ prefix and the bare
+	// TYPESAFE_API_KEY — what the llmgate live tests and the bench
+	// commands already read — so one export enables it everywhere.
+	// VLE_-prefixed wins if several are set.
+	if v := firstEnv("VLE_TYPESAFE_API_KEY", "VLS_TYPESAFE_API_KEY", "TYPESAFE_API_KEY"); v != "" {
+		c.LLM.Judge.TypeSafe.APIKey = v
 	}
 	// Accept both VLE_-prefixed and bare QSTASH_* env vars. The bare
 	// names match what the Upstash console documents and what the

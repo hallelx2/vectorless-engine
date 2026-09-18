@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/llmgate/judge/typesafe"
+	"github.com/hallelx2/llmgate/middleware/retry"
 	"github.com/hallelx2/llmgate/pricing"
 	"github.com/hallelx2/llmgate/provider/anthropic"
 	"github.com/hallelx2/llmgate/provider/gemini"
@@ -201,10 +203,22 @@ func run() error {
 	}
 
 	// ── Ingest pipeline ───────────────────────────────────────────
+	judge, err := buildJudge(cfg.Engine.LLM.Judge)
+	if err != nil {
+		logger.Error("judge: config invalid", "err", err)
+		os.Exit(1)
+	}
+	if judge != nil {
+		logger.Info("judge: typesafe enabled — contents-page detection and page resolution run on the Judge")
+	} else {
+		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
+	}
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
 		DB:                     pool,
 		Storage:                store,
 		LLM:                    llmClient,
+		Judge:                  judge,
+		JudgeThreshold:         cfg.Engine.LLM.Judge.Threshold,
 		Parsers:                ingest.RegistryFromIngestParams(tableOptsFromConfig(cfg.Engine.Ingest.Tables), cfg.Engine.Ingest.MaxSections, time.Duration(cfg.Engine.Ingest.ParseTimeoutSeconds)*time.Second),
 		Logger:                 logger,
 		Mode:                   cfg.Engine.Ingest.Mode,
@@ -394,6 +408,26 @@ func modelFor(c enginecfg.LLMConfig) string {
 		return c.Gemini.Model
 	}
 	return ""
+}
+
+// buildJudge returns the configured Judge, or nil when llm.judge has
+// no API key. Retries share the same schedule as every other provider
+// call; a Judge request that fails past them is handled by the TOC
+// builder, which keeps extraction's pages rather than degrading
+// silently (HAL-1369).
+func buildJudge(c enginecfg.JudgeBlock) (llmgate.Judge, error) {
+	if c.TypeSafe.APIKey == "" {
+		return nil, nil
+	}
+	j, err := typesafe.New(typesafe.Config{
+		APIKey:  c.TypeSafe.APIKey,
+		BaseURL: c.TypeSafe.BaseURL,
+		Model:   c.TypeSafe.Model,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return retry.NewJudge(retry.Config{MaxRetries: 3})(j), nil
 }
 
 func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {

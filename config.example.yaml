@@ -107,6 +107,20 @@ llm:
     model: "gemini-2.0-flash"
     reasoning_model: "gemini-2.5-pro"
 
+  # Judge: a System One model (TypeSafe Jev) that answers the ingest
+  # pipeline's judgements — contents-page detection and page resolution —
+  # in one batched request per document instead of a generative call per
+  # page. Enabled exactly when an api_key is present; also read from
+  # VLE_TYPESAFE_API_KEY or TYPESAFE_API_KEY. Without it, long filings
+  # lose every leaf's page (HAL-1367) and the TOC stage runs minutes
+  # slower on the driver above.
+  judge:
+    typesafe:
+      api_key: ""
+      # base_url: ""     # override the endpoint; empty = api.typesafe.ai
+      # model: ""        # override the model alias
+    # threshold: 0.5     # Noul probability that counts as "yes"
+
 retrieval:
   # strategy: single-pass | chunked-tree | agentic | treewalk
   #

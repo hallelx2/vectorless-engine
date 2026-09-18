@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -525,5 +526,117 @@ func TestSynthetic10KFourTopLevelNodes(t *testing.T) {
 		if nodes[i].Title != want {
 			t.Errorf("nodes[%d].Title = %q, want %q", i, nodes[i].Title, want)
 		}
+	}
+}
+
+// judgeFailingFirst is a Judge whose page-resolution batches fail the
+// first n times and answer yes afterwards; detection always says no so
+// the scripted LLM's no-TOC extractor supplies the tree.
+func judgeFailingFirst(n int) (*llmgate.MockJudge, *atomic.Int32) {
+	var resolverCalls atomic.Int32
+	j := &llmgate.MockJudge{
+		Respond: func(_ context.Context, req llmgate.JudgeRequest) (*llmgate.Judgment, error) {
+			ans := make(map[string]llmgate.Answer, len(req.Questions))
+			isResolver := false
+			for id := range req.Questions {
+				if strings.HasPrefix(id, "r_") {
+					isResolver = true
+				}
+			}
+			if isResolver {
+				if int(resolverCalls.Add(1)) <= n {
+					return nil, errors.New("typesafe: request failed")
+				}
+				st, _ := req.State.(map[string]any)
+				for id := range req.Questions {
+					p := 0.05
+					if item, ok := st[id].(map[string]any); ok {
+						title, _ := item["title"].(string)
+						excerpt, _ := item["excerpt"].(string)
+						if strings.HasPrefix(excerpt, title) {
+							p = 0.95
+						}
+					}
+					ans[id] = llmgate.NoulAnswer{Noul: p}
+				}
+			} else {
+				for id := range req.Questions {
+					ans[id] = llmgate.NoulAnswer{Noul: 0.0}
+				}
+			}
+			return &llmgate.Judgment{Model: "mock", Answers: ans,
+				Usage: llmgate.Usage{InputTokens: 10, TotalTokens: 10, TokensReported: true}}, nil
+		},
+	}
+	return j, &resolverCalls
+}
+
+func buildWithJudge(t *testing.T, j llmgate.Judge) ([]tree.TOCNode, Usage, *atomic.Int32) {
+	t.Helper()
+	llm := &scriptedLLM{}
+	var verifierCalls atomic.Int32
+	llm.route = func(prompt string) string {
+		switch {
+		case strings.Contains(prompt, "hierarchical tree structure"):
+			// Extraction guesses the printed page numbers, which are wrong.
+			return `{"nodes":[
+				{"structure":"1","title":"Item 1. Business","physical_index":"<physical_index_1>"},
+				{"structure":"2","title":"Item 1A. Risk Factors","physical_index":"<physical_index_6>"}
+			]}`
+		case strings.Contains(prompt, "section starts at the beginning"):
+			verifierCalls.Add(1)
+			return `{"start_begin":"no"}`
+		}
+		return `{"toc_detected":"no"}`
+	}
+	pages := []PageText{
+		{PageNumber: 1, Text: "Cover page."},
+		{PageNumber: 3, Text: "Item 1. Business\nWe make things."},
+		{PageNumber: 8, Text: "Item 1A. Risk Factors\nThings go wrong."},
+	}
+	b := &TOCBuilder{LLM: llm, Judge: j, TOCCheckPages: 3, Concurrency: 2}
+	nodes, usage, err := b.Build(context.Background(), pages)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	return nodes, usage, &verifierCalls
+}
+
+// One failed Judge request is transport, not absence: Build retries the
+// resolver and the document gets its real pages.
+func TestBuildRetriesTheResolverOnce(t *testing.T) {
+	j, calls := judgeFailingFirst(1)
+	nodes, usage, verifier := buildWithJudge(t, j)
+	if calls.Load() != 2 {
+		t.Errorf("resolver batches: got %d want 2 (one failure, one success)", calls.Load())
+	}
+	if nodes[0].StartPage != 3 || nodes[1].StartPage != 8 {
+		t.Errorf("pages not resolved after the retry: %+v", nodes)
+	}
+	if len(usage.Degraded) != 0 {
+		t.Errorf("a recovered retry is not a degradation: %v", usage.Degraded)
+	}
+	if verifier.Load() != 0 {
+		t.Errorf("the generative verifier ran %d times on a Judge-path document", verifier.Load())
+	}
+}
+
+// After the retries are spent, extraction's pages are kept, the
+// generative verifier — which would reject every one of them — is never
+// consulted, and the caller can see the degradation.
+func TestBuildKeepsClaimedPagesWhenTheResolverIsDown(t *testing.T) {
+	j, calls := judgeFailingFirst(1000)
+	nodes, usage, verifier := buildWithJudge(t, j)
+	if calls.Load() != resolverAttempts {
+		t.Errorf("resolver batches: got %d want %d", calls.Load(), resolverAttempts)
+	}
+	if nodes[0].StartPage != 1 || nodes[1].StartPage != 6 {
+		t.Errorf("extraction's pages should be kept untouched, got %+v", nodes)
+	}
+	if verifier.Load() != 0 {
+		t.Errorf("the generative verifier ran %d times; it would have zeroed the tree", verifier.Load())
+	}
+	if len(usage.Degraded) != 1 || !strings.Contains(usage.Degraded[0], "page resolution") {
+		t.Errorf("degradation not recorded: %v", usage.Degraded)
 	}
 }
