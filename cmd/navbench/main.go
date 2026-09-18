@@ -19,9 +19,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hallelx2/llmgate/judge/typesafe"
+	"github.com/hallelx2/llmgate/middleware/limit"
 	"github.com/hallelx2/llmgate/middleware/retry"
 
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
@@ -71,7 +73,8 @@ func main() {
 	out := flag.String("out", "", "JSONL of per-question outcomes")
 	maxLeaves := flag.Int("leaves", 3, "sections read per question")
 	maxPages := flag.Int("pages", 40, "pages judged per question")
-	limit := flag.Int("limit", 0, "stop after this many questions (0 = all)")
+	limitQ := flag.Int("limit", 0, "stop after this many questions (0 = all)")
+	parallel := flag.Int("parallel", 1, "questions in flight at once; the provider's adaptive limiter governs requests")
 	flag.Parse()
 	if *qPath == "" || *trees == "" || *pdfs == "" {
 		fmt.Fprintln(os.Stderr, "usage: navbench -questions q.jsonl -trees dir -pdfs dir [-out o.jsonl]")
@@ -84,11 +87,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "judge:", err)
 		os.Exit(1)
 	}
-	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(tj), MaxLeaves: *maxLeaves, MaxPages: *maxPages}
+	lim := limit.New(limit.Config{Initial: 4, OnChange: func(e limit.Event) {
+		fmt.Fprintf(os.Stderr, "  limiter %s %d -> %d %v\n", e.Cause, e.From, e.To, e.Err)
+	}})
+	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages}
 
 	qs := readQuestions(*qPath)
-	if *limit > 0 && len(qs) > *limit {
-		qs = qs[:*limit]
+	if *limitQ > 0 && len(qs) > *limitQ {
+		qs = qs[:*limitQ]
 	}
 	var of *os.File
 	if *out != "" {
@@ -98,60 +104,84 @@ func main() {
 
 	pageCache := map[string][]ingest.PageText{}
 	leafCache := map[string][]retrieval.NavLeaf{}
-	var results []outcome
+	// Documents are parsed once, up front and sequentially, so the
+	// parallel part is only Judge traffic.
 	for _, q := range qs {
-		o := outcome{ID: q.ID, Doc: q.Doc, Question: q.Question, Gold: q.Evidence}
-		leaves, pages, err := load(q.Doc, *trees, *pdfs, leafCache, pageCache)
-		if err != nil {
-			o.Err = err.Error()
-			results = append(results, o)
-			report(o)
-			continue
-		}
-		byNum := map[int]string{}
-		for _, p := range pages {
-			byNum[p.PageNumber] = p.Text
-		}
-		loadPages := func(_ context.Context, l retrieval.NavLeaf) ([]retrieval.NavPage, error) {
-			var ps []retrieval.NavPage
-			for n := l.Start; n <= l.End; n++ {
-				if t, ok := byNum[n]; ok {
-					ps = append(ps, retrieval.NavPage{Number: n, Text: t})
-				}
-			}
-			return ps, nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		start := time.Now()
-		res, err := nav.Navigate(ctx, q.Question, leaves, loadPages)
-		cancel()
-		o.Seconds = time.Since(start).Seconds()
-		if err != nil {
-			o.Err = err.Error()
-			results = append(results, o)
-			report(o)
-			continue
-		}
-		for _, l := range res.Selected {
-			o.Selected = append(o.Selected, l.Title)
-			o.SelectedPages = append(o.SelectedPages, [2]int{l.Start, l.End})
-		}
-		for _, e := range res.Evidence {
-			o.Evidence = append(o.Evidence, e.Page.Number)
-			o.EvidenceP = append(o.EvidenceP, e.P)
-		}
-		o.PagesRead = len(res.Pages)
-		o.Requests, o.InTokens, o.CostUSD = res.Requests, res.Usage.InputTokens, res.Usage.CostUSD
-		o.LeafHit = allInRanges(q.Evidence, o.SelectedPages)
-		o.Recall = recall(q.Evidence, o.Evidence)
-		o.Hit = o.Recall == 1
-		results = append(results, o)
-		report(o)
-		if of != nil {
-			b, _ := json.Marshal(o)
-			of.Write(append(b, '\n'))
+		if _, ok := leafCache[q.Doc]; !ok {
+			_, _, _ = load(q.Doc, *trees, *pdfs, leafCache, pageCache)
 		}
 	}
+	runStart := time.Now()
+	results := make([]outcome, len(qs))
+	if *parallel < 1 {
+		*parallel = 1
+	}
+	sem := make(chan struct{}, *parallel)
+	var wg sync.WaitGroup
+	var outMu sync.Mutex
+	for i, q := range qs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, q question) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			o := outcome{ID: q.ID, Doc: q.Doc, Question: q.Question, Gold: q.Evidence}
+			leaves, pages, err := load(q.Doc, *trees, *pdfs, leafCache, pageCache)
+			if err != nil {
+				o.Err = err.Error()
+				results[i] = o
+				outMu.Lock()
+				report(o)
+				outMu.Unlock()
+				return
+			}
+			byNum := map[int]string{}
+			for _, p := range pages {
+				byNum[p.PageNumber] = p.Text
+			}
+			loadPages := func(_ context.Context, l retrieval.NavLeaf) ([]retrieval.NavPage, error) {
+				var ps []retrieval.NavPage
+				for n := l.Start; n <= l.End; n++ {
+					if t, ok := byNum[n]; ok {
+						ps = append(ps, retrieval.NavPage{Number: n, Text: t})
+					}
+				}
+				return ps, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			start := time.Now()
+			res, err := nav.Navigate(ctx, q.Question, leaves, loadPages)
+			cancel()
+			o.Seconds = time.Since(start).Seconds()
+			if err != nil {
+				o.Err = err.Error()
+			} else {
+				for _, l := range res.Selected {
+					o.Selected = append(o.Selected, l.Title)
+					o.SelectedPages = append(o.SelectedPages, [2]int{l.Start, l.End})
+				}
+				for _, e := range res.Evidence {
+					o.Evidence = append(o.Evidence, e.Page.Number)
+					o.EvidenceP = append(o.EvidenceP, e.P)
+				}
+				o.PagesRead = len(res.Pages)
+				o.Requests, o.InTokens, o.CostUSD = res.Requests, res.Usage.InputTokens, res.Usage.CostUSD
+				o.LeafHit = allInRanges(q.Evidence, o.SelectedPages)
+				o.Recall = recall(q.Evidence, o.Evidence)
+				o.Hit = o.Recall == 1
+			}
+			results[i] = o
+			outMu.Lock()
+			report(o)
+			if of != nil {
+				b, _ := json.Marshal(o)
+				of.Write(append(b, '\n'))
+			}
+			outMu.Unlock()
+		}(i, q)
+	}
+	wg.Wait()
+	fmt.Printf("\nwall %.1fs for %d questions at parallel=%d; limiter now %d\n", time.Since(runStart).Seconds(), len(qs), *parallel, lim.Limit())
 	summarise(results)
 }
 

@@ -107,6 +107,15 @@ llm:
     model: "gemini-2.0-flash"
     reasoning_model: "gemini-2.5-pro"
 
+  # Concurrency: one adaptive limiter per provider (chat model, Judge).
+  # The limit starts at initial and moves — halved on a 429 or transport
+  # failure (honouring Retry-After), widened by one after a run of
+  # successes, never above max — so the provider's real capacity sets
+  # the pace, not a guess. Every change is logged.
+  concurrency:
+    initial: 4
+    max: 64
+
   # Judge: a System One model (TypeSafe Jev) that answers the ingest
   # pipeline's judgements — contents-page detection and page resolution —
   # in one batched request per document instead of a generative call per
