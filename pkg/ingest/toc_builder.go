@@ -92,6 +92,31 @@ type TOCBuilder struct {
 	// measured tokens rather than page count.
 	Judge llmgate.Judge
 
+	// MinimalContext turns on the three cuts that send a Judge only what it
+	// needs to answer: a structural pre-filter that skips pages with no
+	// sign of a contents page, hard per-page truncation for detection, and
+	// a two-stage scan that tries the first few pages before the full
+	// prefix.
+	//
+	// Off by default until the evidence-page coverage gate (HAL-1366)
+	// shows it costs nothing — the house rule for any change that alters
+	// which pages a model sees. The design principle it serves: latency on
+	// a System One model is paid in input tokens, so every token sent has
+	// to earn its place.
+	MinimalContext bool
+
+	// DetectChars caps the characters of each page sent to detection when
+	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
+	// declares itself in its first couple of thousand characters; the
+	// other ten thousand are cost.
+	DetectChars int
+
+	// FirstPass is how many leading pages the two-stage scan tries before
+	// falling back to the full prefix. Zero means firstPassDefault. Every
+	// 10-K puts its TOC on page 2–3; the full scan only runs on a miss, so
+	// the worst case costs what the single scan costs today.
+	FirstPass int
+
 	// JudgeThreshold is the probability above which a Noul answer counts
 	// as yes. Zero means 0.5.
 	//

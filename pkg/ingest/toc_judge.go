@@ -123,12 +123,83 @@ func (b *TOCBuilder) detectTOCPagesJudgeErr(ctx context.Context, pages []PageTex
 		return nil, true, nil // nothing to ask; a real answer, not a failure
 	}
 
-	for _, batch := range batchByTokens(candidates, tocDetectorMaxChars) {
+	if !b.MinimalContext {
+		found, err = b.judgeTOCBatches(ctx, candidates, tocDetectorMaxChars, usage)
+		if err != nil {
+			return nil, false, err
+		}
+		return found, true, nil
+	}
+
+	// Minimal-context path: three cuts, each of which sends less.
+	maxChars := b.DetectChars
+	if maxChars <= 0 {
+		maxChars = detectCharsMinimal
+	}
+	first := b.FirstPass
+	if first <= 0 {
+		first = firstPassDefault
+	}
+	if first > len(candidates) {
+		first = len(candidates)
+	}
+
+	// Cut 1: the pre-filter. Pages with zero structural sign of a
+	// contents page are not sent. Zero, not low — see prefilter.go.
+	keep := func(ps []PageText) []PageText {
+		out := ps[:0:0]
+		for _, p := range ps {
+			if prefilterTOC(p.Text).Any() {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
+	// Cut 3: two stages. The first few pages, then the rest only on a
+	// miss. Cut 2 (truncation) is applied inside judgeTOCBatches.
+	stage1 := keep(candidates[:first])
+	if len(stage1) > 0 {
+		found, err = b.judgeTOCBatches(ctx, stage1, maxChars, usage)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(found) > 0 {
+			return found, true, nil
+		}
+	}
+	stage2 := keep(candidates[first:])
+	if len(stage2) == 0 {
+		return nil, true, nil
+	}
+	found, err = b.judgeTOCBatches(ctx, stage2, maxChars, usage)
+	if err != nil {
+		return nil, false, err
+	}
+	return found, true, nil
+}
+
+// Defaults for the minimal-context cuts. Both are measured, not guessed:
+// 2,000 chars covers the entries a contents page opens with (3M's runs
+// to ~3,800 including a prose preamble, and the entries start well
+// inside 2,000), and 6 pages covers page 2–3, where 20 of 21 filings put
+// their TOC on 2026-09-18.
+const (
+	detectCharsMinimal = 2000
+	firstPassDefault   = 6
+)
+
+// judgeTOCBatches asks the detection question of every page in pages,
+// truncating each to maxChars, in as few requests as the token budget
+// allows. It returns the page numbers judged to be a table of contents.
+func (b *TOCBuilder) judgeTOCBatches(ctx context.Context, pages []PageText, maxChars int, usage *Usage) ([]int, error) {
+	var found []int
+	for _, batch := range batchByTokens(pages, maxChars) {
 		state := map[string]any{}
 		questions := map[string]llmgate.Question{}
 		for _, p := range batch {
 			key := pageKey(p.PageNumber)
-			state[key] = truncate(p.Text, tocDetectorMaxChars)
+			state[key] = truncate(p.Text, maxChars)
 			questions[key] = llmgate.Noul{
 				// The question names the field it is about. Question IDs
 				// are not sent to the model, so without this the model
@@ -148,7 +219,7 @@ func (b *TOCBuilder) detectTOCPagesJudgeErr(ctx context.Context, pages []PageTex
 			// Partial results would silently truncate the scanned range
 			// and look like "no TOC here", so abandon the whole phase
 			// and let the generative path redo it properly.
-			return nil, false, jerr
+			return nil, jerr
 		}
 		addJudgeUsage(usage, res)
 
@@ -162,9 +233,8 @@ func (b *TOCBuilder) detectTOCPagesJudgeErr(ctx context.Context, pages []PageTex
 			}
 		}
 	}
-
 	sort.Ints(found)
-	return found, true, nil
+	return found, nil
 }
 
 // verifyTitlesJudge answers "does this section start at the top of this

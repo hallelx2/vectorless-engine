@@ -37,3 +37,35 @@ func BenchVerifyTitles(ctx context.Context, b *TOCBuilder, nodes []tree.TOCNode,
 	v, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage)
 	return v, usage, handled
 }
+
+// BenchDetectTOCGenerative runs the ORIGINAL sequential detection phase.
+//
+// Exported purely so a benchmark can time both arms through the same
+// entry points. Without it the comparison would have to reimplement the
+// generative loop, and would then be measuring the reimplementation.
+func BenchDetectTOCGenerative(ctx context.Context, b *TOCBuilder, pages []PageText, scan int) ([]int, Usage) {
+	var usage Usage
+	found := b.detectTOCPages(ctx, pages, scan, &usage)
+	return found, usage
+}
+
+// BenchDetectTOCFanout runs the speculative fan-out phase: both
+// page-level questions in one request.
+//
+// Reported alongside the plain Judge path so the saving from batching
+// across PHASES is separable from the saving from batching across pages.
+// Rolling them into one number would make it impossible to tell which
+// idea earned what.
+func BenchDetectTOCFanout(ctx context.Context, b *TOCBuilder, pages []PageText, scan int) ([]int, Usage, bool) {
+	var usage Usage
+	j, handled := b.judgePagesFanout(ctx, pages, scan, &usage)
+	if !handled {
+		return nil, usage, false
+	}
+	return tocPagesFrom(j, b.judgeThreshold()), usage, true
+}
+
+// PrefilterAny exposes the skip decision for the benchmark's corpus
+// validation, so the filter can be checked against every real TOC page
+// before it is trusted to skip anything.
+func PrefilterAny(text string) bool { return prefilterTOC(text).Any() }
