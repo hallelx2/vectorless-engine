@@ -640,3 +640,19 @@ func TestBuildKeepsClaimedPagesWhenTheResolverIsDown(t *testing.T) {
 		t.Errorf("degradation not recorded: %v", usage.Degraded)
 	}
 }
+
+func TestAssemblePagesPrefersTheParsersPages(t *testing.T) {
+	doc := &parser.ParsedDoc{
+		Sections: []parser.Section{{Title: "Item 1", Content: "page 2 text page 3 text", PageStart: 2, PageEnd: 3}},
+		Pages:    []parser.Page{{Number: 2, Text: "Item 1\npage 2 text"}, {Number: 3, Text: "page 3 text"}},
+	}
+	got := assemblePages(doc)
+	if len(got) != 2 || got[1].PageNumber != 3 || got[1].Text != "page 3 text" {
+		t.Fatalf("pages should come from Pages, per page: %+v", got)
+	}
+	doc.Pages = nil
+	got = assemblePages(doc)
+	if len(got) != 1 || got[0].PageNumber != 2 {
+		t.Errorf("without Pages, the section fallback: %+v", got)
+	}
+}

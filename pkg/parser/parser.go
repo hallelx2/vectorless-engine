@@ -34,6 +34,22 @@ type ParsedDoc struct {
 	// Metadata holds whatever extra structural hints the parser recovered
 	// (author, created date, page count, etc.).
 	Metadata map[string]string
+
+	// Pages is the document's text page by page, for parsers that have
+	// pages. It is the ground truth for anything that reasons per page —
+	// contents-page detection, page resolution, page ranking — and must
+	// never be reconstructed from Sections: a section's content spans
+	// pages, and keying it under the section's first page puts the next
+	// page's opening under the wrong number (HAL-1375). Empty for
+	// formats without a page notion.
+	Pages []Page
+}
+
+// Page is one page's text, in reading order, with the parser's
+// running-header and boilerplate filtering already applied.
+type Page struct {
+	Number int
+	Text   string
 }
 
 // Section is one node in the parsed outline.
