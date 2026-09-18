@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vectorless ingestion — live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div>
+      <div class="eyebrow">
+        <span class="badge badge-outline">vectorless-engine</span>
+        <span class="badge badge-outline">FinanceBench 10-K</span>
+        <span id="status"></span>
+      </div>
+      <h1>Ingestion, live</h1>
+    </div>
+    <div class="clock" id="clock">0.0s</div>
+  </header>
+
+  <section id="kpis" class="kpis"></section>
+
+  <section class="section">
+    <div class="sec-head"><h2>Documents</h2><span class="tiny" id="docsmeta"></span></div>
+    <div id="docgrid" class="docgrid"></div>
+  </section>
+
+  <section class="section grid grid-2">
+    <div>
+      <div class="sec-head"><h2>Time per document</h2></div>
+      <div class="card"><div id="chart-latency"></div></div>
+    </div>
+    <div>
+      <div class="sec-head"><h2>Requests per document</h2></div>
+      <div class="card"><div id="chart-requests"></div></div>
+    </div>
+  </section>
+
+  <section class="section grid grid-2">
+    <div>
+      <div class="sec-head"><h2>Cumulative cost</h2></div>
+      <div class="card"><div id="chart-cost"></div></div>
+    </div>
+    <div>
+      <div class="sec-head"><h2>Documents completed</h2></div>
+      <div class="card"><div id="chart-throughput"></div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="sec-head"><h2>Schedule</h2><span class="tiny">overlapping bars ran concurrently</span></div>
+    <div id="timeline"></div>
+  </section>
+
+  <section class="section">
+    <div class="sec-head"><h2>Totals</h2></div>
+    <div class="card" id="cost"></div>
+  </section>
+
+  <section class="section">
+    <div class="sec-head"><h2>Stream</h2></div>
+    <div class="log" id="log"></div>
+  </section>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

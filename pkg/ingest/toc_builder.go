@@ -92,6 +92,31 @@ type TOCBuilder struct {
 	// measured tokens rather than page count.
 	Judge llmgate.Judge
 
+	// MinimalContext turns on the three cuts that send a Judge only what it
+	// needs to answer: a structural pre-filter that skips pages with no
+	// sign of a contents page, hard per-page truncation for detection, and
+	// a two-stage scan that tries the first few pages before the full
+	// prefix.
+	//
+	// Off by default until the evidence-page coverage gate (HAL-1366)
+	// shows it costs nothing — the house rule for any change that alters
+	// which pages a model sees. The design principle it serves: latency on
+	// a System One model is paid in input tokens, so every token sent has
+	// to earn its place.
+	MinimalContext bool
+
+	// DetectChars caps the characters of each page sent to detection when
+	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
+	// declares itself in its first couple of thousand characters; the
+	// other ten thousand are cost.
+	DetectChars int
+
+	// FirstPass is how many leading pages the two-stage scan tries before
+	// falling back to the full prefix. Zero means firstPassDefault. Every
+	// 10-K puts its TOC on page 2–3; the full scan only runs on a miss, so
+	// the worst case costs what the single scan costs today.
+	FirstPass int
+
 	// JudgeThreshold is the probability above which a Noul answer counts
 	// as yes. Zero means 0.5.
 	//
@@ -179,7 +204,15 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// starts the section. Mismatches clear the page (set to 0)
 	// rather than making one up — downstream treats zero as
 	// open/unknown.
-	if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
+	// With a Judge, resolution subsumes verification: it searches every
+	// page head for each title and asks whether the title BEGINS the page,
+	// with extraction's guess as one candidate among the hits. That is
+	// verification with search, and it is what makes the extraction body
+	// window irrelevant to page accuracy (HAL-1367). Plain verification
+	// remains the fallback when resolution cannot run.
+	if resolved, handled := b.resolvePagesJudge(ctx, nodes, pages, tocPages, &usage); handled {
+		applyResolvedPages(nodes, resolved)
+	} else if verdicts, handled := b.verifyTitlesJudge(ctx, nodes, pages, &usage); handled {
 		applyJudgeVerdicts(nodes, verdicts)
 	} else {
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
@@ -832,7 +865,31 @@ func flattenForVerify(nodes []tree.TOCNode) []*tree.TOCNode {
 // end pages cap at their parent's, which is what readers expect
 // for a TOC.
 func deriveEndPages(nodes []tree.TOCNode, docLastPage int) {
+	inheritParentStarts(nodes)
 	deriveEndPagesIn(nodes, docLastPage)
+}
+
+// inheritParentStarts gives a container with no page of its own — a
+// "PART II" whose only content is its items — the first page any of its
+// children start on. Without it the container has no EndPage, and every
+// child in the previous part that shares a start page with a sibling
+// falls through to the document's last page as its end (HAL-1367).
+func inheritParentStarts(nodes []tree.TOCNode) {
+	for i := range nodes {
+		n := &nodes[i]
+		if len(n.Nodes) == 0 {
+			continue
+		}
+		inheritParentStarts(n.Nodes)
+		if n.StartPage > 0 {
+			continue
+		}
+		for _, c := range n.Nodes {
+			if c.StartPage > 0 && (n.StartPage == 0 || c.StartPage < n.StartPage) {
+				n.StartPage = c.StartPage
+			}
+		}
+	}
 }
 
 func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
@@ -853,9 +910,15 @@ func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
 		if end <= 0 {
 			end = ceiling
 		}
-		// EndPage can never precede StartPage; clear to zero when
-		// the data conflicts.
-		if n.StartPage > 0 && end >= n.StartPage {
+		// A section can never end before the page it starts on. When
+		// the next part opens on this section's own page — Item 9B
+		// and Item 10 of a 10-K routinely share one — the sibling
+		// arithmetic says "end on the page before"; the truth is the
+		// section is one page long.
+		if n.StartPage > 0 {
+			if end < n.StartPage {
+				end = n.StartPage
+			}
 			n.EndPage = end
 		}
 		// Recurse with the child ceiling = this node's EndPage (or
@@ -865,6 +928,12 @@ func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
 			childCeiling = ceiling
 		}
 		deriveEndPagesIn(n.Nodes, childCeiling)
+		// A container spans at least as far as its last child.
+		for _, c := range n.Nodes {
+			if c.EndPage > n.EndPage {
+				n.EndPage = c.EndPage
+			}
+		}
 	}
 }
 

@@ -311,6 +311,69 @@ func TestEndPageDerivationFromSiblings(t *testing.T) {
 	}
 }
 
+// A 10-K's parts carry no page of their own. Items 1B, 2, 3 and 4 all
+// start on page 34 and the next sibling with a greater page is in the
+// NEXT part, so without the part inheriting a start from its children
+// every one of them ran to the last page of the document.
+func TestEndPageDerivationAcrossPartsSharingAPage(t *testing.T) {
+	root := []tree.TOCNode{
+		{Structure: "1", Title: "PART I", StartPage: 3, Nodes: []tree.TOCNode{
+			{Structure: "1.1", Title: "Item 1", StartPage: 3},
+			{Structure: "1.2", Title: "Item 1B", StartPage: 34},
+			{Structure: "1.3", Title: "Item 2", StartPage: 34},
+			{Structure: "1.4", Title: "Item 4", StartPage: 34},
+		}},
+		{Structure: "2", Title: "PART II", Nodes: []tree.TOCNode{
+			{Structure: "2.1", Title: "Item 5", StartPage: 35},
+			{Structure: "2.2", Title: "Item 7", StartPage: 36},
+		}},
+	}
+	deriveEndPages(root, 99)
+	if root[1].StartPage != 35 {
+		t.Errorf("PART II should inherit its first child's page: got %d", root[1].StartPage)
+	}
+	if root[0].EndPage != 34 {
+		t.Errorf("PART I.EndPage: got %d want 34", root[0].EndPage)
+	}
+	for _, c := range root[0].Nodes[1:] {
+		if c.EndPage != 34 {
+			t.Errorf("%s.EndPage: got %d want 34", c.Title, c.EndPage)
+		}
+	}
+	if root[1].Nodes[1].EndPage != 99 {
+		t.Errorf("last item should run to the document end: got %d", root[1].Nodes[1].EndPage)
+	}
+}
+
+// Item 9B closes Part II on page 73 and Item 10 opens Part III on the
+// same page 73. Sibling arithmetic gives Part II an end of 72, which is
+// before 9B starts; 9B is one page long and Part II reaches page 73.
+func TestEndPageWhenTheNextPartOpensOnTheSamePage(t *testing.T) {
+	root := []tree.TOCNode{
+		{Structure: "2", Title: "PART II", Nodes: []tree.TOCNode{
+			{Structure: "2.1", Title: "Item 9A", StartPage: 71},
+			{Structure: "2.2", Title: "Item 9B", StartPage: 73},
+		}},
+		{Structure: "3", Title: "PART III", Nodes: []tree.TOCNode{
+			{Structure: "3.1", Title: "Item 10", StartPage: 73},
+			{Structure: "3.2", Title: "Item 15", StartPage: 74},
+		}},
+	}
+	deriveEndPages(root, 83)
+	if got := root[0].Nodes[1].EndPage; got != 73 {
+		t.Errorf("Item 9B.EndPage: got %d want 73", got)
+	}
+	if got := root[0].Nodes[0].EndPage; got != 72 {
+		t.Errorf("Item 9A.EndPage: got %d want 72", got)
+	}
+	if got := root[0].EndPage; got != 73 {
+		t.Errorf("PART II.EndPage: got %d want 73 (reaches its last child)", got)
+	}
+	if got := root[1].Nodes[0].EndPage; got != 73 {
+		t.Errorf("Item 10.EndPage: got %d want 73", got)
+	}
+}
+
 // TestAssembleHierarchyNestsByStructure makes sure dotted
 // structure indices group correctly. "1.1" nests under "1",
 // "2.1.1" three levels deep, etc.

@@ -890,16 +890,39 @@ func collapseOneSingleLeafParent(sections *[]Section) bool {
 // gains the child's body; an empty parent body is replaced outright so we
 // don't prefix a stray separator. Page ranges union (min start, max end).
 func absorbChildIntoParent(parent *Section, child Section) {
-	switch {
-	case strings.TrimSpace(parent.Content) == "":
-		parent.Content = child.Content
-	case strings.TrimSpace(child.Content) != "":
-		parent.Content = parent.Content + "\n\n" + child.Content
-	}
+	parent.Content = joinAbsorbed(parent.Content, child.Title, child.Content)
 	parent.PageStart = minNonZero(parent.PageStart, child.PageStart)
 	if child.PageEnd > parent.PageEnd {
 		parent.PageEnd = child.PageEnd
 	}
+}
+
+// joinAbsorbed appends an absorbed section's text to a survivor's,
+// keeping the absorbed section's TITLE as a bold heading line above its
+// body — the convention foldEmptyLeafSections already uses. Merging is
+// a structural concession to the leaf cap; it must not delete text.
+// Before this, a 10-K's "Item 2. Properties" heading vanished whenever
+// it followed the one-word "Item 1B. Unresolved Staff Comments" (their
+// combined size made them the smallest adjacent pair), and nothing
+// downstream could find where Item 2 began.
+func joinAbsorbed(survivor, absorbedTitle, absorbedBody string) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(survivor))
+	if t := strings.TrimSpace(absorbedTitle); t != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("**")
+		b.WriteString(t)
+		b.WriteString("**")
+	}
+	if body := strings.TrimSpace(absorbedBody); body != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(body)
+	}
+	return b.String()
 }
 
 // mergeOneSmallestAdjacentLeafPair finds the adjacent leaf-sibling pair
@@ -938,11 +961,7 @@ func mergeOneSmallestAdjacentLeafPair(sections []Section) bool {
 	s := *bestList
 	a, b := s[bestIdx], s[bestIdx+1]
 	merged := a
-	if strings.TrimSpace(a.Content) == "" {
-		merged.Content = b.Content
-	} else if strings.TrimSpace(b.Content) != "" {
-		merged.Content = a.Content + "\n\n" + b.Content
-	}
+	merged.Content = joinAbsorbed(a.Content, b.Title, b.Content)
 	merged.PageStart = minNonZero(a.PageStart, b.PageStart)
 	if b.PageEnd > merged.PageEnd {
 		merged.PageEnd = b.PageEnd
