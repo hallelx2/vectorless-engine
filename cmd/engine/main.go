@@ -21,6 +21,7 @@ import (
 
 	"github.com/hallelx2/llmgate"
 	"github.com/hallelx2/llmgate/judge/typesafe"
+	"github.com/hallelx2/llmgate/middleware/limit"
 	"github.com/hallelx2/llmgate/middleware/retry"
 	"github.com/hallelx2/llmgate/pricing"
 	"github.com/hallelx2/llmgate/provider/anthropic"
@@ -127,7 +128,10 @@ func run() error {
 			return fmt.Errorf("init llm: %w", err)
 		}
 	}
-	judge, err := buildJudge(cfg.LLM.Judge)
+	if llmClient != nil {
+		llmClient = limit.Client(newLimiter("llm", cfg.LLM.Concurrency, logger))(llmClient)
+	}
+	judge, err := buildJudge(cfg.LLM.Judge, newLimiter("judge", cfg.LLM.Concurrency, logger))
 	if err != nil {
 		logger.Error("judge: config invalid", "err", err)
 		os.Exit(1)
@@ -416,7 +420,23 @@ func modelFor(c config.LLMConfig) string {
 // call; a Judge request that fails past them is handled by the TOC
 // builder, which keeps extraction's pages rather than degrading
 // silently (HAL-1369).
-func buildJudge(c config.JudgeBlock) (llmgate.Judge, error) {
+// newLimiter builds one adaptive limiter for a provider and logs every
+// change it makes: a throttled run must be visible, never silent.
+func newLimiter(name string, c config.ConcurrencyBlock, logger *slog.Logger) *limit.Limiter {
+	return limit.New(limit.Config{
+		Initial: c.Initial,
+		Max:     c.Max,
+		OnChange: func(e limit.Event) {
+			if e.Cause == "success" {
+				logger.Info("limiter: widened", "provider", name, "from", e.From, "to", e.To)
+				return
+			}
+			logger.Warn("limiter: narrowed", "provider", name, "cause", e.Cause, "from", e.From, "to", e.To, "paused_for", e.PausedFor, "err", e.Err)
+		},
+	})
+}
+
+func buildJudge(c config.JudgeBlock, lim *limit.Limiter) (llmgate.Judge, error) {
 	if c.TypeSafe.APIKey == "" {
 		return nil, nil
 	}
@@ -428,7 +448,9 @@ func buildJudge(c config.JudgeBlock) (llmgate.Judge, error) {
 	if err != nil {
 		return nil, err
 	}
-	return retry.NewJudge(retry.Config{MaxRetries: 3})(j), nil
+	// The limiter sits inside retry: each attempt takes a slot, and the
+	// failure that triggers a retry has already narrowed the limit.
+	return retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(j)), nil
 }
 
 func buildLLM(c config.LLMConfig) (llmgate.Client, error) {

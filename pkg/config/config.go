@@ -377,12 +377,26 @@ type LLMConfig struct {
 	OpenAI    OpenAIBlock    `yaml:"openai"`
 	Gemini    GeminiBlock    `yaml:"gemini"`
 
+	// Concurrency bounds calls in flight per provider — one adaptive
+	// limiter for the chat model, one for the Judge. The limit starts at
+	// Initial and moves: halved on a 429 or transport failure, honouring
+	// Retry-After; widened by one after a run of successes; never above
+	// Max. Zero selects llmgate's defaults (4, 64). Replaces guessing a
+	// fixed number (HAL-1372).
+	Concurrency ConcurrencyBlock `yaml:"concurrency"`
+
 	// Judge configures the System One model that answers the pipeline's
 	// judgements — contents-page detection and page resolution — in one
 	// batched request each, instead of a generative call per page. Left
 	// empty, those steps run on the generative driver above, one call at
 	// a time, and a 10-K's leaves lose their pages (HAL-1367).
 	Judge JudgeBlock `yaml:"judge"`
+}
+
+// ConcurrencyBlock configures the adaptive per-provider limiter.
+type ConcurrencyBlock struct {
+	Initial int `yaml:"initial"`
+	Max     int `yaml:"max"`
 }
 
 // JudgeBlock configures the Judge. Only TypeSafe is supported today; the

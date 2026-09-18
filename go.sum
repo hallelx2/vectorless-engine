@@ -134,6 +134,10 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 h1:8Tjv8EJ+pM1xP8mK6egEbD1OgnV
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2/go.mod h1:pkJQ2tZHJ0aFOVEEot6oZmaVEZcRme73eIFmhiVuRWs=
 github.com/hallelx2/llmgate v0.4.0 h1:LvaRt1PWEiR0DcNd3j8qX0GEO0oh/rKPHqfL1RABzII=
 github.com/hallelx2/llmgate v0.4.0/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
+github.com/hallelx2/llmgate v0.4.1-0.20260918182842-b2ec96425ecc h1:4b6tUdYQANqf5iCTnDZzY5dWHbRElVznCH4LiAovBkM=
+github.com/hallelx2/llmgate v0.4.1-0.20260918182842-b2ec96425ecc/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
+github.com/hallelx2/llmgate v0.5.0 h1:yNBm7NOtDrCnpeMPz2BqbNcCJeUTw0WN6oiIuEFankg=
+github.com/hallelx2/llmgate v0.5.0/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
 github.com/hallelx2/pdftable v0.4.0 h1:ldF8qQrUbejWsbB/JSIqliEXF2jF8z8kjEsbKS8r2BU=
 github.com/hallelx2/pdftable v0.4.0/go.mod h1:pxNlc4D43wjzis7M6EfgQZvHOsQ4okggm+xqUu+OokI=
 github.com/hhrutter/lzw v1.0.0 h1:laL89Llp86W3rRs83LvKbwYRx6INE8gDn0XNb1oXtm0=

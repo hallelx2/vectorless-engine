@@ -90,6 +90,11 @@ engine:
     #   api_key: ""
     #   model: "gemini-2.0-flash"
     #   reasoning_model: ""
+    # Adaptive per-provider concurrency (HAL-1372): starts at initial,
+    # halves on 429/transport failure, widens on success, capped at max.
+    concurrency:
+      initial: 4
+      max: 64
     # Judge (TypeSafe Jev): batched contents-page detection and page
     # resolution during ingest. Enabled when api_key is set — also read
     # from VLE_TYPESAFE_API_KEY / TYPESAFE_API_KEY. See HAL-1367.

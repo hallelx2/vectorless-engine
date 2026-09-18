@@ -23,10 +23,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hallelx2/llmgate"
 	"github.com/hallelx2/llmgate/judge/typesafe"
+	"github.com/hallelx2/llmgate/middleware/limit"
 	"github.com/hallelx2/llmgate/middleware/retry"
 	"github.com/hallelx2/llmgate/provider/anthropic"
 
@@ -58,7 +60,14 @@ func main() {
 	// z.ai gateway routinely exceeds 90s on a 100+ page filing, and a
 	// timeout there silently drops the whole tree. Measured 2026-09-18.
 	callTimeout := flag.Duration("timeout", 300*time.Second, "per LLM call timeout")
+	parallel := flag.Int("parallel", 1, "documents in flight at once; the provider's adaptive limiter governs requests")
 	flag.Parse()
+	if *parallel < 1 {
+		*parallel = 1
+	}
+	lim = limit.New(limit.Config{Initial: *parallel, OnChange: func(e limit.Event) {
+		fmt.Fprintf(os.Stderr, "  limiter %s %d -> %d %v\n", e.Cause, e.From, e.To, e.Err)
+	}})
 	if *docs == "" || *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: tocdump -docs <dir> -out <dir> [-no-judge]")
 		os.Exit(2)
@@ -81,42 +90,58 @@ func main() {
 		}
 	}
 
+	runStart := time.Now()
 	pdfs, _ := filepath.Glob(filepath.Join(*docs, "*.pdf"))
+	sem := make(chan struct{}, *parallel)
+	var wg sync.WaitGroup
+	var printMu sync.Mutex
 	for _, path := range pdfs {
-		name := strings.TrimSuffix(filepath.Base(path), ".pdf")
-		d := dump{Doc: name}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(path string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			name := strings.TrimSuffix(filepath.Base(path), ".pdf")
+			d := dump{Doc: name}
 
-		pages, err := readPages(path)
-		if err != nil {
-			d.Err = "parse: " + err.Error()
+			pages, err := readPages(path)
+			if err != nil {
+				d.Err = "parse: " + err.Error()
+				write(*out, d)
+				printMu.Lock()
+				fmt.Printf("  %-28s parse FAILED\n", name)
+				printMu.Unlock()
+				return
+			}
+			d.Pages = len(pages)
+
+			llm := client
+			if *judgeOnly {
+				llm = refusingClient{}
+			}
+			b := &ingest.TOCBuilder{LLM: llm, Judge: judge, LLMCallTimeout: *callTimeout, MinimalContext: *minimal}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			start := time.Now()
+			nodes, usage, err := b.Build(ctx, pages)
+			cancel()
+			d.Seconds = time.Since(start).Seconds()
+			d.Requests, d.InTokens, d.CostUSD = usage.LLMCalls, usage.InputTokens, usage.CostUSD
+			d.Generative, d.Degraded = usage.GenerativeCalls, usage.Degraded
+			if err != nil {
+				d.Err = err.Error()
+			}
+			d.Nodes = nodes
 			write(*out, d)
-			fmt.Printf("  %-28s parse FAILED\n", name)
-			continue
-		}
-		d.Pages = len(pages)
 
-		llm := client
-		if *judgeOnly {
-			llm = refusingClient{}
-		}
-		b := &ingest.TOCBuilder{LLM: llm, Judge: judge, LLMCallTimeout: *callTimeout, MinimalContext: *minimal}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		start := time.Now()
-		nodes, usage, err := b.Build(ctx, pages)
-		cancel()
-		d.Seconds = time.Since(start).Seconds()
-		d.Requests, d.InTokens, d.CostUSD = usage.LLMCalls, usage.InputTokens, usage.CostUSD
-		d.Generative, d.Degraded = usage.GenerativeCalls, usage.Degraded
-		if err != nil {
-			d.Err = err.Error()
-		}
-		d.Nodes = nodes
-		write(*out, d)
-
-		leaves := countLeaves(nodes)
-		fmt.Printf("  %-28s %4d pages  %6.1fs  %3d req  %d gen  %3d leaves  $%.4f %s %s\n",
-			name, d.Pages, d.Seconds, d.Requests, d.Generative, leaves, d.CostUSD, d.Err, strings.Join(d.Degraded, "; "))
+			leaves := countLeaves(nodes)
+			printMu.Lock()
+			fmt.Printf("  %-28s %4d pages  %6.1fs  %3d req  %d gen  %3d leaves  $%.4f %s %s\n",
+				name, d.Pages, d.Seconds, d.Requests, d.Generative, leaves, d.CostUSD, d.Err, strings.Join(d.Degraded, "; "))
+			printMu.Unlock()
+		}(path)
 	}
+	wg.Wait()
+	fmt.Printf("  wall %.1fs for %d documents at parallel=%d; limiter now %d\n", time.Since(runStart).Seconds(), len(pdfs), *parallel, lim.Limit())
 }
 
 func write(dir string, d dump) {
@@ -158,8 +183,12 @@ func buildJudge() (llmgate.Judge, error) {
 	if err != nil {
 		return nil, err
 	}
-	return retry.NewJudge(retry.Config{MaxRetries: 3})(j), nil
+	// The limiter sits inside retry so each attempt takes a slot.
+	return retry.NewJudge(retry.Config{MaxRetries: 6, BaseDelay: 5 * time.Second, MaxDelay: 60 * time.Second})(limit.Judge(lim)(j)), nil
 }
+
+// lim is the one adaptive limiter every document's Judge traffic shares.
+var lim *limit.Limiter
 
 func buildClient() (llmgate.Client, error) {
 	get := func(k string) string {

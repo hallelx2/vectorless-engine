@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"regexp"
 
@@ -262,7 +263,14 @@ func (n *JudgeNavigator) rankPages(ctx context.Context, query string, pages []Na
 	for i, p := range pages {
 		scores[i] = PageScore{Page: p}
 	}
-	requests := 0
+	// Build every batch first, then send them all at once. They do not
+	// depend on each other, and the provider's limiter — not a loop —
+	// decides how many are in flight (HAL-1372).
+	type batch struct {
+		state     map[string]any
+		questions map[string]llmgate.Question
+	}
+	var batches []batch
 	budget := n.reqTokens()
 	for start := 0; start < len(pages); {
 		state := map[string]any{"question": query}
@@ -307,22 +315,48 @@ func (n *JudgeNavigator) rankPages(ctx context.Context, query string, pages []Na
 			used += cost
 			end++
 		}
-		res, err := n.Judge.Judge(ctx, llmgate.JudgeRequest{State: state, Questions: questions})
-		if err != nil {
-			return nil, usage, requests, err
-		}
-		requests++
-		usage.Add(judgeUsage(res))
-		for qk := range questions {
-			p, err := res.Noul(qk)
-			if err != nil {
-				continue
-			}
-			var i int
-			fmt.Sscanf(qk, "p_%d", &i)
-			scores[i].P = p
-		}
+		batches = append(batches, batch{state, questions})
 		start = end
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		requests int
+	)
+	for _, b := range batches {
+		wg.Add(1)
+		go func(b batch) {
+			defer wg.Done()
+			res, err := n.Judge.Judge(ctx, llmgate.JudgeRequest{State: b.state, Questions: b.questions})
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				return
+			}
+			requests++
+			usage.Add(judgeUsage(res))
+			for qk := range b.questions {
+				p, err := res.Noul(qk)
+				if err != nil {
+					continue
+				}
+				var i int
+				fmt.Sscanf(qk, "p_%d", &i)
+				scores[i].P = p
+			}
+		}(b)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, usage, requests, firstErr
 	}
 	sort.SliceStable(scores, func(i, j int) bool { return scores[i].P > scores[j].P })
 	return scores, usage, requests, nil

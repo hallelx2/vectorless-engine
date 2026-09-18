@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hallelx2/llmgate"
@@ -13,10 +14,10 @@ import (
 
 // navJudge answers leaf questions by title keyword and page questions
 // by text keyword, and counts requests.
-func navJudge(leafHit, pageHit string) (*llmgate.MockJudge, *int) {
-	calls := 0
+func navJudge(leafHit, pageHit string) (*llmgate.MockJudge, *atomic.Int32) {
+	calls := &atomic.Int32{}
 	j := &llmgate.MockJudge{Respond: func(_ context.Context, req llmgate.JudgeRequest) (*llmgate.Judgment, error) {
-		calls++
+		calls.Add(1)
 		st := req.State.(map[string]any)
 		ans := map[string]llmgate.Answer{}
 		for id := range req.Questions {
@@ -32,7 +33,7 @@ func navJudge(leafHit, pageHit string) (*llmgate.MockJudge, *int) {
 		}
 		return &llmgate.Judgment{Model: "mock", Answers: ans, Usage: llmgate.Usage{InputTokens: 10, TotalTokens: 10, TokensReported: true}}, nil
 	}}
-	return j, &calls
+	return j, calls
 }
 
 func tenKLeaves() []NavLeaf {
@@ -72,8 +73,8 @@ func TestNavigateReadsTheBestLeafAndFindsTheEvidencePage(t *testing.T) {
 	if res.Evidence[0].Page.LeafID != "8" {
 		t.Errorf("evidence page should carry its leaf: %+v", res.Evidence[0].Page)
 	}
-	if *calls != 2 || res.Requests != 2 {
-		t.Errorf("requests: mock saw %d, result says %d; want 2 (leaves, pages)", *calls, res.Requests)
+	if calls.Load() != 2 || res.Requests != 2 {
+		t.Errorf("requests: mock saw %d, result says %d; want 2 (leaves, pages)", calls.Load(), res.Requests)
 	}
 	if res.Coarse != nil {
 		t.Errorf("six pages under a 40-page budget need no coarse pass")
@@ -110,8 +111,8 @@ func TestNavigateCoarsePassReachesDeepIntoABigLeaf(t *testing.T) {
 	if len(res.Evidence) == 0 || res.Evidence[0].Page.Number != 85 {
 		t.Fatalf("page 85 not found: %+v", res.Evidence)
 	}
-	if *calls < 3 {
-		t.Errorf("want leaves + coarse + full requests, got %d", *calls)
+	if calls.Load() < 3 {
+		t.Errorf("want leaves + coarse + full requests, got %d", calls.Load())
 	}
 }
 
@@ -173,8 +174,8 @@ func TestRankPagesBatchesUnderTheRequestBudget(t *testing.T) {
 	}
 	// 1900 chars of "y" is ~475 tokens; two fit under 1200 with the
 	// query, a third does not.
-	if reqs < 4 || *calls != reqs {
-		t.Errorf("10 pages of ~475 tokens under a 1200-token budget should take ≥4 requests, took %d (mock saw %d)", reqs, *calls)
+	if reqs < 4 || int(calls.Load()) != reqs {
+		t.Errorf("10 pages of ~475 tokens under a 1200-token budget should take ≥4 requests, took %d (mock saw %d)", reqs, calls.Load())
 	}
 	if scored[0].Page.Number != 8 {
 		t.Errorf("best page should be the one with the needle, got %d", scored[0].Page.Number)
@@ -261,8 +262,8 @@ func TestNavigateFollowsACrossReference(t *testing.T) {
 	if len(res.Evidence) == 0 || res.Evidence[0].Page.Number != 113 {
 		t.Fatalf("evidence %+v, want page 113 first", res.Evidence)
 	}
-	if *calls != 3 {
-		t.Errorf("requests: %d, want 3 (leaves, Item 3 page, Note 21 pages)", *calls)
+	if calls.Load() != 3 {
+		t.Errorf("requests: %d, want 3 (leaves, Item 3 page, Note 21 pages)", calls.Load())
 	}
 	// Turned off, it stays on Item 3.
 	n.NoFollowReferences = true
