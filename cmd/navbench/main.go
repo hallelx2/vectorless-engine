@@ -179,7 +179,7 @@ func load(doc, trees, pdfs string, leafCache map[string][]retrieval.NavLeaf, pag
 	if err != nil {
 		return nil, nil, err
 	}
-	pages := ingest.BenchAssemblePages(pd.Sections)
+	pages := ingest.BenchAssemblePages(pd)
 	var leaves []retrieval.NavLeaf
 	var walk func(ns []tree.TOCNode, path string)
 	walk = func(ns []tree.TOCNode, path string) {

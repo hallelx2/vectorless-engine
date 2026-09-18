@@ -29,7 +29,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "parse:", err)
 		os.Exit(1)
 	}
-	for _, p := range ingest.BenchAssemblePages(doc.Sections) {
+	for _, p := range ingest.BenchAssemblePages(doc) {
 		fmt.Printf("\n===== PAGE %d (%d chars) =====\n%s", p.PageNumber, len(p.Text), p.Text)
 	}
 }

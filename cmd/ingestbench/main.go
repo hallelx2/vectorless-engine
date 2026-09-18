@@ -245,5 +245,5 @@ func readPages(path string) ([]ingest.PageText, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ingest.BenchAssemblePages(doc.Sections), nil
+	return ingest.BenchAssemblePages(doc), nil
 }

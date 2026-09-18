@@ -345,6 +345,7 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 		if outline := reader.Outline(); len(outline.Child) > 0 {
 			if doc, ok := parsePDFWithOutline(outline, rows); ok {
 				doc.Sections = capLeafSections(doc.Sections, p.resolvedMaxSections())
+				doc.Pages = pagesFromRows(rows)
 				attachTableSections(doc, tableSections)
 				return doc, nil
 			}
@@ -543,9 +544,34 @@ func (p *PDF) parseDoc(_ context.Context, buf []byte) (*ParsedDoc, error) {
 	out := &ParsedDoc{
 		Title:    title,
 		Sections: capLeafSections(chunkOversizedLeaves(rootSec.Children), p.resolvedMaxSections()),
+		Pages:    pagesFromRows(rows),
 	}
 	attachTableSections(out, tableSections)
 	return out, nil
+}
+
+// pagesFromRows groups the filtered rows by page, in order. Rows carry
+// the physical page index they were read from, so a page with no rows
+// (blank, or image-only) simply has no entry — its number is still
+// its own, never reassigned.
+func pagesFromRows(rows []pdfRow) []Page {
+	var out []Page
+	var cur *Page
+	for _, r := range rows {
+		text := strings.TrimSpace(r.text)
+		if text == "" || r.page <= 0 {
+			continue
+		}
+		if cur == nil || cur.Number != r.page {
+			out = append(out, Page{Number: r.page})
+			cur = &out[len(out)-1]
+		}
+		if cur.Text != "" {
+			cur.Text += "\n"
+		}
+		cur.Text += text
+	}
+	return out
 }
 
 // resolvedMaxSections turns the configured MaxSections into the value

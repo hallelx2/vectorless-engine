@@ -21,8 +21,8 @@ import (
 
 // BenchAssemblePages turns parsed sections into the per-page text the
 // TOC builder consumes.
-func BenchAssemblePages(secs []parser.Section) []PageText {
-	return assemblePagesFromSections(secs)
+func BenchAssemblePages(doc *parser.ParsedDoc) []PageText {
+	return assemblePages(doc)
 }
 
 // BenchDetectTOC runs the Judge-backed detection phase alone.

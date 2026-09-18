@@ -457,7 +457,7 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 // SQL NULL to documents.toc_tree (which is the column's default,
 // so this is also the no-op).
 func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, parsed *parser.ParsedDoc, log *slog.Logger) error {
-	pages := assemblePagesFromSections(parsed.Sections)
+	pages := assemblePages(parsed)
 	if len(pages) == 0 {
 		log.Info("ingest: toc-builder skipped; no per-page text available")
 		return nil
@@ -519,6 +519,26 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 //
 // Sections with PageStart == 0 are skipped (the parser couldn't
 // place them) so the builder never sees ambiguous page numbers.
+// assemblePages returns the document's text per page. The parser's own
+// pages are the truth when it has them; the section-based assembly is
+// the fallback for formats with no page notion — and it is only ever an
+// approximation, since a section's content spans pages (HAL-1375).
+func assemblePages(parsed *parser.ParsedDoc) []PageText {
+	if parsed == nil {
+		return nil
+	}
+	if len(parsed.Pages) > 0 {
+		out := make([]PageText, 0, len(parsed.Pages))
+		for _, p := range parsed.Pages {
+			if p.Number > 0 && strings.TrimSpace(p.Text) != "" {
+				out = append(out, PageText{PageNumber: p.Number, Text: p.Text})
+			}
+		}
+		return out
+	}
+	return assemblePagesFromSections(parsed.Sections)
+}
+
 func assemblePagesFromSections(secs []parser.Section) []PageText {
 	pageText := map[int]*strings.Builder{}
 	pages := []int{}

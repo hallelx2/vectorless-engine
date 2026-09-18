@@ -136,7 +136,7 @@ func readPages(path string) ([]ingest.PageText, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ingest.BenchAssemblePages(doc.Sections), nil
+	return ingest.BenchAssemblePages(doc), nil
 }
 
 // dotEnv reads one key from a gitignored .env up-tree, so a credential

@@ -72,7 +72,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "parse:", err)
 		os.Exit(1)
 	}
-	pages := ingest.BenchAssemblePages(doc.Sections)
+	pages := ingest.BenchAssemblePages(doc)
 
 	key := os.Getenv(typesafe.EnvAPIKey)
 	if key == "" {
