@@ -6,7 +6,10 @@ import (
 	"sort"
 	"strings"
 
+	"regexp"
+
 	"github.com/hallelx2/llmgate"
+	"github.com/hallelx2/llmgate/judge/typesafe"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -56,8 +59,10 @@ type PageScore struct {
 type NavResult struct {
 	Leaves   []LeafScore // every leaf, best first
 	Selected []NavLeaf   // the leaves whose pages were read
-	Pages    []PageScore // every page read, best first
+	Coarse   []PageScore // the coarse pass over page heads, when it ran; best first
+	Pages    []PageScore // every page read in full, best first
 	Evidence []PageScore // pages above threshold, best first; never empty when any page was read
+	Followed []NavLeaf   // leaves read because an evidence page referred to them
 	Usage    Usage
 	Requests int
 }
@@ -70,28 +75,51 @@ type JudgeNavigator struct {
 	// evidence. Zero selects 0.5.
 	Threshold float64
 
-	// MaxLeaves bounds how many sections' pages are read. Zero selects 3.
+	// MaxLeaves bounds how many sections' pages are gathered. Zero
+	// selects 5.
 	MaxLeaves int
 
-	// MaxPages bounds how many pages are judged in total. Zero selects 40.
+	// MaxPages bounds how many pages are judged in full. Zero selects 40.
 	MaxPages int
+
+	// CoarsePages bounds how many gathered pages the coarse pass may
+	// rank by their heads before the best MaxPages are read in full.
+	// Zero selects 120. A 10-K's Item 8 alone is 70 pages; without the
+	// coarse pass the page budget cut it off at 40 and the statement on
+	// page 113 was never read.
+	CoarsePages int
+
+	// HeadChars is how much of a page the coarse pass sees. Zero selects
+	// 700 — the heading and the first rows of a table.
+	HeadChars int
+
+	// FollowReferences, when true (the default), takes one more hop when
+	// the evidence pages point elsewhere — "see Note 21" — and the leaf
+	// they point to has not been read. A 10-K's Item 3 is one sentence
+	// that refers to the note where the legal proceedings actually are.
+	NoFollowReferences bool
 
 	// PageChars truncates each page's text before the Judge sees it.
 	// Zero selects 6000 — a dense filing page is ~4–5k characters.
 	PageChars int
 
-	// RequestBudgetTokens bounds one page-ranking request. Zero selects
-	// 40k, under the provider's 64k request ceiling with room for the
-	// shared query.
+	// RequestBudgetTokens bounds the STATE of one page-ranking request.
+	// The provider treats the whole state object as shared context for
+	// every question — there is no per-question state — so state plus
+	// the longest question must stay under 32k tokens. Zero selects
+	// 24k, the same ceiling the TOC stage uses; that is six to eight
+	// dense filing pages per request.
 	RequestBudgetTokens int
 }
 
 const (
 	defaultNavThreshold  = 0.5
-	defaultNavMaxLeaves  = 3
+	defaultNavMaxLeaves  = 5
 	defaultNavMaxPages   = 40
+	defaultNavCoarse     = 120
+	defaultNavHeadChars  = 700
 	defaultNavPageChars  = 6000
-	defaultNavReqTokens  = 40_000
+	defaultNavReqTokens  = 24_000
 	navLeafBatch         = 120
 	navMinEvidencePages  = 2
 	navLeafStateMaxChars = 300
@@ -116,6 +144,20 @@ func (n *JudgeNavigator) maxPages() int {
 		return n.MaxPages
 	}
 	return defaultNavMaxPages
+}
+
+func (n *JudgeNavigator) coarsePages() int {
+	if n.CoarsePages > 0 {
+		return n.CoarsePages
+	}
+	return defaultNavCoarse
+}
+
+func (n *JudgeNavigator) headChars() int {
+	if n.HeadChars > 0 {
+		return n.HeadChars
+	}
+	return defaultNavHeadChars
 }
 
 func (n *JudgeNavigator) pageChars() int {
@@ -171,9 +213,10 @@ func (n *JudgeNavigator) RankLeaves(ctx context.Context, query string, leaves []
 					"`question` is a question about a document. `%s` is one section of that "+
 						"document's table of contents: its title, where it sits, and its page range. "+
 						"Would the information needed to answer the question be found in this "+
-						"section? Judge from what such a section of such a document contains — a "+
-						"financial statement holds the figures, an MD&A holds the discussion, a "+
-						"risk-factors section holds neither.", qk),
+						"section? Judge from what such a section of such a document contains: "+
+						"figures live in the statements and their notes, discussion of results in "+
+						"the MD&A, customers, competition and outlook in the business and risk "+
+						"sections.", qk),
 				Criteria: &llmgate.NoulCriteria{
 					True:  "This section is where a reader would look for the answer",
 					False: "The answer would not be in this section",
@@ -201,10 +244,16 @@ func (n *JudgeNavigator) RankLeaves(ctx context.Context, query string, leaves []
 }
 
 // RankPages asks, for every page, whether it contains the facts or
-// figures the question asks for. Pages are batched so one request stays
-// under the budget; each page's text is its own question state, so the
-// per-question ceiling is a page, not the sum.
+// figures the question asks for. Pages are batched so the request's
+// whole state — query plus every page in the batch — stays under the
+// budget, counted with the provider's tokenizer.
 func (n *JudgeNavigator) RankPages(ctx context.Context, query string, pages []NavPage) ([]PageScore, Usage, int, error) {
+	return n.rankPages(ctx, query, pages, n.pageChars(), false)
+}
+
+// rankPages is RankPages with the text window chosen by the caller:
+// the full page, or just its head for the coarse pass.
+func (n *JudgeNavigator) rankPages(ctx context.Context, query string, pages []NavPage, limit int, coarse bool) ([]PageScore, Usage, int, error) {
 	var usage Usage
 	if n.Judge == nil {
 		return nil, usage, 0, fmt.Errorf("judgewalk: no Judge configured")
@@ -215,33 +264,45 @@ func (n *JudgeNavigator) RankPages(ctx context.Context, query string, pages []Na
 	}
 	requests := 0
 	budget := n.reqTokens()
-	limit := n.pageChars()
 	for start := 0; start < len(pages); {
 		state := map[string]any{"question": query}
 		questions := map[string]llmgate.Question{}
-		used := len(query) / 4
+		used := countTokens(query) + 100
 		end := start
 		for end < len(pages) {
 			text := pages[end].Text
 			if len(text) > limit {
 				text = text[:limit]
 			}
-			cost := len(text)/4 + 60
+			cost := countTokens(text) + 20
 			if end > start && used+cost > budget {
 				break
 			}
 			qk := fmt.Sprintf("p_%d", end)
 			state[qk] = map[string]any{"page": pages[end].Number, "text": text}
-			questions[qk] = llmgate.Noul{
-				Instructions: fmt.Sprintf(
-					"`question` is a question about a document. `%s.text` is the text of page "+
-						"`%s.page`. Does this page contain the specific facts or figures needed to "+
-						"answer the question — the number, the statement, the table row? A page that "+
-						"only mentions the topic, or refers the reader elsewhere, does not.", qk, qk),
-				Criteria: &llmgate.NoulCriteria{
-					True:  "The answer, or a figure it is computed from, is on this page",
-					False: "The page is about something else, or only mentions the topic",
-				},
+			if coarse {
+				questions[qk] = llmgate.Noul{
+					Instructions: fmt.Sprintf(
+						"`question` is a question about a document. `%s.text` is the START of page "+
+							"`%s.page` — its heading and first lines. Could the facts or figures needed "+
+							"to answer the question be on this page, judging from what it opens with?", qk, qk),
+					Criteria: &llmgate.NoulCriteria{
+						True:  "This page's opening says it is the kind of page that would hold the answer",
+						False: "This page opens on something unrelated",
+					},
+				}
+			} else {
+				questions[qk] = llmgate.Noul{
+					Instructions: fmt.Sprintf(
+						"`question` is a question about a document. `%s.text` is the text of page "+
+							"`%s.page`. Does this page contain the specific facts or figures needed to "+
+							"answer the question — the number, the statement, the table row? A page that "+
+							"only mentions the topic, or refers the reader elsewhere, does not.", qk, qk),
+					Criteria: &llmgate.NoulCriteria{
+						True:  "The answer, or a figure it is computed from, is on this page",
+						False: "The page is about something else, or only mentions the topic",
+					},
+				}
 			}
 			used += cost
 			end++
@@ -283,36 +344,56 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	out.Requests += r
 	out.Leaves = ranked
 
-	// The best leaves, in rank order, until the page budget is spent.
-	// A leaf below threshold is still read when nothing better exists:
-	// a low-confidence best guess beats reading nothing.
+	// Gather the pages of the best leaves, in rank order, up to the
+	// coarse budget. A leaf below threshold is still read when nothing
+	// better exists: a low-confidence best guess beats reading nothing.
+	// A page two overlapping leaves both cover is gathered once.
 	var pages []NavPage
-	maxP := n.maxPages()
+	seen := map[int]bool{}
+	coarseCap := n.coarsePages()
 	for _, ls := range ranked {
-		if len(out.Selected) >= n.maxLeaves() {
+		if len(out.Selected) >= n.maxLeaves() || len(pages) >= coarseCap {
 			break
 		}
 		ps, err := loadPages(ctx, ls.Leaf)
 		if err != nil {
 			return nil, fmt.Errorf("judgewalk: load %q: %w", ls.Leaf.Title, err)
 		}
-		if len(ps) == 0 {
-			continue
+		added := 0
+		for _, p := range ps {
+			if seen[p.Number] || len(pages) >= coarseCap {
+				continue
+			}
+			seen[p.Number] = true
+			p.LeafID = ls.Leaf.ID
+			pages = append(pages, p)
+			added++
 		}
-		for i := range ps {
-			ps[i].LeafID = ls.Leaf.ID
-		}
-		if len(pages)+len(ps) > maxP {
-			ps = ps[:maxP-len(pages)]
-		}
-		pages = append(pages, ps...)
-		out.Selected = append(out.Selected, ls.Leaf)
-		if len(pages) >= maxP {
-			break
+		if added > 0 {
+			out.Selected = append(out.Selected, ls.Leaf)
 		}
 	}
 	if len(pages) == 0 {
 		return out, nil
+	}
+
+	// More pages than the full-text budget: a coarse pass over page
+	// heads picks which ones deserve their whole text. Heads are
+	// ~150 tokens, so 120 of them is one request.
+	maxP := n.maxPages()
+	if len(pages) > maxP {
+		heads, u, r, err := n.rankPages(ctx, query, pages, n.headChars(), true)
+		if err != nil {
+			return nil, fmt.Errorf("judgewalk: rank page heads: %w", err)
+		}
+		out.Usage.Add(u)
+		out.Requests += r
+		out.Coarse = heads
+		pages = pages[:0]
+		for _, h := range heads[:maxP] {
+			pages = append(pages, h.Page)
+		}
+		sort.Slice(pages, func(i, j int) bool { return pages[i].Number < pages[j].Number })
 	}
 	scored, u, r, err := n.RankPages(ctx, query, pages)
 	if err != nil {
@@ -322,17 +403,103 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	out.Requests += r
 	out.Pages = scored
 	th := n.threshold()
-	for _, ps := range scored {
-		if ps.P >= th {
-			out.Evidence = append(out.Evidence, ps)
+	fill := func(scored []PageScore) {
+		out.Evidence = out.Evidence[:0]
+		for _, ps := range scored {
+			if ps.P >= th {
+				out.Evidence = append(out.Evidence, ps)
+			}
+		}
+		// Never come back empty-handed: the best pages are the evidence,
+		// flagged by their probability.
+		if len(out.Evidence) < navMinEvidencePages {
+			out.Evidence = append(out.Evidence[:0], scored[:min(navMinEvidencePages, len(scored))]...)
 		}
 	}
-	// Never come back empty-handed: the best pages are the evidence,
-	// flagged by their probability.
-	if len(out.Evidence) < navMinEvidencePages {
-		out.Evidence = scored[:min(navMinEvidencePages, len(scored))]
+	fill(scored)
+
+	// One more hop when the evidence points elsewhere. Code reads the
+	// reference, the tree names the leaf, the Judge reads its pages.
+	if !n.NoFollowReferences {
+		var refPages []NavPage
+		readLeaf := map[string]bool{}
+		for _, l := range out.Selected {
+			readLeaf[l.ID] = true
+		}
+		for _, ev := range out.Evidence {
+			for _, target := range referencedLeaves(ev.Page.Text, leaves) {
+				if readLeaf[target.ID] {
+					continue
+				}
+				readLeaf[target.ID] = true
+				ps, err := loadPages(ctx, target)
+				if err != nil {
+					return nil, fmt.Errorf("judgewalk: follow %q: %w", target.Title, err)
+				}
+				for _, p := range ps {
+					if !seen[p.Number] && len(refPages) < maxP {
+						seen[p.Number] = true
+						p.LeafID = target.ID
+						refPages = append(refPages, p)
+					}
+				}
+				out.Followed = append(out.Followed, target)
+			}
+		}
+		if len(refPages) > 0 {
+			more, u, r, err := n.RankPages(ctx, query, refPages)
+			if err != nil {
+				return nil, fmt.Errorf("judgewalk: rank referenced pages: %w", err)
+			}
+			out.Usage.Add(u)
+			out.Requests += r
+			out.Pages = append(out.Pages, more...)
+			sort.SliceStable(out.Pages, func(i, j int) bool { return out.Pages[i].P > out.Pages[j].P })
+			fill(out.Pages)
+		}
 	}
 	return out, nil
+}
+
+// countTokens uses the provider's tokenizer, so the batch budget is
+// measured the way the request will be. Dense financial tables run
+// near one token per two characters; a bytes/4 guess overflowed.
+func countTokens(text string) int {
+	if n, err := typesafe.EstimateTokens(text); err == nil {
+		return n
+	}
+	return len(text)/3 + 1
+}
+
+// reReference finds the cross-references a page makes: "see Note 21",
+// "Item 1A", "Note 14 to the Consolidated Financial Statements".
+var reReference = regexp.MustCompile(`(?i)\b(note|item|part|section|schedule)\s+(\d+[a-c]?)\b`)
+
+// referencedLeaves returns the leaves a page's cross-references name,
+// matched by label and number at the start of the leaf's title.
+func referencedLeaves(text string, leaves []NavLeaf) []NavLeaf {
+	var out []NavLeaf
+	seen := map[string]bool{}
+	for _, m := range reReference.FindAllStringSubmatch(text, -1) {
+		label, num := strings.ToLower(m[1]), strings.ToLower(m[2])
+		key := label + " " + num
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		for _, l := range leaves {
+			t := strings.ToLower(strings.TrimSpace(l.Title))
+			// "Note 21. Legal Proceedings", "NOTE 21 — …", "Item 1A."
+			if strings.HasPrefix(t, key) {
+				rest := t[len(key):]
+				if rest == "" || !(rest[0] >= '0' && rest[0] <= '9') && !(rest[0] >= 'a' && rest[0] <= 'z') {
+					out = append(out, l)
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 func judgeUsage(res *llmgate.Judgment) Usage {
