@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -241,6 +242,8 @@ func run() error {
 	})
 	if cfg.Engine.Ingest.Mode == ingest.ModeMinimal {
 		logger.Info("ingest: MINIMAL mode — parse→persist→ready; skipping summarize/HyDE/multi-axis/TOC + table extraction")
+	} else if cfg.Engine.Ingest.Mode == ingest.ModeTOC {
+		logger.Info("ingest: TOC mode — parse→table of contents→persist→ready; skipping summarize/HyDE/multi-axis + table extraction")
 	} else if cfg.Engine.Ingest.Tables.Enabled {
 		logger.Info("ingest: pdf table extraction enabled",
 			"vertical_strategy", cfg.Engine.Ingest.Tables.VerticalStrategy,
@@ -488,7 +491,7 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, judge llm
 			log.Printf("retrieval: strategy judgewalk needs llm.judge configured; using treewalk")
 			return buildTreeWalkStrategy(c, client, store, pool)
 		}
-		return buildJudgeWalkStrategy(judge, store)
+		return buildJudgeWalkStrategy(judge, store, pool)
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
 	case "chunked-tree":
@@ -535,7 +538,12 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
 	if judge != nil {
-		set["judgewalk"] = buildJudgeWalkStrategy(judge, store)
+		set["judgewalk"] = buildJudgeWalkStrategy(judge, store, pool)
+	} else {
+		// The same fallback the default builder applies: a request that
+		// names judgewalk on a server with no Judge gets treewalk, not
+		// "unknown strategy".
+		set["judgewalk"] = set["treewalk"]
 	}
 	return set
 }
@@ -544,9 +552,13 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 // leaves ranked in one request, the best sections' bodies ranked in one
 // or two more, no generative call (HAL-1371). Selectable per request as
 // strategy=judgewalk whenever llm.judge is configured.
-func buildJudgeWalkStrategy(judge llmgate.Judge, store storage.Storage) *retrieval.JudgeWalkStrategy {
+func buildJudgeWalkStrategy(judge llmgate.Judge, store storage.Storage, pool *db.Pool) *retrieval.JudgeWalkStrategy {
 	s := retrieval.NewJudgeWalkStrategy(judge)
 	s.PageLoader = storagePageLoader{s: store}
+	if pool != nil {
+		s.TOC = dbTOCProvider{db: pool}
+	}
+	s.Pages = storagePageStore{s: store}
 	return s
 }
 
@@ -686,4 +698,26 @@ func tableOptsFromConfig(c enginecfg.TablesConfig) *parser.TableOpts {
 		MinTableRows:       c.MinTableRows,
 		MinTableCols:       c.MinTableCols,
 	}
+}
+
+// storagePageStore serves the per-page text ingest persisted at
+// ingest.PagesKey, for judgewalk. Missing pages are not an error: the
+// strategy falls back to the section tree.
+type storagePageStore struct{ s storage.Storage }
+
+func (p storagePageStore) LoadPages(ctx context.Context, docID tree.DocumentID) ([]retrieval.NavPage, error) {
+	rc, _, err := p.s.Get(ctx, ingest.PagesKey(docID))
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var pages []ingest.PageText
+	if err := json.NewDecoder(rc).Decode(&pages); err != nil {
+		return nil, err
+	}
+	out := make([]retrieval.NavPage, 0, len(pages))
+	for _, pg := range pages {
+		out = append(out, retrieval.NavPage{Number: pg.PageNumber, Text: pg.Text})
+	}
+	return out, nil
 }

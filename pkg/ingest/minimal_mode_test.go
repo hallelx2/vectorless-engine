@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -313,5 +314,67 @@ func reconstructTree(_ tree.DocumentID, title string, rows []db.Section) *tree.S
 		return topLevel[0]
 	default:
 		return &tree.Section{Title: title, Children: topLevel}
+	}
+}
+
+// TOC mode on a non-PDF is minimal mode: nothing for the TOC builder to
+// do, no model call, ready.
+func TestTOCModeOnMarkdownMakesNoLLMCall(t *testing.T) {
+	ctx := context.Background()
+	st, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("# Title\n\n## Section A\n\nAlpha.\n\n## Section B\n\nBeta.\n")
+	docID := NewDocumentID()
+	srcKey := SourceKey(docID, "doc.md")
+	if err := st.Put(ctx, srcKey, bytes.NewReader(body), storage.Metadata{ContentType: "text/markdown", Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPipeline(Pipeline{
+		Storage:    st,
+		LLM:        &failIfCalledLLM{t: t},
+		Parsers:    DefaultRegistry(),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mode:       ModeTOC,
+		TOCEnabled: true,
+	})
+	fake := &fakeDocStore{}
+	if err := p.runMinimal(ctx, fake, Payload{DocumentID: docID, ContentType: "text/markdown", Filename: "doc.md", SourceRef: srcKey}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	status, errMsg, sections := fake.snapshot()
+	if status != db.StatusReady {
+		t.Fatalf("status %q (%q) want ready", status, errMsg)
+	}
+	if len(sections) == 0 {
+		t.Fatal("no sections persisted")
+	}
+}
+
+// Pages are persisted beside the table of contents as JSON at PagesKey,
+// in the shape page-based retrieval reads back.
+func TestPersistPagesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Storage: st}
+	pages := []PageText{{PageNumber: 1, Text: "cover"}, {PageNumber: 3, Text: "Item 1. Business"}}
+	if err := p.persistPages(ctx, "doc_x", pages); err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := st.Get(ctx, PagesKey("doc_x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	var back []PageText
+	if err := json.NewDecoder(rc).Decode(&back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != 2 || back[1].PageNumber != 3 || back[1].Text != "Item 1. Business" {
+		t.Errorf("round trip: %+v", back)
 	}
 }

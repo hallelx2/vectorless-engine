@@ -23,8 +23,8 @@ import (
 // pages produced by the existing parser pipeline and over synthetic
 // fixtures used in tests.
 type PageText struct {
-	PageNumber int
-	Text       string
+	PageNumber int    `json:"page_number"`
+	Text       string `json:"text"`
 }
 
 // TOCBuilder builds an LLM-derived table-of-contents tree for a
