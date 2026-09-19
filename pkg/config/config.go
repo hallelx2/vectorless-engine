@@ -1319,7 +1319,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Retrieval.Strategy {
-	case "auto", "single-pass", "chunked-tree", "agentic", "treewalk":
+	case "auto", "single-pass", "chunked-tree", "agentic", "treewalk", "judgewalk":
 	default:
 		return fmt.Errorf("unknown retrieval.strategy: %q", c.Retrieval.Strategy)
 	}
