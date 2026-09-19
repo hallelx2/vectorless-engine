@@ -241,6 +241,8 @@ func run() error {
 	})
 	if cfg.Engine.Ingest.Mode == ingest.ModeMinimal {
 		logger.Info("ingest: MINIMAL mode — parse→persist→ready; skipping summarize/HyDE/multi-axis/TOC + table extraction")
+	} else if cfg.Engine.Ingest.Mode == ingest.ModeTOC {
+		logger.Info("ingest: TOC mode — parse→table of contents→persist→ready; skipping summarize/HyDE/multi-axis + table extraction")
 	} else if cfg.Engine.Ingest.Tables.Enabled {
 		logger.Info("ingest: pdf table extraction enabled",
 			"vertical_strategy", cfg.Engine.Ingest.Tables.VerticalStrategy,

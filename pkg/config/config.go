@@ -1339,9 +1339,9 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Ingest.Mode {
-	case "", "full", "minimal":
+	case "", "full", "minimal", "toc":
 	default:
-		return fmt.Errorf("ingest.mode must be one of full|minimal, got %q", c.Ingest.Mode)
+		return fmt.Errorf("ingest.mode must be one of full|minimal|toc, got %q", c.Ingest.Mode)
 	}
 
 	if c.Ingest.HyDE.NumQuestions < 0 {

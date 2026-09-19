@@ -315,3 +315,38 @@ func reconstructTree(_ tree.DocumentID, title string, rows []db.Section) *tree.S
 		return &tree.Section{Title: title, Children: topLevel}
 	}
 }
+
+// TOC mode on a non-PDF is minimal mode: nothing for the TOC builder to
+// do, no model call, ready.
+func TestTOCModeOnMarkdownMakesNoLLMCall(t *testing.T) {
+	ctx := context.Background()
+	st, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("# Title\n\n## Section A\n\nAlpha.\n\n## Section B\n\nBeta.\n")
+	docID := NewDocumentID()
+	srcKey := SourceKey(docID, "doc.md")
+	if err := st.Put(ctx, srcKey, bytes.NewReader(body), storage.Metadata{ContentType: "text/markdown", Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPipeline(Pipeline{
+		Storage:    st,
+		LLM:        &failIfCalledLLM{t: t},
+		Parsers:    DefaultRegistry(),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mode:       ModeTOC,
+		TOCEnabled: true,
+	})
+	fake := &fakeDocStore{}
+	if err := p.runMinimal(ctx, fake, Payload{DocumentID: docID, ContentType: "text/markdown", Filename: "doc.md", SourceRef: srcKey}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	status, errMsg, sections := fake.snapshot()
+	if status != db.StatusReady {
+		t.Fatalf("status %q (%q) want ready", status, errMsg)
+	}
+	if len(sections) == 0 {
+		t.Fatal("no sections persisted")
+	}
+}
