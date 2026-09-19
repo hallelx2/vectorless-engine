@@ -601,11 +601,18 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	plan, _ := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
-	ids, confidences, err := d.runSelection(r.Context(), t, plan, body.Query, budget)
+	ids, confidences, selUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
 		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
 		return
+	}
+	// The model the caller named, or — when it named none, as a
+	// Judge-navigated query need not — the strategy, so the field is
+	// never empty and a client can always tell what answered.
+	modelUsed := body.Model
+	if modelUsed == "" {
+		modelUsed = d.Strategy.Name()
 	}
 
 	// Phase 2.4 abstention: if every confident pick is below the
@@ -615,7 +622,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// responses (no confidences) always fall through to the normal
 	// path so older models keep working.
 	if d.abstentionEnabled(body.EnableAbstain) && shouldAbstain(confidences, d.Abstain.Below) {
-		d.respondAbstained(w, body.DocumentID, body.Query, confidences, plan)
+		d.respondAbstained(w, body.DocumentID, body.Query, modelUsed, confidences, plan, selUsage)
 		return
 	}
 
@@ -678,10 +685,13 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"document_id": body.DocumentID,
 		"query":       body.Query,
 		"strategy":    d.Strategy.Name(),
-		"model":       body.Model,
+		"model":       modelUsed,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
 		"trace_token": traceToken,
+		// What retrieval cost. /v1/answer always reported this; /v1/query
+		// dropped it, so a caller benchmarking retrieval alone saw $0.
+		"usage": usageJSON(selUsage),
 	}
 	if plan != nil {
 		resp["plan"] = plan
@@ -1650,11 +1660,13 @@ const abstentionAnswerText = "I cannot answer this question from the supplied do
 // the response in the replay log because there's no meaningful
 // retrieval result to reproduce. Callers replaying an abstention
 // will simply re-run /v1/query.
-func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, query string, confidences map[tree.SectionID]float64, plan *retrieval.Plan) {
+func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, query string, model string, confidences map[tree.SectionID]float64, plan *retrieval.Plan, usage retrieval.Usage) {
 	resp := map[string]any{
 		"document_id":              docID,
 		"query":                    query,
 		"strategy":                 d.Strategy.Name(),
+		"model":                    model,
+		"usage":                    usageJSON(usage),
 		"sections":                 []any{},
 		"abstained":                true,
 		"abstention_reason":        abstentionReason,
@@ -1665,6 +1677,18 @@ func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, que
 		resp["plan"] = plan
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// usageJSON is the wire shape of retrieval.Usage on /v1/query, the same
+// keys /v1/answer uses for total_usage.
+func usageJSON(u retrieval.Usage) map[string]any {
+	return map[string]any{
+		"input_tokens":  u.InputTokens,
+		"output_tokens": u.OutputTokens,
+		"total_tokens":  u.TotalTokens,
+		"cost_usd":      u.CostUSD,
+		"llm_calls":     u.LLMCalls,
+	}
 }
 
 // respondAbstainedAnswer writes the abstention shape for /v1/answer.
