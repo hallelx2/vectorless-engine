@@ -105,6 +105,12 @@ type TOCBuilder struct {
 	// to earn its place.
 	MinimalContext bool
 
+	// SplitLeavesOver splits any leaf spanning more pages than this into
+	// sub-leaves at its internal headings, confirmed by the Judge
+	// (HAL-1374). Zero selects the default of 20 when a Judge is set;
+	// negative disables splitting.
+	SplitLeavesOver int
+
 	// DetectChars caps the characters of each page sent to detection when
 	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
 	// declares itself in its first couple of thousand characters; the
@@ -272,6 +278,15 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// start pages drive the derivation.
 	deriveEndPages(nodes, lastPage(pages))
 
+	// Split the leaves that are too big to cite or to read, at their
+	// own internal headings (HAL-1374). Needs the spans, so it runs
+	// after end pages; adds its own children's end pages.
+	if over := b.splitLeavesOver(); over > 0 {
+		if n := b.splitLargeLeaves(ctx, nodes, pages, over, &usage); n > 0 {
+			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, over)
+		}
+	}
+
 	// Stamp stable node IDs onto every node so callers / external
 	// consumers have an opaque handle independent of position.
 	stampNodeIDs(nodes, "")
@@ -288,6 +303,21 @@ const resolverAttempts = 2
 // exhaustion it leaves the tree exactly as extraction produced it and
 // records the fact; it never routes a Judge-path document through the
 // generative verifier.
+// defaultSplitLeavesOver: measured on FinanceBench, splitting at 8, 12
+// and 20 pages navigated alike (right section 40/40, evidence 36/40);
+// 20 makes the fewest sub-leaves and costs the least.
+const defaultSplitLeavesOver = 20
+
+func (b *TOCBuilder) splitLeavesOver() int {
+	switch {
+	case b.SplitLeavesOver < 0, b.Judge == nil:
+		return 0
+	case b.SplitLeavesOver == 0:
+		return defaultSplitLeavesOver
+	}
+	return b.SplitLeavesOver
+}
+
 func (b *TOCBuilder) resolvePagesOrKeep(ctx context.Context, nodes []tree.TOCNode, pages []PageText, exclude []int, usage *Usage) {
 	var lastErr error
 	for attempt := 1; attempt <= resolverAttempts; attempt++ {

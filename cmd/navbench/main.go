@@ -71,7 +71,7 @@ func main() {
 	trees := flag.String("trees", "", "directory of tocdump trees")
 	pdfs := flag.String("pdfs", "", "directory of filings")
 	out := flag.String("out", "", "JSONL of per-question outcomes")
-	maxLeaves := flag.Int("leaves", 3, "sections read per question")
+	maxLeaves := flag.Int("leaves", 0, "cap on sections read per question; 0 lets the page budget decide")
 	maxPages := flag.Int("pages", 40, "pages judged per question")
 	limitQ := flag.Int("limit", 0, "stop after this many questions (0 = all)")
 	parallel := flag.Int("parallel", 1, "questions in flight at once; the provider's adaptive limiter governs requests")
