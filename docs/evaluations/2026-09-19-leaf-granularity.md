@@ -33,9 +33,10 @@ sub-leaf is an "extra" by construction.
    rank order until the page budget is gathered. Same trees: right
    section 33 → 40, evidence 31 → 35. (The bench's own `-leaves 3`
    default masked the fix for one run.)
-2. **Every threshold produced the same 68 leaves per filing.** The
-   per-page cap, not the content, was deciding, and it kept the
-   earliest headings rather than the best. Sub-leaves are now kept by
+2. **Every threshold produced about the same leaf count: 69, 67 and 68
+   per filing (medians) at 8, 12 and 20.** The per-page cap, not the
+   content, was deciding, and it kept the earliest headings rather than
+   the best. Sub-leaves are now kept by
    the Judge's probability.
 3. **Tightening the budget to one sub-leaf per half-threshold lost
    coverage: 47 → 39 of 47.** Not because headings were dropped — because

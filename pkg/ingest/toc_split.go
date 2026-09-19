@@ -202,11 +202,13 @@ type headingCandidate struct {
 }
 
 // headingCandidates lists the heading-shaped lines of a leaf's pages,
-// one per distinct heading, dropping lines that repeat across pages.
+// every occurrence, dropping lines that repeat on three or more pages
+// (a running header). A title that first appears in a mini-index or a
+// cross-reference and later opens the real sub-section is judged at
+// each place it appears; accepted duplicates are resolved afterwards.
 func headingCandidates(leafPages []PageText) []headingCandidate {
 	seenOnPages := map[string]map[int]bool{}
-	first := map[string]headingCandidate{}
-	var order []string
+	var all []headingCandidate
 	for _, p := range leafPages {
 		lines := strings.Split(p.Text, "\n")
 		for i, raw := range lines {
@@ -219,22 +221,19 @@ func headingCandidates(leafPages []PageText) []headingCandidate {
 				seenOnPages[key] = map[int]bool{}
 			}
 			seenOnPages[key][p.PageNumber] = true
-			if _, ok := first[key]; !ok {
-				rest := strings.Join(lines[i+1:], "\n")
-				if len(rest) > splitExcerptChars {
-					rest = rest[:splitExcerptChars]
-				}
-				first[key] = headingCandidate{text: line, page: p.PageNumber, excerpt: line + "\n" + rest}
-				order = append(order, key)
+			rest := strings.Join(lines[i+1:], "\n")
+			if len(rest) > splitExcerptChars {
+				rest = rest[:splitExcerptChars]
 			}
+			all = append(all, headingCandidate{text: line, page: p.PageNumber, excerpt: line + "\n" + rest})
 		}
 	}
 	var out []headingCandidate
-	for _, key := range order {
-		if len(seenOnPages[key]) >= splitRunningHeaderRepeats {
-			continue // a running header, a repeated column label
+	for _, c := range all {
+		if len(seenOnPages[normalise(c.text)]) >= splitRunningHeaderRepeats {
+			continue
 		}
-		out = append(out, first[key])
+		out = append(out, c)
 	}
 	return out
 }
@@ -347,17 +346,22 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 	}
 	_ = over
 	sort.SliceStable(ss, func(i, j int) bool { return ss[i].p > ss[j].p })
-	if len(ss) > max {
-		ss = ss[:max]
-	}
+	// One sub-leaf per page and per title, the most confident of each,
+	// chosen before the cap so a page with several confident headings
+	// cannot spend the whole budget.
 	var subs []tree.TOCNode
 	seenPage := map[int]bool{}
+	seenTitle := map[string]bool{}
 	for _, x := range ss {
-		if seenPage[x.n.StartPage] {
+		if seenPage[x.n.StartPage] || seenTitle[normalise(x.n.Title)] {
 			continue
 		}
 		seenPage[x.n.StartPage] = true
+		seenTitle[normalise(x.n.Title)] = true
 		subs = append(subs, x.n)
+		if len(subs) >= max {
+			break
+		}
 	}
 	sortByStart(subs)
 	return subs, nil

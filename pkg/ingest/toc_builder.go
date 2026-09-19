@@ -283,7 +283,7 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// after end pages; adds its own children's end pages.
 	if over := b.splitLeavesOver(); over > 0 {
 		if n := b.splitLargeLeaves(ctx, nodes, pages, over, &usage); n > 0 {
-			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, b.SplitLeavesOver)
+			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, over)
 		}
 	}
 

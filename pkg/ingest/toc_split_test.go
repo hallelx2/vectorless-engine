@@ -172,6 +172,47 @@ func TestHeadingCandidatesDropRunningHeadersAndFurniture(t *testing.T) {
 	}
 }
 
+// A title that appears first in a two-entry mini-index and later as the
+// real heading is judged at both places, and the accepted one wins.
+func TestHeadingCandidatesKeepEveryOccurrence(t *testing.T) {
+	ps := []PageText{
+		{60, "Contents of this note\nRevenue Recognition\nLeases\nsee the sections below"},
+		{64, "Revenue Recognition\nWe recognize revenue when control transfers."},
+	}
+	got := headingCandidates(ps)
+	n := 0
+	for _, c := range got {
+		if c.text == "Revenue Recognition" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("want both occurrences judged, got %d", n)
+	}
+}
+
+// Several confident headings on one page cannot spend the whole cap.
+func TestSubLeavesOnePerPageBeforeTheCap(t *testing.T) {
+	b := &TOCBuilder{Judge: splitJudge("alpha", "beta", "gamma", "delta")}
+	leaf := &tree.TOCNode{Title: "Big", StartPage: 1, EndPage: 4}
+	cands := []headingCandidate{
+		{text: "Alpha One", page: 1, excerpt: "Alpha One\nx"}, {text: "Alpha Two", page: 1, excerpt: "Alpha Two\nx"}, {text: "Alpha Three", page: 1, excerpt: "Alpha Three\nx"},
+		{text: "Beta", page: 2, excerpt: "Beta\nx"}, {text: "Gamma", page: 3, excerpt: "Gamma\nx"}, {text: "Delta", page: 4, excerpt: "Delta\nx"},
+	}
+	var usage Usage
+	subs, err := b.subLeavesFromHeadings(context.Background(), leaf, cands, 20, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := map[int]bool{}
+	for _, s := range subs {
+		pages[s.StartPage] = true
+	}
+	if len(subs) != 2 || len(pages) != 2 {
+		t.Errorf("a 4-page leaf caps at 2 sub-leaves on 2 distinct pages, got %v", titlesOfNodes(subs))
+	}
+}
+
 func TestLooksLikeSubHeading(t *testing.T) {
 	yes := []string{"Note 21 - Legal Proceedings", "Revenue and Related Cost Recognition", "CONSOLIDATED BALANCE SHEET", "Use of Estimates", "Item 1A. Risk Factors"}
 	no := []string{"We recognize revenue when control transfers.", "Table of Contents", "14,614", "Page", "the following table summarizes", "Revenues:", "Total Amounts Paid To Each Of The Named Executive Officers During The Year Ended"}
