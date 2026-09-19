@@ -538,6 +538,11 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 	}
 	if judge != nil {
 		set["judgewalk"] = buildJudgeWalkStrategy(judge, store)
+	} else {
+		// The same fallback the default builder applies: a request that
+		// names judgewalk on a server with no Judge gets treewalk, not
+		// "unknown strategy".
+		set["judgewalk"] = set["treewalk"]
 	}
 	return set
 }
