@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -561,6 +562,22 @@ func judgeUsage(res *llmgate.Judgment) Usage {
 type JudgeWalkStrategy struct {
 	Navigator  JudgeNavigator
 	PageLoader PageContentLoader
+
+	// TOC and Pages, when both are set and both have data for the
+	// document, are what navigation runs over: the table of contents
+	// ingest built (leaves with real page ranges, sub-sections and all)
+	// and the per-page text ingest persisted beside it. That is the
+	// pipeline the FinanceBench evaluations measured. Without either,
+	// navigation falls back to the section tree and section bodies —
+	// the parser's page attribution, which is what HAL-1375 showed to
+	// be unreliable — and scored 0.65 where the pages scored 0.90.
+	TOC   TOCProvider
+	Pages PageStore
+}
+
+// PageStore serves a document's per-page text, as ingest persisted it.
+type PageStore interface {
+	LoadPages(ctx context.Context, docID tree.DocumentID) ([]NavPage, error)
 }
 
 const strategyNameJudgeWalk = "judgewalk"
@@ -582,10 +599,112 @@ func (s *JudgeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query stri
 }
 
 // SelectWithCost runs navigation and reports usage.
-func (s *JudgeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
+func (s *JudgeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	if t == nil || t.Root == nil {
 		return &Result{}, nil
 	}
+	if res, ok := s.selectOnPersistedPages(ctx, t, query); ok {
+		return res, nil
+	}
+	return s.selectOnSectionTree(ctx, t, query, budget)
+}
+
+// selectOnPersistedPages navigates the persisted table of contents over
+// the persisted pages. ok is false when either is missing, so the
+// caller falls back; an error from navigation itself is returned as a
+// Result error through ok=true.
+func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.Tree, query string) (*Result, bool) {
+	if s.TOC == nil || s.Pages == nil {
+		return nil, false
+	}
+	raw, err := s.TOC.GetTOC(ctx, t.DocumentID)
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+	var nodes []tree.TOCNode
+	if err := json.Unmarshal(raw, &nodes); err != nil || len(nodes) == 0 {
+		return nil, false
+	}
+	pages, err := s.Pages.LoadPages(ctx, t.DocumentID)
+	if err != nil || len(pages) == 0 {
+		return nil, false
+	}
+	byNum := make(map[int]NavPage, len(pages))
+	for _, p := range pages {
+		byNum[p.Number] = p
+	}
+	var leaves []NavLeaf
+	var walk func(ns []tree.TOCNode, path string)
+	walk = func(ns []tree.TOCNode, path string) {
+		for _, n := range ns {
+			p := n.Title
+			if path != "" {
+				p = path + " > " + n.Title
+			}
+			if len(n.Nodes) > 0 {
+				walk(n.Nodes, p)
+				continue
+			}
+			if n.StartPage > 0 && n.EndPage >= n.StartPage {
+				leaves = append(leaves, NavLeaf{ID: n.NodeID, Title: n.Title, Path: p, Start: n.StartPage, End: n.EndPage, Summary: n.Summary})
+			}
+		}
+	}
+	walk(nodes, "")
+	if len(leaves) == 0 {
+		return nil, false
+	}
+	load := func(_ context.Context, leaf NavLeaf) ([]NavPage, error) {
+		var ps []NavPage
+		for n := leaf.Start; n <= leaf.End; n++ {
+			if p, ok := byNum[n]; ok {
+				ps = append(ps, p)
+			}
+		}
+		return ps, nil
+	}
+	nav, err := s.Navigator.Navigate(ctx, query, leaves, load)
+	if err != nil {
+		return &Result{ModelUsed: "judge"}, false
+	}
+	// The API answers in sections. Each evidence page names the sections
+	// that cover it; the cited pages are the evidence pages themselves.
+	sections := flattenSectionsByPage(t)
+	var ranges []pageRange
+	conf := map[tree.SectionID]float64{}
+	var ids []tree.SectionID
+	seen := map[tree.SectionID]bool{}
+	for _, ev := range nav.Evidence {
+		pg := ev.Page.Number
+		ranges = append(ranges, pageRange{Start: pg, End: pg})
+		for _, id := range sectionsOverlapping(sections, []pageRange{{Start: pg, End: pg}}) {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+			if ev.P > conf[id] {
+				conf[id] = ev.P
+			}
+		}
+	}
+	best := 0.0
+	if len(nav.Evidence) > 0 {
+		best = nav.Evidence[0].P
+	}
+	return &Result{
+		SelectedIDs: ids,
+		Confidences: conf,
+		Confidence:  best,
+		CitedPages:  rangesToPairs(ranges),
+		ModelUsed:   "judge",
+		Usage:       nav.Usage,
+		HopsTaken:   nav.Requests,
+	}, true
+}
+
+// selectOnSectionTree is the fallback: the parser's section tree, each
+// section's body chunked into page-sized units.
+func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
 	sections := flattenSectionsByPage(t)
 	byID := map[string]sectionPageEntry{}
 	paths := sectionPaths(t)

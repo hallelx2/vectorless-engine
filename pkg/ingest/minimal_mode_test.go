@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -348,5 +349,32 @@ func TestTOCModeOnMarkdownMakesNoLLMCall(t *testing.T) {
 	}
 	if len(sections) == 0 {
 		t.Fatal("no sections persisted")
+	}
+}
+
+// Pages are persisted beside the table of contents as JSON at PagesKey,
+// in the shape page-based retrieval reads back.
+func TestPersistPagesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{Storage: st}
+	pages := []PageText{{PageNumber: 1, Text: "cover"}, {PageNumber: 3, Text: "Item 1. Business"}}
+	if err := p.persistPages(ctx, "doc_x", pages); err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := st.Get(ctx, PagesKey("doc_x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	var back []PageText
+	if err := json.NewDecoder(rc).Decode(&back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != 2 || back[1].PageNumber != 3 || back[1].Text != "Item 1. Business" {
+		t.Errorf("round trip: %+v", back)
 	}
 }

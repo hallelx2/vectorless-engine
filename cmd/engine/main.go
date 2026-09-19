@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
+	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
 // version is set at build time via -ldflags "-X main.version=..."
@@ -141,7 +143,7 @@ func run() error {
 	} else {
 		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
 	}
-	strategy := buildStrategy(cfg.Retrieval, llmClient, judge, store)
+	strategy := buildStrategy(cfg.Retrieval, llmClient, judge, store, pool)
 
 	// Wrap with caching if enabled.
 	if cfg.Retrieval.Cache.Enabled {
@@ -542,7 +544,7 @@ func buildLLMFrom(c config.LLMConfig, provider, apiKey, baseURL, model string) (
 	}
 }
 
-func buildStrategy(c config.RetrievalConfig, client llmgate.Client, judge llmgate.Judge, store storage.Storage) retrieval.Strategy {
+func buildStrategy(c config.RetrievalConfig, client llmgate.Client, judge llmgate.Judge, store storage.Storage, pool *db.Pool) retrieval.Strategy {
 	switch c.Strategy {
 	case "judgewalk":
 		if judge == nil {
@@ -551,6 +553,8 @@ func buildStrategy(c config.RetrievalConfig, client llmgate.Client, judge llmgat
 		}
 		s := retrieval.NewJudgeWalkStrategy(judge)
 		s.PageLoader = storagePageLoader{s: store}
+		s.TOC = dbTOCProvider{db: pool}
+		s.Pages = storagePageStore{s: store}
 		return s
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
@@ -681,4 +685,40 @@ func tableOptsFromConfig(c config.TablesConfig) *parser.TableOpts {
 		MinTableRows:       c.MinTableRows,
 		MinTableCols:       c.MinTableCols,
 	}
+}
+
+// storagePageStore serves the per-page text ingest persisted at
+// ingest.PagesKey, for judgewalk. Missing pages are not an error: the
+// strategy falls back to the section tree.
+type storagePageStore struct{ s storage.Storage }
+
+func (p storagePageStore) LoadPages(ctx context.Context, docID tree.DocumentID) ([]retrieval.NavPage, error) {
+	rc, _, err := p.s.Get(ctx, ingest.PagesKey(docID))
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var pages []ingest.PageText
+	if err := json.NewDecoder(rc).Decode(&pages); err != nil {
+		return nil, err
+	}
+	out := make([]retrieval.NavPage, 0, len(pages))
+	for _, pg := range pages {
+		out = append(out, retrieval.NavPage{Number: pg.PageNumber, Text: pg.Text})
+	}
+	return out, nil
+}
+
+// dbTOCProvider reads documents.toc_tree for judgewalk and treewalk.
+type dbTOCProvider struct{ db *db.Pool }
+
+func (p dbTOCProvider) GetTOC(ctx context.Context, docID tree.DocumentID) ([]byte, error) {
+	doc, err := p.db.GetDocumentForWorker(ctx, docID)
+	if err != nil {
+		return nil, err
+	}
+	if len(doc.TOCTree) == 0 {
+		return nil, retrieval.ErrNoTOC
+	}
+	return doc.TOCTree, nil
 }
