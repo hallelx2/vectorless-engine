@@ -600,13 +600,19 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	started := time.Now()
 
-	plan, _ := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
+	// Usage accumulates the way /v1/answer's does: planner, selection,
+	// re-rank. Span extraction is per section and not counted on either
+	// endpoint today.
+	totalUsage := retrieval.Usage{}
+	plan, planUsage := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
+	totalUsage.Add(planUsage)
 	ids, confidences, selUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
 		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
 		return
 	}
+	totalUsage.Add(selUsage)
 	// The model the caller named, or — when it named none, as a
 	// Judge-navigated query need not — the strategy, so the field is
 	// never empty and a client can always tell what answered.
@@ -622,7 +628,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// responses (no confidences) always fall through to the normal
 	// path so older models keep working.
 	if d.abstentionEnabled(body.EnableAbstain) && shouldAbstain(confidences, d.Abstain.Below) {
-		d.respondAbstained(w, body.DocumentID, body.Query, modelUsed, confidences, plan, selUsage)
+		d.respondAbstained(w, body.DocumentID, body.Query, modelUsed, confidences, plan, totalUsage)
 		return
 	}
 
@@ -654,7 +660,9 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// never drop sections — at worst the strategy's order is
 	// preserved (see retrieval.ReRanker.ReRank).
 	if d.reRankEnabled(body.EnableReRank) {
-		enriched, _ = d.runReRank(r.Context(), enriched, body.Query, body.Model)
+		var reRankUsage retrieval.Usage
+		enriched, reRankUsage = d.runReRank(r.Context(), enriched, body.Query, body.Model)
+		totalUsage.Add(reRankUsage)
 	}
 
 	// Optional: per-section answer-span extraction. Opt-in via config —
@@ -691,7 +699,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"trace_token": traceToken,
 		// What retrieval cost. /v1/answer always reported this; /v1/query
 		// dropped it, so a caller benchmarking retrieval alone saw $0.
-		"usage": usageJSON(selUsage),
+		"usage": usageJSON(totalUsage),
 	}
 	if plan != nil {
 		resp["plan"] = plan
