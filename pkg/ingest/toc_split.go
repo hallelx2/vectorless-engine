@@ -90,6 +90,13 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			if len(subs) < splitMinEntries {
 				continue
 			}
+			// The pages before the first heading are the section's own
+			// opening — Item 8's index and auditor's report before the
+			// first statement. They must belong to a leaf, or a gold page
+			// there is inside no leaf at all (measured: 47/47 → 39/47).
+			if subs[0].StartPage > n.StartPage {
+				subs = append([]tree.TOCNode{{Title: n.Title, StartPage: n.StartPage}}, subs...)
+			}
 			for j := range subs {
 				subs[j].Structure = fmt.Sprintf("%s.%d", n.Structure, j+1)
 			}
@@ -330,11 +337,15 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 			ss = append(ss, scored{tree.TOCNode{Title: c.text, StartPage: c.page}, prob[i]})
 		}
 	}
+	// Measured (HAL-1374): a budget of one sub-leaf per half-threshold
+	// dropped real headings and cost coverage; one per two pages, the
+	// most confident kept, matched the index path and navigated best.
 	span := leaf.EndPage - leaf.StartPage + 1
-	max := span * 2 / over
+	max := int(float64(span) * splitMaxPerPage)
 	if max < splitMinEntries {
 		max = splitMinEntries
 	}
+	_ = over
 	sort.SliceStable(ss, func(i, j int) bool { return ss[i].p > ss[j].p })
 	if len(ss) > max {
 		ss = ss[:max]

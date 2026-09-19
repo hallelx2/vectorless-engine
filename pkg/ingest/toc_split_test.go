@@ -105,6 +105,11 @@ func TestSplitLeafFromANestedContentsPage(t *testing.T) {
 	if len(usage.Degraded) != 0 {
 		t.Errorf("degraded: %v", usage.Degraded)
 	}
+	// The pages before the first statement (index, auditor's report)
+	// belong to an opening sub-leaf with the parent's title.
+	if first := item8.Nodes[0]; first.StartPage != 54 || first.Title != item8.Title {
+		t.Errorf("opening sub-leaf should cover the parent's head from page 54: %+v", first)
+	}
 }
 
 func TestSplitLeafFromHeadingLinesWhenThereIsNoIndex(t *testing.T) {
@@ -190,6 +195,15 @@ func TestSplitIsOffWithoutAJudgeOrAThreshold(t *testing.T) {
 	}
 	if n := (&TOCBuilder{Judge: splitJudge("note")}).splitLargeLeaves(context.Background(), nodes, item8Pages(), 0, &usage); n != 0 {
 		t.Errorf("threshold 0 means off: %d", n)
+	}
+	if got := (&TOCBuilder{Judge: splitJudge("x"), SplitLeavesOver: -1}).splitLeavesOver(); got != 0 {
+		t.Errorf("negative should disable: %d", got)
+	}
+	if got := (&TOCBuilder{Judge: splitJudge("x")}).splitLeavesOver(); got != defaultSplitLeavesOver {
+		t.Errorf("default with a Judge: %d", got)
+	}
+	if got := (&TOCBuilder{}).splitLeavesOver(); got != 0 {
+		t.Errorf("no Judge means off: %d", got)
 	}
 }
 

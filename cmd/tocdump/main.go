@@ -61,7 +61,7 @@ func main() {
 	// timeout there silently drops the whole tree. Measured 2026-09-18.
 	callTimeout := flag.Duration("timeout", 300*time.Second, "per LLM call timeout")
 	parallel := flag.Int("parallel", 1, "documents in flight at once; the provider's adaptive limiter governs requests")
-	split := flag.Int("split", 0, "split leaves spanning more than this many pages into sub-leaves at their headings (0 = off)")
+	split := flag.Int("split", 0, "split leaves spanning more than this many pages into sub-leaves (0 = default 20, negative = off)")
 	flag.Parse()
 	if *parallel < 1 {
 		*parallel = 1
