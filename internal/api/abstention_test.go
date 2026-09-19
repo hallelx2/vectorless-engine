@@ -338,3 +338,25 @@ func TestRespondAbstainedAnswerSkipsSynthesis(t *testing.T) {
 var _ = bytes.NewReader
 var _ = io.EOF
 var _ = abstentionRouter
+
+// A page-based strategy's evidence pages are returned as-is, ahead of
+// tree sections, with the page number a client can cite (HAL-1390).
+func TestEvidencePageSections(t *testing.T) {
+	t.Parallel()
+	got := evidencePageSections([]retrieval.EvidencePage{
+		{Page: 113, Title: "Note 21 - Legal Proceedings", Text: "A class action filed in 2019 remains pending.", Confidence: 0.91},
+		{Page: 7, Text: "Suppliers"},
+	})
+	if len(got) != 2 {
+		t.Fatalf("len %d", len(got))
+	}
+	if got[0]["id"] != "page_113" || got[0]["page"] != 113 || got[0]["confidence"] != 0.91 {
+		t.Errorf("first: %+v", got[0])
+	}
+	if title, _ := got[0]["title"].(string); !strings.Contains(title, "Note 21") || !strings.HasSuffix(title, "p.113") {
+		t.Errorf("title %q", title)
+	}
+	if got[1]["title"] != "Page 7 · p.7" {
+		t.Errorf("untitled page: %v", got[1]["title"])
+	}
+}

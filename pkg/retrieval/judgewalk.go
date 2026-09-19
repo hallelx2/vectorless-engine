@@ -691,14 +691,23 @@ func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
 	}
+	leafTitle := map[string]string{}
+	for _, l := range leaves {
+		leafTitle[l.ID] = l.Title
+	}
+	evidence := make([]EvidencePage, 0, len(nav.Evidence))
+	for _, ev := range nav.Evidence {
+		evidence = append(evidence, EvidencePage{Page: ev.Page.Number, Title: leafTitle[ev.Page.LeafID], Text: ev.Page.Text, Confidence: ev.P})
+	}
 	return &Result{
-		SelectedIDs: ids,
-		Confidences: conf,
-		Confidence:  best,
-		CitedPages:  rangesToPairs(ranges),
-		ModelUsed:   "judge",
-		Usage:       nav.Usage,
-		HopsTaken:   nav.Requests,
+		SelectedIDs:   ids,
+		Confidences:   conf,
+		Confidence:    best,
+		CitedPages:    rangesToPairs(ranges),
+		EvidencePages: evidence,
+		ModelUsed:     "judge",
+		Usage:         nav.Usage,
+		HopsTaken:     nav.Requests,
 	}, true
 }
 
