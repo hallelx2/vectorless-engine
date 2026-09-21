@@ -8,17 +8,19 @@
 
 ## Result
 
-The 30 completed questions of the final run are the ones that ran before
-the TypeSafe account's credits were exhausted (402 at 15:07). For every
-one of them, each gold evidence page is among the returned page units
-and the gold page is the first unit returned. The four questions
-`navbench` missed (three Boeing, one Pfizer) may sit among the ten not
-yet run, so the full-run number is expected between 0.90 and 1.00, not
-1.00. The row will be replaced when the run completes.
+The final run completed all 40 questions and both repeats with no
+errors and no engine restart. Every gold evidence page is among the
+returned pages for 34 of 40 questions; hit@5 (any returned unit holds
+the answer text) is 37 of 40; the answer text is in the first returned
+unit for 30 of 40. The six page misses are the four `navbench` had
+already found (three Boeing, one Pfizer) plus two where a gold page was
+one page off the returned one (Pfizer 70–71 → 71; Verizon 23 and 56 →
+23 and 57) — a page-boundary question for the full-page pass, not a
+navigation one.
 
 | system | how it retrieves | F1@5 | hit@5 | answer span in top-1 | p50 / query | $ / query | ingest, 19 filings | deterministic across repeats |
 |---|---|---|---|---|---|---|---|---|
-| **Vectorless, judgewalk on persisted pages, pages returned** (PR #68) — **partial: first 30 of 40, one repeat**; the Judge's credits ran out at 15:07 | Jev ranks the TOC's sections, then page heads, then pages; the evidence pages are returned as-is, ahead of any section | 0.631 | **1.000** (30/30) | **1.000** (30/30) | 36 s | $0.0037 | 19 filings ≈ 48 min with sub-section splitting | _repeat 2 not run_ |
+| **Vectorless, judgewalk on persisted pages, pages returned** (PR #68, final run 2026-09-21) | Jev ranks the TOC's sections, then page heads, then pages; the evidence pages are returned as-is, ahead of any section | 0.498 | **0.925** | **0.750** | 37 s (p95 75 s) | $0.0040 | 1,111 s (58 s / filing, sub-section splitting on) | 0.38 exact, 0.83 Jaccard |
 | Vectorless, judgewalk on persisted pages, sections mapped by page range (PR #68 before HAL-1390) | same navigation; the parser's sections covering the evidence pages returned | 0.197 | 0.475 | 0.000 | 29 s | $0.0040 | — | — |
 | Vectorless, judgewalk on the section tree (first pass) | same navigation over the parser's sections and their bodies | 0.453 | 0.650 | 0.575 | 50 s | $0.0067 | 1,080 s (57 s / filing) | 0.43 exact, 0.69 Jaccard |
 | chunk-and-embed, BGE-small | 512-token chunks, bge-small-en-v1.5 on the CPU, cosine top-5 | 0.170 | 0.375 | 0.225 | 49 ms | $0 | 1,972 s (104 s / filing, 4 threads) | 1.00 |
@@ -45,8 +47,8 @@ result never. The right pages were found and then mapped back to the
 parser's sections covering them by page range — the same unreliable
 attribution, one step later. Page-based retrieval now returns its
 pages (HAL-1390): `/v1/query` leads with the evidence pages as units
-of their own, `page` and `confidence` set. On the 30 questions that
-completed, every gold page is returned and it is the first unit.
+of their own, `page` and `confidence` set. On the full 40, hit@5 went
+0.475 → 0.925 and the answer in the first unit 0.000 → 0.750.
 
 Three more things the run surfaced, each fixed on the way:
 
