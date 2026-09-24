@@ -57,10 +57,17 @@ var (
 	reSplitNumbered = regexp.MustCompile(`(?i)^(note|item|section|part)\s+\d+[a-c]?\b`)
 )
 
+// splitMaxDepth bounds how far the splitter descends into the
+// sub-leaves it creates. A 10-K reaches level 3 (part > item >
+// note); 4 leaves room for a note's own sub-headings without letting
+// a pathological document recurse into paragraphs.
+const splitMaxDepth = 4
+
 // splitLargeLeaves walks the tree and splits every leaf whose span
-// exceeds over pages. It runs after end pages are derived, so spans are
-// known, and re-derives them for the children it adds. Returns how many
-// sub-leaves were added.
+// exceeds over pages, then splits the sub-leaves it made, until no
+// leaf is over the threshold or splitMaxDepth is reached. Runs after
+// end pages are derived, so spans are known, and re-derives them for
+// each generation of children. Returns how many sub-leaves were added.
 func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode, pages []PageText, over int, usage *Usage) int {
 	if over <= 0 || b.Judge == nil {
 		return 0
@@ -70,12 +77,15 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 		byPage[p.PageNumber] = p.Text
 	}
 	added := 0
-	var walk func(ns []tree.TOCNode)
-	walk = func(ns []tree.TOCNode) {
+	var walk func(ns []tree.TOCNode, depth int)
+	walk = func(ns []tree.TOCNode, depth int) {
 		for i := range ns {
 			n := &ns[i]
 			if len(n.Nodes) > 0 {
-				walk(n.Nodes)
+				walk(n.Nodes, depth+1)
+				continue
+			}
+			if depth >= splitMaxDepth {
 				continue
 			}
 			if n.StartPage <= 0 || n.EndPage < n.StartPage || n.EndPage-n.StartPage+1 <= over {
@@ -103,9 +113,12 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			deriveEndPagesIn(subs, n.EndPage)
 			n.Nodes = subs
 			added += len(subs)
+			// Descend into what was just made: a 70-page Item 8 splits
+			// into notes, and a 28-page note has its own headings.
+			walk(n.Nodes, depth+1)
 		}
 	}
-	walk(nodes)
+	walk(nodes, 1)
 	return added
 }
 
