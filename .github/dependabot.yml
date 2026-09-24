@@ -1,17 +1,24 @@
+# Dependency CVE automation. Dependabot opens PRs for vulnerable/outdated deps.
+# Ecosystems with no manifest in a given repo are simply skipped.
+# Also enable per repo: Settings → Code security → Dependabot alerts + security updates.
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      aws:
-        patterns:
-          - "github.com/aws/*"
-      river:
-        patterns:
-          - "github.com/riverqueue/*"
   - package-ecosystem: github-actions
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+    labels: [dependencies, security]
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, security]
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, security]
