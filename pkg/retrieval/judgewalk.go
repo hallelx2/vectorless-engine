@@ -11,7 +11,6 @@ import (
 	"regexp"
 
 	"github.com/hallelx2/llmgate"
-	"github.com/hallelx2/llmgate/judge/typesafe"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -127,26 +126,20 @@ const (
 	defaultNavCoarse    = 120
 	defaultNavHeadChars = 700
 	defaultNavPageChars = 6000
-	// defaultNavReqTokens: measured against the provider on 2026-09-25,
-	// one Noul per page with real filing pages as state.
+	// defaultNavReqTokens bounds one request's state. Measured warm on
+	// 2026-09-25, one Noul per page: request SHAPE barely matters.
+	// Forty pages went out as ten parallel requests in 2.6 s wall, and
+	// as sixteen-page requests in 2.6 s each. An earlier probe appeared
+	// to punish large requests; that was cold-start contamination — the
+	// first calls of a session take 5-6 s and the rest settle to
+	// 1.5-2.6 s.
 	//
-	//   state tokens   median latency
-	//        1,589       4.2 s
-	//        2,724       3.6 s
-	//        4,919       3.8 s
-	//        9,253       5.9 s
-	//       17,159      14.3 s
-	//
-	// Latency is flat to about 5k tokens — fixed per-request overhead —
-	// and then grows faster than the text does. Concurrency is close to
-	// free: eight parallel 9k-token requests finished in 4.1 s wall,
-	// four times the total work of a single 17k-token request in half
-	// its wall clock.
-	//
-	// So the right shape is many small requests in flight, not few large
-	// ones. 6k keeps each request in the flat region; the adaptive
-	// limiter (llmgate middleware/limit) decides how many run at once.
-	defaultNavReqTokens  = 6_000
+	// This was briefly retuned to 6k on the strength of that bad probe
+	// and one navigation run came back three times slower (not a paired
+	// control either). No measured reason to move off 24k, which stays
+	// under the provider's 32k per-question ceiling with room for the
+	// question text.
+	defaultNavReqTokens  = 24_000
 	navLeafBatch         = 120
 	navMinEvidencePages  = 2
 	navLeafStateMaxChars = 300
@@ -521,14 +514,22 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	return out, nil
 }
 
-// countTokens uses the provider's tokenizer, so the batch budget is
-// measured the way the request will be. Dense financial tables run
-// near one token per two characters; a bytes/4 guess overflowed.
+// countTokens estimates a string's token count for packing batches.
+//
+// It deliberately does NOT run the provider's tokenizer. Measured
+// 2026-09-25: tokenising one question's forty pages costs 4.0 s of
+// CPU, and the client tokenises the assembled state again before every
+// request — about five seconds per question spent counting rather than
+// asking, on a query whose median is thirty-seven.
+//
+// The packing budget only needs a safe upper bound; the client's own
+// check is exact and refuses anything over the ceiling. Dense
+// financial tables run near one token per two and a half characters,
+// so len/2 over-estimates prose and sits close on tables.
+// Over-estimating costs one extra request, under-estimating costs a
+// rejected call, so the bias is deliberate.
 func countTokens(text string) int {
-	if n, err := typesafe.EstimateTokens(text); err == nil {
-		return n
-	}
-	return len(text)/3 + 1
+	return len(text)/2 + 1
 }
 
 // reReference finds the cross-references a page makes: "see Note 21",
