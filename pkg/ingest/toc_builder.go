@@ -111,6 +111,12 @@ type TOCBuilder struct {
 	// negative disables splitting.
 	SplitLeavesOver int
 
+	// SplitGenerations is how many times a path may be split: 1 (the
+	// default) splits the leaves the contents pass produced and stops.
+	// More descends into the sub-leaves it creates, which measured as
+	// pure cost on FinanceBench — see defaultSplitGenerations.
+	SplitGenerations int
+
 	// DetectChars caps the characters of each page sent to detection when
 	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
 	// declares itself in its first couple of thousand characters; the

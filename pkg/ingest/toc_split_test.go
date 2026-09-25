@@ -277,7 +277,7 @@ func TestSplitRecursesIntoItsOwnSubLeaves(t *testing.T) {
 		}
 		ps = append(ps, PageText{p, text})
 	}
-	b := &TOCBuilder{Judge: splitJudge("note", "principles of consolidation", "revenue and related", "use of estimates")}
+	b := &TOCBuilder{Judge: splitJudge("note", "principles of consolidation", "revenue and related", "use of estimates"), SplitGenerations: 3}
 	nodes := []tree.TOCNode{{Structure: "2.5", Title: "Item 8. Financial Statements", StartPage: 54, EndPage: 100}}
 	var usage Usage
 	if n := b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage); n < 4 {
@@ -318,7 +318,7 @@ func TestSplitStopsAtMaxDepth(t *testing.T) {
 		text := "Section Heading " + fmt.Sprint(p%7) + "\nprose " + strings.Repeat("y ", 40)
 		ps = append(ps, PageText{p, text})
 	}
-	b := &TOCBuilder{Judge: splitJudge("section heading")}
+	b := &TOCBuilder{Judge: splitJudge("section heading"), SplitGenerations: 99}
 	nodes := []tree.TOCNode{{Structure: "1", Title: "Everything", StartPage: 1, EndPage: 120}}
 	var usage Usage
 	b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage)
@@ -336,5 +336,37 @@ func TestSplitStopsAtMaxDepth(t *testing.T) {
 	}
 	if got := deepest(nodes, 1); got > splitMaxDepth {
 		t.Errorf("tree reached depth %d, cap is %d", got, splitMaxDepth)
+	}
+}
+
+// One generation is the default: the leaves the contents pass produced
+// are split, and the sub-leaves are left alone however large they are.
+func TestSplitIsOneGenerationByDefault(t *testing.T) {
+	ps := []PageText{
+		{54, "Item 8. Financial Statements\nIndex to the Consolidated Financial Statements\nPage\nNote 1 - Summary of Significant Accounting Policies 60\nNote 2 - Goodwill 95"},
+	}
+	for p := 55; p <= 100; p++ {
+		text := "Table of Contents\nprose " + strings.Repeat("x ", 40)
+		switch p {
+		case 60:
+			text = "Note 1 - Summary of Significant Accounting Policies\nPrinciples of Consolidation\nThe statements include."
+		case 72:
+			text = "Table of Contents\nRevenue and Related Cost Recognition\nWe recognize revenue when control transfers."
+		case 95:
+			text = "Note 2 - Goodwill\nGoodwill is tested annually."
+		}
+		ps = append(ps, PageText{p, text})
+	}
+	b := &TOCBuilder{Judge: splitJudge("note", "principles of consolidation", "revenue and related")}
+	nodes := []tree.TOCNode{{Structure: "2.5", Title: "Item 8. Financial Statements", StartPage: 54, EndPage: 100}}
+	var usage Usage
+	b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage)
+	for _, c := range nodes[0].Nodes {
+		if len(c.Nodes) > 0 {
+			t.Errorf("%q split a second time under the default of one generation: %v", c.Title, titlesOfNodes(c.Nodes))
+		}
+	}
+	if len(nodes[0].Nodes) < 2 {
+		t.Errorf("the first generation should still split: %v", titlesOfNodes(nodes[0].Nodes))
 	}
 }

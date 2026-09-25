@@ -57,11 +57,29 @@ var (
 	reSplitNumbered = regexp.MustCompile(`(?i)^(note|item|section|part)\s+\d+[a-c]?\b`)
 )
 
-// splitMaxDepth bounds how far the splitter descends into the
-// sub-leaves it creates. A 10-K reaches level 3 (part > item >
-// note); 4 leaves room for a note's own sub-headings without letting
-// a pathological document recurse into paragraphs.
-const splitMaxDepth = 4
+// defaultSplitGenerations is how many times the splitter may split
+// along one path. One means a single pass: split the leaves the
+// contents pass produced, and stop.
+//
+// Measured on FinanceBench (2026-09-25): descending into the sub-leaves
+// bought nothing and cost plenty. Leaves per filing 69 → 72, median
+// span 1 page either way, the leaf holding a gold page 5 → 6 pages,
+// coverage 47/47 both, navigation's right-section rate 40/40 both and
+// its evidence rate 36/40 → 34/40, with pages read per question
+// unchanged at ~41. Ingest paid 278 → 470 Judge requests, $0.13 →
+// $0.21, and 489 → 1,174 seconds of wall clock. A second generation
+// only reaches leaves the first pass could not find headings in, and
+// those are exactly the ones a second look does not help.
+//
+// The capability stays because a document unlike a 10-K — a deep
+// standard, a long contract — may need it; it is off until a corpus
+// shows it earning its cost.
+const defaultSplitGenerations = 1
+
+// splitMaxDepth caps the tree depth the splitter may reach regardless
+// of generations, so a pathological document cannot recurse into
+// paragraphs.
+const splitMaxDepth = 6
 
 // splitLargeLeaves walks the tree and splits every leaf whose span
 // exceeds over pages, then splits the sub-leaves it made, until no
@@ -76,16 +94,17 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 	for _, p := range pages {
 		byPage[p.PageNumber] = p.Text
 	}
+	maxGen := b.splitGenerations()
 	added := 0
-	var walk func(ns []tree.TOCNode, depth int)
-	walk = func(ns []tree.TOCNode, depth int) {
+	var walk func(ns []tree.TOCNode, depth, gen int)
+	walk = func(ns []tree.TOCNode, depth, gen int) {
 		for i := range ns {
 			n := &ns[i]
 			if len(n.Nodes) > 0 {
-				walk(n.Nodes, depth+1)
+				walk(n.Nodes, depth+1, gen)
 				continue
 			}
-			if depth >= splitMaxDepth {
+			if depth >= splitMaxDepth || gen >= maxGen {
 				continue
 			}
 			if n.StartPage <= 0 || n.EndPage < n.StartPage || n.EndPage-n.StartPage+1 <= over {
@@ -113,13 +132,24 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			deriveEndPagesIn(subs, n.EndPage)
 			n.Nodes = subs
 			added += len(subs)
-			// Descend into what was just made: a 70-page Item 8 splits
-			// into notes, and a 28-page note has its own headings.
-			walk(n.Nodes, depth+1)
+			// Descend into what was just made, when more generations are
+			// allowed: a 70-page Item 8 splits into notes, and a 28-page
+			// note has its own headings.
+			walk(n.Nodes, depth+1, gen+1)
 		}
 	}
-	walk(nodes, 1)
+	walk(nodes, 1, 0)
 	return added
+}
+
+// splitGenerations resolves SplitGenerations: zero selects the default
+// of one pass, negative is treated as one, and any larger value allows
+// that many generations of splitting along a path.
+func (b *TOCBuilder) splitGenerations() int {
+	if b.SplitGenerations > 0 {
+		return b.SplitGenerations
+	}
+	return defaultSplitGenerations
 }
 
 // splitLeaf returns the sub-leaves of one leaf, with start pages, in
