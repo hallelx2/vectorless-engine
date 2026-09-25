@@ -112,18 +112,41 @@ type JudgeNavigator struct {
 	// The provider treats the whole state object as shared context for
 	// every question — there is no per-question state — so state plus
 	// the longest question must stay under 32k tokens. Zero selects
-	// 24k, the same ceiling the TOC stage uses; that is six to eight
-	// dense filing pages per request.
+	// defaultNavReqTokens.
+	//
+	// This is a LATENCY knob, not just a limit. Batches are sent
+	// concurrently, so a smaller budget means more requests in flight,
+	// not more waiting — and the provider is far happier with many small
+	// requests than a few large ones (see defaultNavReqTokens).
 	RequestBudgetTokens int
 }
 
 const (
-	defaultNavThreshold  = 0.5
-	defaultNavMaxPages   = 40
-	defaultNavCoarse     = 120
-	defaultNavHeadChars  = 700
-	defaultNavPageChars  = 6000
-	defaultNavReqTokens  = 24_000
+	defaultNavThreshold = 0.5
+	defaultNavMaxPages  = 40
+	defaultNavCoarse    = 120
+	defaultNavHeadChars = 700
+	defaultNavPageChars = 6000
+	// defaultNavReqTokens: measured against the provider on 2026-09-25,
+	// one Noul per page with real filing pages as state.
+	//
+	//   state tokens   median latency
+	//        1,589       4.2 s
+	//        2,724       3.6 s
+	//        4,919       3.8 s
+	//        9,253       5.9 s
+	//       17,159      14.3 s
+	//
+	// Latency is flat to about 5k tokens — fixed per-request overhead —
+	// and then grows faster than the text does. Concurrency is close to
+	// free: eight parallel 9k-token requests finished in 4.1 s wall,
+	// four times the total work of a single 17k-token request in half
+	// its wall clock.
+	//
+	// So the right shape is many small requests in flight, not few large
+	// ones. 6k keeps each request in the flat region; the adaptive
+	// limiter (llmgate middleware/limit) decides how many run at once.
+	defaultNavReqTokens  = 6_000
 	navLeafBatch         = 120
 	navMinEvidencePages  = 2
 	navLeafStateMaxChars = 300
