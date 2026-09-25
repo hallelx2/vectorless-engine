@@ -8,36 +8,55 @@
 
 ## Result: most of it is request shape, not work. A local pre-filter cannot help at any scale; batching can.
 
-## 1. The provider prefers many small requests to few large ones
+## 1. Request shape barely matters. Two of my own bugs did.
 
-One `Noul` per page, real filing pages as state, three repetitions:
+**First probe, and it was wrong.** Varying pages per request moved two
+things at once — the text sent and the number of questions asked — and
+the session's first calls were cold. It appeared to show large requests
+being punished (17k tokens → 14.3 s). Acting on it, the page-ranking
+budget was cut 24k → 6k, and a navigation run came back three times
+slower.
 
-| state tokens | median latency | s per 1k tokens |
-|---|---|---|
-| 1,589 | 4.2 s | 2.67 |
-| 2,724 | 3.6 s | 1.32 |
-| 4,919 | 3.8 s | 0.78 |
-| 9,253 | 5.9 s | 0.64 |
-| 17,159 | 14.3 s | 0.84 |
+**Second probe, one variable at a time, warm.** Holding state near 6k
+while varying question count, then holding questions at 4 while varying
+text, both curves are flat: everything lands between 1.4 s and 2.6 s.
+The first two calls of a session take 5-6 s and then it settles. Forty
+pages as ten parallel requests took 2.6 s wall; the same forty as
+sixteen-page requests took 2.6 s each. Shape is not the lever.
 
-Latency is flat to about 5k tokens — fixed per-request overhead — then
-grows faster than the text does. And concurrency is close to free:
+**What was the lever, measured end to end on the same 12 questions:**
 
-| shape | total work | wall clock |
-|---|---|---|
-| one request, 16 pages | 17k tokens | 8.3 s |
-| 4 parallel × 4 pages | 20k tokens | **3.0 s** |
-| 8 parallel × 8 pages | 74k tokens | **4.1 s** |
+| build | requests / question | median s | hit@5 |
+|---|---|---|---|
+| baseline (24k budget, tokenised packing) | 4.3 | 37.0 | 12/12 |
+| length-estimated packing, len/2 | 6.6 | 35.1 | 12/12 |
+| **len/4 packing + limiter starting at 16** | **4.2** | **28.6** | 12/12 |
 
-Four times the total work of a single 17k-token request, in half its
-wall clock.
+Two bugs, both ours:
 
-`judgewalk` was packing each page-ranking request to 24,000 tokens —
-a number chosen to respect the provider's 32k per-question ceiling,
-never for speed — which put every request in the penalty region. The
-budget is now 6k (`defaultNavReqTokens`), which keeps each request in
-the flat region and leaves the count to the adaptive limiter. The
-batches already fan out concurrently.
+- **Packing ran the tokenizer.** Deciding which pages go in which
+  request tokenised all forty pages first — 4.0 s of CPU before a
+  single call went out, plus the client tokenising the assembled state
+  again per request. Packing only needs a safe upper bound, so it now
+  estimates from length. The first attempt used len/2, which
+  over-estimates real filing text by two and a half times (measured:
+  4.9 characters per token), halved every batch, and sent 6.6 requests
+  where 4.3 had done — cancelling the saving exactly. len/4 keeps a
+  fifth of headroom and restores the batch size.
+- **The limiter was starting at 4 and being halved by transient
+  failures.** AIMD needs twenty consecutive successes to widen by one,
+  which a single interactive query never lives long enough to earn; one
+  failed request left the run at concurrency 2 for most of its length.
+  A query's four to seven requests are independent, so navbench now
+  starts at 16 and the run stayed at 16-18 throughout.
+
+**What is still unexplained.** At 4.2 requests and ~21k tokens each,
+warm rates predict roughly 3 s per request and three sequential phases,
+so about 9 s. The engine takes 28.6 s. That factor of three is not
+accounted for by anything measured here — candidates are provider
+behaviour under sustained load versus a short probe, and retry backoff
+after transient failures. It should be instrumented per request before
+anyone optimises further, rather than guessed at a third time.
 
 ## 2. A local embedding cannot pre-narrow the document
 
@@ -81,9 +100,8 @@ we can measure. That is the thesis, measured from the other side.
 Three sequential round trips are inherent to the design: rank sections,
 skim, read. Everything else is recoverable:
 
-- **Request shape** (done): the page pass was three ~22k requests at
-  ~14 s; at 6k it is ~10 requests in the flat region, in flight
-  together.
+- **Our own overhead** (done): tokenised packing and a limiter that
+  started narrow, together 37 s → 28.6 s on the same questions.
 - **A needless chain link** (not yet done): the skim only depends on the
   ranking because we skim *the chosen sections*. Skim every page instead
   and the two requests fire together — one fewer round trip, and more

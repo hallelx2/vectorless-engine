@@ -87,7 +87,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "judge:", err)
 		os.Exit(1)
 	}
-	lim := limit.New(limit.Config{Initial: 4, OnChange: func(e limit.Event) {
+	// Initial 16, not 4. A question issues 4-7 requests that do not
+	// depend on each other, so a limiter that starts at 4 serialises
+	// them into waves, and AIMD needs twenty successes to widen by one —
+	// slower than a 40-question run can recover from, especially after a
+	// transient failure halves it.
+	lim := limit.New(limit.Config{Initial: 16, OnChange: func(e limit.Event) {
 		fmt.Fprintf(os.Stderr, "  limiter %s %d -> %d %v\n", e.Cause, e.From, e.To, e.Err)
 	}})
 	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages}
