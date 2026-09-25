@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 
 	"github.com/hallelx2/llmgate"
-	"github.com/hallelx2/llmgate/judge/typesafe"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -111,17 +111,34 @@ type JudgeNavigator struct {
 	// The provider treats the whole state object as shared context for
 	// every question — there is no per-question state — so state plus
 	// the longest question must stay under 32k tokens. Zero selects
-	// 24k, the same ceiling the TOC stage uses; that is six to eight
-	// dense filing pages per request.
+	// defaultNavReqTokens.
+	//
+	// This is a LATENCY knob, not just a limit. Batches are sent
+	// concurrently, so a smaller budget means more requests in flight,
+	// not more waiting — and the provider is far happier with many small
+	// requests than a few large ones (see defaultNavReqTokens).
 	RequestBudgetTokens int
 }
 
 const (
-	defaultNavThreshold  = 0.5
-	defaultNavMaxPages   = 40
-	defaultNavCoarse     = 120
-	defaultNavHeadChars  = 700
-	defaultNavPageChars  = 6000
+	defaultNavThreshold = 0.5
+	defaultNavMaxPages  = 40
+	defaultNavCoarse    = 120
+	defaultNavHeadChars = 700
+	defaultNavPageChars = 6000
+	// defaultNavReqTokens bounds one request's state. Measured warm on
+	// 2026-09-25, one Noul per page: request SHAPE barely matters.
+	// Forty pages went out as ten parallel requests in 2.6 s wall, and
+	// as sixteen-page requests in 2.6 s each. An earlier probe appeared
+	// to punish large requests; that was cold-start contamination — the
+	// first calls of a session take 5-6 s and the rest settle to
+	// 1.5-2.6 s.
+	//
+	// This was briefly retuned to 6k on the strength of that bad probe
+	// and one navigation run came back three times slower (not a paired
+	// control either). No measured reason to move off 24k, which stays
+	// under the provider's 32k per-question ceiling with room for the
+	// question text.
 	defaultNavReqTokens  = 24_000
 	navLeafBatch         = 120
 	navMinEvidencePages  = 2
@@ -497,14 +514,26 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	return out, nil
 }
 
-// countTokens uses the provider's tokenizer, so the batch budget is
-// measured the way the request will be. Dense financial tables run
-// near one token per two characters; a bytes/4 guess overflowed.
+// countTokens estimates a string's token count for packing batches.
+//
+// It deliberately does NOT run the provider's tokenizer. Measured
+// 2026-09-25: tokenising one question's forty pages costs 4.0 s of
+// CPU, and the client tokenises the assembled state again before every
+// request — about five seconds per question spent counting rather than
+// asking, on a query whose median is thirty-seven.
+//
+// The packing budget only needs a safe upper bound; the client's own
+// check is exact and refuses anything over the ceiling.
+//
+// Measured on real filing pages: 24,000 characters of page text bill
+// as 4,875 tokens, so 4.9 characters per token. len/2 was the first
+// guess and over-estimated by two and a half times, halving every
+// batch and sending 6.6 requests per question where 4.3 had done —
+// which cancelled the CPU saved. len/4 leaves a fifth of headroom
+// over the measured ratio, which covers dense numeric tables without
+// throwing away batch size.
 func countTokens(text string) int {
-	if n, err := typesafe.EstimateTokens(text); err == nil {
-		return n
-	}
-	return len(text)/3 + 1
+	return len(text)/4 + 1
 }
 
 // reReference finds the cross-references a page makes: "see Note 21",
@@ -561,6 +590,22 @@ func judgeUsage(res *llmgate.Judgment) Usage {
 type JudgeWalkStrategy struct {
 	Navigator  JudgeNavigator
 	PageLoader PageContentLoader
+
+	// TOC and Pages, when both are set and both have data for the
+	// document, are what navigation runs over: the table of contents
+	// ingest built (leaves with real page ranges, sub-sections and all)
+	// and the per-page text ingest persisted beside it. That is the
+	// pipeline the FinanceBench evaluations measured. Without either,
+	// navigation falls back to the section tree and section bodies —
+	// the parser's page attribution, which is what HAL-1375 showed to
+	// be unreliable — and scored 0.65 where the pages scored 0.90.
+	TOC   TOCProvider
+	Pages PageStore
+}
+
+// PageStore serves a document's per-page text, as ingest persisted it.
+type PageStore interface {
+	LoadPages(ctx context.Context, docID tree.DocumentID) ([]NavPage, error)
 }
 
 const strategyNameJudgeWalk = "judgewalk"
@@ -582,10 +627,121 @@ func (s *JudgeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query stri
 }
 
 // SelectWithCost runs navigation and reports usage.
-func (s *JudgeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
+func (s *JudgeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	if t == nil || t.Root == nil {
 		return &Result{}, nil
 	}
+	if res, ok := s.selectOnPersistedPages(ctx, t, query); ok {
+		return res, nil
+	}
+	return s.selectOnSectionTree(ctx, t, query, budget)
+}
+
+// selectOnPersistedPages navigates the persisted table of contents over
+// the persisted pages. ok is false when either is missing, so the
+// caller falls back; an error from navigation itself is returned as a
+// Result error through ok=true.
+func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.Tree, query string) (*Result, bool) {
+	if s.TOC == nil || s.Pages == nil {
+		return nil, false
+	}
+	raw, err := s.TOC.GetTOC(ctx, t.DocumentID)
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+	var nodes []tree.TOCNode
+	if err := json.Unmarshal(raw, &nodes); err != nil || len(nodes) == 0 {
+		return nil, false
+	}
+	pages, err := s.Pages.LoadPages(ctx, t.DocumentID)
+	if err != nil || len(pages) == 0 {
+		return nil, false
+	}
+	byNum := make(map[int]NavPage, len(pages))
+	for _, p := range pages {
+		byNum[p.Number] = p
+	}
+	var leaves []NavLeaf
+	var walk func(ns []tree.TOCNode, path string)
+	walk = func(ns []tree.TOCNode, path string) {
+		for _, n := range ns {
+			p := n.Title
+			if path != "" {
+				p = path + " > " + n.Title
+			}
+			if len(n.Nodes) > 0 {
+				walk(n.Nodes, p)
+				continue
+			}
+			if n.StartPage > 0 && n.EndPage >= n.StartPage {
+				leaves = append(leaves, NavLeaf{ID: n.NodeID, Title: n.Title, Path: p, Start: n.StartPage, End: n.EndPage, Summary: n.Summary})
+			}
+		}
+	}
+	walk(nodes, "")
+	if len(leaves) == 0 {
+		return nil, false
+	}
+	load := func(_ context.Context, leaf NavLeaf) ([]NavPage, error) {
+		var ps []NavPage
+		for n := leaf.Start; n <= leaf.End; n++ {
+			if p, ok := byNum[n]; ok {
+				ps = append(ps, p)
+			}
+		}
+		return ps, nil
+	}
+	nav, err := s.Navigator.Navigate(ctx, query, leaves, load)
+	if err != nil {
+		return &Result{ModelUsed: "judge"}, false
+	}
+	// The API answers in sections. Each evidence page names the sections
+	// that cover it; the cited pages are the evidence pages themselves.
+	sections := flattenSectionsByPage(t)
+	var ranges []pageRange
+	conf := map[tree.SectionID]float64{}
+	var ids []tree.SectionID
+	seen := map[tree.SectionID]bool{}
+	for _, ev := range nav.Evidence {
+		pg := ev.Page.Number
+		ranges = append(ranges, pageRange{Start: pg, End: pg})
+		for _, id := range sectionsOverlapping(sections, []pageRange{{Start: pg, End: pg}}) {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+			if ev.P > conf[id] {
+				conf[id] = ev.P
+			}
+		}
+	}
+	best := 0.0
+	if len(nav.Evidence) > 0 {
+		best = nav.Evidence[0].P
+	}
+	leafTitle := map[string]string{}
+	for _, l := range leaves {
+		leafTitle[l.ID] = l.Title
+	}
+	evidence := make([]EvidencePage, 0, len(nav.Evidence))
+	for _, ev := range nav.Evidence {
+		evidence = append(evidence, EvidencePage{Page: ev.Page.Number, Title: leafTitle[ev.Page.LeafID], Text: ev.Page.Text, Confidence: ev.P})
+	}
+	return &Result{
+		SelectedIDs:   ids,
+		Confidences:   conf,
+		Confidence:    best,
+		CitedPages:    rangesToPairs(ranges),
+		EvidencePages: evidence,
+		ModelUsed:     "judge",
+		Usage:         nav.Usage,
+		HopsTaken:     nav.Requests,
+	}, true
+}
+
+// selectOnSectionTree is the fallback: the parser's section tree, each
+// section's body chunked into page-sized units.
+func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
 	sections := flattenSectionsByPage(t)
 	byID := map[string]sectionPageEntry{}
 	paths := sectionPaths(t)

@@ -50,6 +50,14 @@ import (
 // and table extraction. Any other value runs the full pipeline.
 const ModeMinimal = "minimal"
 
+// ModeTOC is parse → build tree → table of contents → persist → ready:
+// the page-based pipeline and nothing else. On a Judge the TOC stage is
+// three requests and seconds; the per-section generative enrichment
+// (summarize, HyDE, multi-axis) that full mode adds is minutes and is
+// not used by page-based retrieval. Table extraction is skipped as in
+// minimal mode: the page text still carries the tables' text.
+const ModeTOC = "toc"
+
 // docPersister is the narrow slice of *db.Pool the parse → persist →
 // ready path depends on. Declaring it here (rather than threading the
 // concrete *db.Pool) lets the minimal-mode runner be exercised with a
@@ -377,7 +385,7 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
-	if p.Mode == ModeMinimal {
+	if p.Mode == ModeMinimal || p.Mode == ModeTOC {
 		return p.runMinimal(ctx, p.DB, pl)
 	}
 
@@ -461,6 +469,14 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 	if len(pages) == 0 {
 		log.Info("ingest: toc-builder skipped; no per-page text available")
 		return nil
+	}
+	// The pages are the ground truth every page-level stage reasons
+	// over (HAL-1375). Persist them beside the table of contents so
+	// retrieval navigates the same text ingest did, not a per-section
+	// reconstruction of it. Non-fatal: without them judgewalk falls
+	// back to the section tree.
+	if err := p.persistPages(ctx, docID, pages); err != nil {
+		log.Warn("ingest: pages not persisted; judgewalk will use the section tree", "err", err)
 	}
 	model := p.TOCModel
 	if model == "" {
@@ -730,13 +746,20 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 		return err
 	}
 
-	// Skip summarize / HyDE / multi-axis / TOC entirely — flip straight
-	// to ready. The document is now queryable via the page-based
-	// strategy (synthesised TOC + raw page reads).
+	// Minimal mode skips summarize / HyDE / multi-axis / TOC entirely
+	// and flips straight to ready; the document is queryable via the
+	// page-based strategy on a TOC synthesised from the section tree.
+	// TOC mode builds the real table of contents first — same builder
+	// and persistence as full mode, non-fatal for the same reason.
+	if p.Mode == ModeTOC && pl.ContentType == "application/pdf" {
+		if err := p.runTOCBuilder(ctx, pl.DocumentID, parsed, log); err != nil {
+			log.Warn("ingest: toc-builder failed; falling back to NULL toc_tree", "err", err)
+		}
+	}
 	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
 		return err
 	}
-	log.Info("ingest: ready (minimal mode)")
+	log.Info("ingest: ready (" + p.Mode + " mode)")
 	return nil
 }
 
@@ -1282,6 +1305,23 @@ func NewDocumentID() tree.DocumentID {
 
 // SourceKey returns the canonical storage key where an ingest payload's
 // original bytes live.
+// PagesKey is where a document's per-page text lives in storage: a
+// JSON array of {page_number, text}, written by ingest for paged
+// documents and read by page-based retrieval.
+func PagesKey(id tree.DocumentID) string { return "pages/" + string(id) + ".json" }
+
+// persistPages writes the per-page text to storage at PagesKey.
+func (p *Pipeline) persistPages(ctx context.Context, docID tree.DocumentID, pages []PageText) error {
+	if p.Storage == nil {
+		return fmt.Errorf("no storage")
+	}
+	raw, err := json.Marshal(pages)
+	if err != nil {
+		return err
+	}
+	return p.Storage.Put(ctx, PagesKey(docID), bytes.NewReader(raw), storage.Metadata{ContentType: "application/json", Size: int64(len(raw))})
+}
+
 func SourceKey(id tree.DocumentID, filename string) string {
 	// Keep the original extension so future content-type sniffing works.
 	ext := path.Ext(filename)

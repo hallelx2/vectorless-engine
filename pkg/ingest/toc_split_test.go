@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -254,4 +255,118 @@ func titlesOfNodes(ns []tree.TOCNode) []string {
 		out = append(out, n.Title)
 	}
 	return out
+}
+
+// A 70-page Item 8 splits into notes, and a note long enough to have
+// its own headings splits again — the same two sources, one level down.
+func TestSplitRecursesIntoItsOwnSubLeaves(t *testing.T) {
+	ps := []PageText{
+		{54, "Item 8. Financial Statements\nIndex to the Consolidated Financial Statements\nPage\nNote 1 - Summary of Significant Accounting Policies 60\nNote 2 - Goodwill 95"},
+	}
+	for p := 55; p <= 100; p++ {
+		text := "Table of Contents\nprose about accounting " + strings.Repeat("x ", 40)
+		switch p {
+		case 60:
+			text = "Note 1 - Summary of Significant Accounting Policies\nPrinciples of Consolidation\nThe consolidated statements include."
+		case 72:
+			text = "Table of Contents\nRevenue and Related Cost Recognition\nWe recognize revenue when control transfers."
+		case 84:
+			text = "Table of Contents\nUse of Estimates\nEstimates are used throughout."
+		case 95:
+			text = "Note 2 - Goodwill\nGoodwill is tested annually."
+		}
+		ps = append(ps, PageText{p, text})
+	}
+	b := &TOCBuilder{Judge: splitJudge("note", "principles of consolidation", "revenue and related", "use of estimates"), SplitGenerations: 3}
+	nodes := []tree.TOCNode{{Structure: "2.5", Title: "Item 8. Financial Statements", StartPage: 54, EndPage: 100}}
+	var usage Usage
+	if n := b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage); n < 4 {
+		t.Fatalf("sub-leaves added: %d", n)
+	}
+	item8 := nodes[0]
+	if len(item8.Nodes) < 2 {
+		t.Fatalf("Item 8 children: %v", titlesOfNodes(item8.Nodes))
+	}
+	var note1 *tree.TOCNode
+	for i := range item8.Nodes {
+		if strings.HasPrefix(item8.Nodes[i].Title, "Note 1") {
+			note1 = &item8.Nodes[i]
+		}
+	}
+	if note1 == nil {
+		t.Fatalf("Note 1 missing: %v", titlesOfNodes(item8.Nodes))
+	}
+	// Note 1 spans 60–94, over the threshold, so it split again.
+	if len(note1.Nodes) < 2 {
+		t.Errorf("Note 1 (%d-%d) should have split at its own headings, children: %v",
+			note1.StartPage, note1.EndPage, titlesOfNodes(note1.Nodes))
+	}
+	for _, c := range note1.Nodes {
+		if !strings.HasPrefix(c.Structure, note1.Structure+".") {
+			t.Errorf("grandchild structure %q does not nest under %q", c.Structure, note1.Structure)
+		}
+		if c.StartPage < note1.StartPage || c.EndPage > note1.EndPage {
+			t.Errorf("grandchild %q spans %d-%d, outside its parent %d-%d", c.Title, c.StartPage, c.EndPage, note1.StartPage, note1.EndPage)
+		}
+	}
+}
+
+// The depth cap stops the descent even when leaves stay oversized.
+func TestSplitStopsAtMaxDepth(t *testing.T) {
+	var ps []PageText
+	for p := 1; p <= 120; p++ {
+		text := "Section Heading " + fmt.Sprint(p%7) + "\nprose " + strings.Repeat("y ", 40)
+		ps = append(ps, PageText{p, text})
+	}
+	b := &TOCBuilder{Judge: splitJudge("section heading"), SplitGenerations: 99}
+	nodes := []tree.TOCNode{{Structure: "1", Title: "Everything", StartPage: 1, EndPage: 120}}
+	var usage Usage
+	b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage)
+	var deepest func(ns []tree.TOCNode, d int) int
+	deepest = func(ns []tree.TOCNode, d int) int {
+		max := d
+		for _, n := range ns {
+			if len(n.Nodes) > 0 {
+				if x := deepest(n.Nodes, d+1); x > max {
+					max = x
+				}
+			}
+		}
+		return max
+	}
+	if got := deepest(nodes, 1); got > splitMaxDepth {
+		t.Errorf("tree reached depth %d, cap is %d", got, splitMaxDepth)
+	}
+}
+
+// One generation is the default: the leaves the contents pass produced
+// are split, and the sub-leaves are left alone however large they are.
+func TestSplitIsOneGenerationByDefault(t *testing.T) {
+	ps := []PageText{
+		{54, "Item 8. Financial Statements\nIndex to the Consolidated Financial Statements\nPage\nNote 1 - Summary of Significant Accounting Policies 60\nNote 2 - Goodwill 95"},
+	}
+	for p := 55; p <= 100; p++ {
+		text := "Table of Contents\nprose " + strings.Repeat("x ", 40)
+		switch p {
+		case 60:
+			text = "Note 1 - Summary of Significant Accounting Policies\nPrinciples of Consolidation\nThe statements include."
+		case 72:
+			text = "Table of Contents\nRevenue and Related Cost Recognition\nWe recognize revenue when control transfers."
+		case 95:
+			text = "Note 2 - Goodwill\nGoodwill is tested annually."
+		}
+		ps = append(ps, PageText{p, text})
+	}
+	b := &TOCBuilder{Judge: splitJudge("note", "principles of consolidation", "revenue and related")}
+	nodes := []tree.TOCNode{{Structure: "2.5", Title: "Item 8. Financial Statements", StartPage: 54, EndPage: 100}}
+	var usage Usage
+	b.splitLargeLeaves(context.Background(), nodes, ps, 20, &usage)
+	for _, c := range nodes[0].Nodes {
+		if len(c.Nodes) > 0 {
+			t.Errorf("%q split a second time under the default of one generation: %v", c.Title, titlesOfNodes(c.Nodes))
+		}
+	}
+	if len(nodes[0].Nodes) < 2 {
+		t.Errorf("the first generation should still split: %v", titlesOfNodes(nodes[0].Nodes))
+	}
 }
