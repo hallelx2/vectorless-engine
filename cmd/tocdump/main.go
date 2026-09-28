@@ -32,6 +32,7 @@ import (
 	"github.com/hallelx2/llmgate/middleware/retry"
 	"github.com/hallelx2/llmgate/provider/anthropic"
 
+	"github.com/hallelx2/vectorless-engine/internal/judgestats"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
@@ -63,6 +64,7 @@ func main() {
 	parallel := flag.Int("parallel", 1, "documents in flight at once; the provider's adaptive limiter governs requests")
 	split := flag.Int("split", 0, "split leaves spanning more than this many pages into sub-leaves (0 = default 20, negative = off)")
 	flag.Parse()
+	stats := &judgestats.Recorder{}
 	if *parallel < 1 {
 		*parallel = 1
 	}
@@ -85,7 +87,7 @@ func main() {
 	}
 	var judge llmgate.Judge
 	if !*noJudge {
-		if judge, err = buildJudge(); err != nil {
+		if judge, err = buildJudge(stats); err != nil {
 			fmt.Fprintln(os.Stderr, "judge:", err)
 			os.Exit(1)
 		}
@@ -143,6 +145,7 @@ func main() {
 	}
 	wg.Wait()
 	fmt.Printf("  wall %.1fs for %d documents at parallel=%d; limiter now %d\n", time.Since(runStart).Seconds(), len(pdfs), *parallel, lim.Limit())
+	stats.Summary(os.Stdout)
 }
 
 func write(dir string, d dump) {
@@ -172,7 +175,7 @@ func countLeaves(ns []tree.TOCNode) int {
 // sharing sixty lines is not yet worth an internal package; if a third
 // appears, it is.
 
-func buildJudge() (llmgate.Judge, error) {
+func buildJudge(stats *judgestats.Recorder) (llmgate.Judge, error) {
 	key := os.Getenv(typesafe.EnvAPIKey)
 	if key == "" {
 		key = dotEnv(typesafe.EnvAPIKey)
@@ -180,7 +183,7 @@ func buildJudge() (llmgate.Judge, error) {
 	if key == "" {
 		return nil, fmt.Errorf("no %s", typesafe.EnvAPIKey)
 	}
-	j, err := typesafe.New(typesafe.Config{APIKey: key})
+	j, err := typesafe.New(typesafe.Config{APIKey: key, OnRequest: stats.Observe})
 	if err != nil {
 		return nil, err
 	}
