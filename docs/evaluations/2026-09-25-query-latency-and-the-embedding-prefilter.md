@@ -6,6 +6,8 @@
 **Issues:** HAL-1371, HAL-1542
 **Question:** judgewalk answers in 37 s at the median. Retrieval systems people compare us to answer in 49 ms. How much of the gap is recoverable, and by what?
 
+> **Superseded 2026-09-28.** The latencies here were measured with the llmgate guard rebuilding its tokenizer on every count, which was most of the time. The unexplained factor of three in §1 was that bug. See [`2026-09-28-latency-was-our-cpu.md`](2026-09-28-latency-was-our-cpu.md). The recall tables in §2 are unaffected.
+
 ## Result: most of it is request shape, not work. A local pre-filter cannot help at any scale; batching can.
 
 ## 1. Request shape barely matters. Two of my own bugs did.
