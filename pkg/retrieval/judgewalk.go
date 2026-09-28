@@ -83,7 +83,8 @@ type JudgeNavigator struct {
 	// five one-page notes and the budget went unused (HAL-1374).
 	MaxLeaves int
 
-	// MaxPages bounds how many pages are judged in full. Zero selects 40.
+	// MaxPages bounds how many pages are judged in full. Zero selects
+	// defaultNavMaxPages.
 	MaxPages int
 
 	// CoarsePages bounds how many gathered pages the coarse pass may
@@ -145,7 +146,19 @@ type JudgeNavigator struct {
 
 const (
 	defaultNavThreshold = 0.5
-	defaultNavMaxPages  = 40
+	// defaultNavMaxPages is how many pages are read in full, and full
+	// pages are ~60% of a query's tokens. Measured 2026-09-28 on 40
+	// FinanceBench questions with SkimAll, repeated runs:
+	//
+	//   40 pages  hit 35/36/35  $0.00431/q
+	//   30 pages  hit 36/36     $0.00388/q
+	//   20 pages  hit 35/36     $0.00345/q
+	//
+	// Every row sits inside Jev's run-to-run noise (35–36). 30 keeps
+	// headroom for multi-page answers, which FinanceBench barely tests
+	// and a smaller read would hurt first; 20 is the frugal setting for
+	// single-fact corpora.
+	defaultNavMaxPages  = 30
 	defaultNavCoarse    = 120
 	defaultNavHeadChars = 700
 	defaultNavPageChars = 6000
