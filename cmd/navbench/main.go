@@ -73,8 +73,9 @@ func main() {
 	pdfs := flag.String("pdfs", "", "directory of filings")
 	out := flag.String("out", "", "JSONL of per-question outcomes")
 	maxLeaves := flag.Int("leaves", 0, "cap on sections read per question; 0 lets the page budget decide")
-	maxPages := flag.Int("pages", 40, "pages judged per question")
+	maxPages := flag.Int("pages", 0, "pages judged in full per question (0 = the engine default)")
 	limitQ := flag.Int("limit", 0, "stop after this many questions (0 = all)")
+	skimAll := flag.Bool("skim-all", false, "skim every page's head alongside the section ranking (HAL-1566), as the persisted-pages path does")
 	parallel := flag.Int("parallel", 1, "questions in flight at once; the provider's adaptive limiter governs requests")
 	flag.Parse()
 	stats := &judgestats.Recorder{}
@@ -97,7 +98,7 @@ func main() {
 	lim := limit.New(limit.Config{Initial: 16, OnChange: func(e limit.Event) {
 		fmt.Fprintf(os.Stderr, "  limiter %s %d -> %d %v\n", e.Cause, e.From, e.To, e.Err)
 	}})
-	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages}
+	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages, SkimAll: *skimAll}
 
 	qs := readQuestions(*qPath)
 	if *limitQ > 0 && len(qs) > *limitQ {
