@@ -168,6 +168,18 @@ func (u *Usage) degrade(step, what string) {
 	u.Degraded = append(u.Degraded, step+": "+what)
 }
 
+// merge folds another ledger into this one — a concurrent step's own
+// accounting, added back in a fixed order.
+func (u *Usage) merge(o Usage) {
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.TotalTokens += o.TotalTokens
+	u.CostUSD += o.CostUSD
+	u.LLMCalls += o.LLMCalls
+	u.GenerativeCalls += o.GenerativeCalls
+	u.Degraded = append(u.Degraded, o.Degraded...)
+}
+
 // add folds the per-response usage from one LLM call into the
 // running total. Keeps the call sites short.
 func (u *Usage) add(r *llmgate.Response) {
