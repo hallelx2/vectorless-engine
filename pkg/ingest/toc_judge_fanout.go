@@ -96,7 +96,9 @@ func (b *TOCBuilder) judgePagesFanoutErr(ctx context.Context, pages []PageText, 
 
 	out := make(map[int]pageJudgement, len(candidates))
 
-	for _, batch := range batchByTokens(candidates, tocDetectorMaxChars) {
+	batches := batchByTokens(candidates, tocDetectorMaxChars)
+	reqs := make([]llmgate.JudgeRequest, len(batches))
+	for bi, batch := range batches {
 		state := map[string]any{}
 		questions := map[string]llmgate.Question{}
 
@@ -122,12 +124,16 @@ func (b *TOCBuilder) judgePagesFanoutErr(ctx context.Context, pages []PageText, 
 			}
 		}
 
-		res, err := b.Judge.Judge(ctx, llmgate.JudgeRequest{State: state, Questions: questions})
-		if err != nil {
-			return nil, false, err
-		}
-		addJudgeUsage(usage, res)
+		reqs[bi] = llmgate.JudgeRequest{State: state, Questions: questions}
+	}
 
+	results, err := sendJudgeBatches(ctx, b.Judge, reqs)
+	if err != nil {
+		return nil, false, err
+	}
+	for bi, batch := range batches {
+		res := results[bi]
+		addJudgeUsage(usage, res)
 		for _, p := range batch {
 			key := pageKey(p.PageNumber)
 			j := pageJudgement{Asked: true}

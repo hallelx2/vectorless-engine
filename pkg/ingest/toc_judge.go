@@ -193,8 +193,9 @@ const (
 // truncating each to maxChars, in as few requests as the token budget
 // allows. It returns the page numbers judged to be a table of contents.
 func (b *TOCBuilder) judgeTOCBatches(ctx context.Context, pages []PageText, maxChars int, usage *Usage) ([]int, error) {
-	var found []int
-	for _, batch := range batchByTokens(pages, maxChars) {
+	batches := batchByTokens(pages, maxChars)
+	reqs := make([]llmgate.JudgeRequest, len(batches))
+	for bi, batch := range batches {
 		state := map[string]any{}
 		questions := map[string]llmgate.Question{}
 		for _, p := range batch {
@@ -210,19 +211,20 @@ func (b *TOCBuilder) judgeTOCBatches(ctx context.Context, pages []PageText, maxC
 				Criteria: tocDetectCriteria(),
 			}
 		}
+		reqs[bi] = llmgate.JudgeRequest{State: state, Questions: questions}
+	}
 
-		res, jerr := b.Judge.Judge(ctx, llmgate.JudgeRequest{
-			State:     state,
-			Questions: questions,
-		})
-		if jerr != nil {
-			// Partial results would silently truncate the scanned range
-			// and look like "no TOC here", so abandon the whole phase
-			// and let the generative path redo it properly.
-			return nil, jerr
-		}
+	results, jerr := sendJudgeBatches(ctx, b.Judge, reqs)
+	if jerr != nil {
+		// Partial results would silently truncate the scanned range
+		// and look like "no TOC here", so abandon the whole phase
+		// and let the generative path redo it properly.
+		return nil, jerr
+	}
+	var found []int
+	for bi, batch := range batches {
+		res := results[bi]
 		addJudgeUsage(usage, res)
-
 		for _, p := range batch {
 			prob, err := res.Noul(pageKey(p.PageNumber))
 			if err != nil {
@@ -268,7 +270,9 @@ func (b *TOCBuilder) verifyTitlesJudgeErr(ctx context.Context, nodes []tree.TOCN
 	verdicts = make(map[string]bool, len(claims))
 
 	// Each question carries its own page text, so the per-question
-	// budget is what binds here rather than a shared state.
+	// budget is what binds here rather than a shared state. Batches are
+	// built first and sent together.
+	var reqs []llmgate.JudgeRequest
 	for start := 0; start < len(claims); {
 		state := map[string]any{}
 		questions := map[string]llmgate.Question{}
@@ -304,17 +308,16 @@ func (b *TOCBuilder) verifyTitlesJudgeErr(ctx context.Context, nodes []tree.TOCN
 		if len(questions) == 0 {
 			continue
 		}
+		reqs = append(reqs, llmgate.JudgeRequest{State: state, Questions: questions})
+	}
 
-		res, jerr := b.Judge.Judge(ctx, llmgate.JudgeRequest{
-			State:     state,
-			Questions: questions,
-		})
-		if jerr != nil {
-			return nil, false, jerr
-		}
+	results, jerr := sendJudgeBatches(ctx, b.Judge, reqs)
+	if jerr != nil {
+		return nil, false, jerr
+	}
+	for i, res := range results {
 		addJudgeUsage(usage, res)
-
-		for key := range questions {
+		for key := range reqs[i].Questions {
 			if prob, err := res.Noul(key); err == nil {
 				verdicts[key] = prob > b.judgeThreshold()
 			}
