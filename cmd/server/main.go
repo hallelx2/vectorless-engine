@@ -147,7 +147,7 @@ func run() error {
 		return fmt.Errorf("init llm: %w", err)
 	}
 	llmClient = limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(llmClient)
-	judge, err := buildJudge(cfg.Engine.LLM.Judge, newLimiter("judge", cfg.Engine.LLM.Concurrency, logger))
+	judge, err := buildJudge(cfg.Engine.LLM.Judge, newLimiter("judge", cfg.Engine.LLM.Concurrency, logger), logger)
 	if err != nil {
 		logger.Error("judge: config invalid", "err", err)
 		os.Exit(1)
@@ -437,21 +437,60 @@ func newLimiter(name string, c enginecfg.ConcurrencyBlock, logger *slog.Logger) 
 	})
 }
 
-func buildJudge(c enginecfg.JudgeBlock, lim *limit.Limiter) (llmgate.Judge, error) {
+func buildJudge(c enginecfg.JudgeBlock, lim *limit.Limiter, logger *slog.Logger) (llmgate.Judge, error) {
 	if c.TypeSafe.APIKey == "" {
 		return nil, nil
 	}
 	j, err := typesafe.New(typesafe.Config{
-		APIKey:  c.TypeSafe.APIKey,
-		BaseURL: c.TypeSafe.BaseURL,
-		Model:   c.TypeSafe.Model,
+		APIKey:    c.TypeSafe.APIKey,
+		BaseURL:   c.TypeSafe.BaseURL,
+		Model:     c.TypeSafe.Model,
+		OnRequest: judgeRequestLogger(logger),
 	})
 	if err != nil {
 		return nil, err
 	}
+	// Open the connection and build the guard's tokenizer now, so the
+	// first query after boot does not pay for either.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := j.Warm(ctx); err != nil {
+			logger.Warn("judge: warm-up failed; the first request will open its own connection", "err", err)
+		}
+	}()
 	// The limiter sits inside retry: each attempt takes a slot, and the
 	// failure that triggers a retry has already narrowed the limit.
 	return retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(j)), nil
+}
+
+// judgeSlowPrepare is local work before a Judge request goes on the
+// wire that deserves a warning. It is a few milliseconds when healthy;
+// the guard rebuilding its tokenizer made it seconds, and nothing said
+// so until a latency evaluation could not account for a factor of three
+// (HAL-1708).
+const judgeSlowPrepare = 250 * time.Millisecond
+
+// judgeRequestLogger logs where each Judge request's time went: debug
+// always, a warning when local preparation — not the provider — is slow.
+func judgeRequestLogger(logger *slog.Logger) func(typesafe.RequestTrace) {
+	return func(tr typesafe.RequestTrace) {
+		attrs := []any{
+			"questions", tr.Questions, "state_bytes", tr.StateBytes,
+			"prepare_ms", tr.Prepare.Milliseconds(), "guard_counted", tr.GuardCounted,
+			"connect_ms", tr.Connect.Milliseconds(), "conn_reused", tr.ConnReused,
+			"first_byte_ms", tr.FirstByte.Milliseconds(), "total_ms", tr.Total.Milliseconds(),
+			"status", tr.StatusCode, "input_tokens", tr.InputTokens,
+		}
+		if tr.Err != nil {
+			attrs = append(attrs, "err", tr.Err)
+		}
+		if tr.Prepare > judgeSlowPrepare {
+			logger.Warn("judge: slow request preparation — local CPU, not the provider", attrs...)
+			return
+		}
+		logger.Debug("judge: request", attrs...)
+	}
 }
 
 func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
