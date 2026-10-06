@@ -63,10 +63,10 @@ func (h *AnswerHandler) answerFromPages(
 		evList = append(evList, map[string]any{"index": i + 1, "page": ev.Page, "title": ev.Title, "confidence": ev.Confidence})
 	}
 	emit("retrieved", map[string]any{
-		"evidence":       evList,
-		"retrieval_ms":   retrievalMS,
-		"requests":       res.HopsTaken,
-		"usage":          usageMap(res.Usage),
+		"evidence":     evList,
+		"retrieval_ms": retrievalMS,
+		"requests":     res.HopsTaken,
+		"usage":        usageMap(res.Usage),
 	})
 
 	model := h.synthModel(body.Model)
@@ -144,13 +144,13 @@ func (h *AnswerHandler) answerFromPages(
 		match := locate(layout, src, ev.Page, quote)
 		id := len(pincites) + 1
 		p := map[string]any{
-			"id":        id,
-			"citation":  m.Evidence,
-			"page":      ev.Page,
-			"quote":     quote,
-			"regions":   nonNilRegions(match.Regions),
-			"precision": match.Precision,
-			"claim":     m.Claim,
+			"id":          id,
+			"citation":    m.Evidence,
+			"page":        ev.Page,
+			"quote":       quote,
+			"regions":     nonNilRegions(match.Regions),
+			"precision":   match.Precision,
+			"claim":       m.Claim,
 			"selected_by": publicSelector(ch.By),
 		}
 		if ch.By == "judge" {
