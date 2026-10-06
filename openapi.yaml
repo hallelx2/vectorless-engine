@@ -134,7 +134,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [content]
+              description: Exactly one of `content` or `url`.
               properties:
                 filename:
                   type: string
@@ -144,13 +144,30 @@ paths:
                   example: text/markdown
                 content:
                   type: string
+                  description: The document itself, as text.
+                url:
+                  type: string
+                  format: uri
+                  description: |
+                    An http(s) URL Vectorless downloads the document from
+                    (public addresses only, at most 100 MB, 5 redirects).
+                    A URL that cannot be fetched is a 400.
+                title:
+                  type: string
+                mode:
+                  $ref: "#/components/schemas/IngestMode"
           multipart/form-data:
             schema:
               type: object
+              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
+                title:
+                  type: string
+                mode:
+                  $ref: "#/components/schemas/IngestMode"
       responses:
         "202":
           description: Document accepted for ingestion
@@ -592,6 +609,15 @@ components:
                 example: document not found
 
   schemas:
+    IngestMode:
+      type: string
+      enum: [toc, full, minimal]
+      description: |
+        How much structure to build for this document; omitted = the
+        deployment default. `toc`: the document's own table of contents,
+        verified against its pages (seconds). `full`: that plus a written
+        summary of every section (minutes on long documents). `minimal`:
+        headings only, no model calls.
     Document:
       type: object
       properties:
@@ -1412,7 +1438,7 @@ components:
           items: { $ref: "#/components/schemas/PinciteRegion" }
         precision: { type: string, enum: [line, page, section] }
         selected_by: { type: string, enum: [model, overlap], description: "How the sentence was selected: by model, or by word overlap when no model was available." }
-        selection_confidence: { type: number, description: Probability for the selected sentence, when selected by model. }
+        selection_confidence: { type: number, description: "Probability for the selected sentence, when selected by model." }
 
     PageReadEntry:
       type: object

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,19 +101,36 @@ func (h *DocumentsHandler) HandleListDocuments(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	ids := make([]tree.DocumentID, len(docs))
+	for i, d := range docs {
+		ids[i] = d.ID
+	}
+	counts, err := h.db.CountSectionsByDocument(r.Context(), ids)
+	if err != nil {
+		h.logger.Warn("documents: count sections", "err", err)
+		counts = map[tree.DocumentID]int{}
+	}
 	items := make([]map[string]any, 0, len(docs))
 	for _, doc := range docs {
-		items = append(items, map[string]any{
-			"doc_id":       doc.ID,
-			"id":           doc.ID,
-			"title":        doc.Title,
-			"content_type": doc.ContentType,
-			"source_type":  sourceTypeFromContentType(doc.ContentType),
-			"status":       string(doc.Status),
-			"byte_size":    doc.ByteSize,
-			"created_at":   doc.CreatedAt,
-			"updated_at":   doc.UpdatedAt,
-		})
+		item := map[string]any{
+			"doc_id":        doc.ID,
+			"id":            doc.ID,
+			"title":         doc.Title,
+			"content_type":  doc.ContentType,
+			"source_type":   sourceTypeFromContentType(doc.ContentType),
+			"status":        string(doc.Status),
+			"byte_size":     doc.ByteSize,
+			"section_count": counts[doc.ID],
+			"created_at":    doc.CreatedAt,
+			"updated_at":    doc.UpdatedAt,
+		}
+		// The verified structure, when ingest built one: how many nodes
+		// and how many pages it covers.
+		if n, pages := structureSize(doc.TOCTree); n > 0 {
+			item["structure_count"] = n
+			item["page_count"] = pages
+		}
+		items = append(items, item)
 	}
 	// Dashboard expects {documents, next_cursor, has_more}; the older
 	// {items} shape is kept as an alias for any SDK callers that
@@ -213,6 +231,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		body          io.Reader
 		size          int64
 		titleOverride string
+		mode          string
 	)
 
 	ct := r.Header.Get("Content-Type")
@@ -234,26 +253,49 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		size = header.Size
 		// Optional multipart "title" field overrides the discovered title.
 		titleOverride = strings.TrimSpace(r.FormValue("title"))
+		mode = strings.TrimSpace(r.FormValue("mode"))
 
 	case strings.HasPrefix(ct, "application/json"):
 		var payload struct {
 			Filename    string `json:"filename"`
 			ContentType string `json:"content_type"`
 			Content     string `json:"content"`
+			URL         string `json:"url"`
 			Title       string `json:"title"`
+			Mode        string `json:"mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
-		if payload.Content == "" {
-			writeErr(w, http.StatusBadRequest, `"content" is required`)
+		mode = strings.TrimSpace(payload.Mode)
+		switch {
+		case payload.Content != "":
+			filename = payload.Filename
+			contentType = payload.ContentType
+			body = strings.NewReader(payload.Content)
+			size = int64(len(payload.Content))
+		case payload.URL != "":
+			// Fetched before the document row exists, so a bad URL is a
+			// 400 the caller sees now, not a failed document later.
+			b, name, ct, err := fetchDocument(ctx, payload.URL)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			filename, contentType = name, ct
+			if payload.Filename != "" {
+				filename = payload.Filename
+			}
+			if payload.ContentType != "" {
+				contentType = payload.ContentType
+			}
+			body = bytes.NewReader(b)
+			size = int64(len(b))
+		default:
+			writeErr(w, http.StatusBadRequest, `"content" or "url" is required`)
 			return
 		}
-		filename = payload.Filename
-		contentType = payload.ContentType
-		body = strings.NewReader(payload.Content)
-		size = int64(len(payload.Content))
 		titleOverride = strings.TrimSpace(payload.Title)
 
 	default:
@@ -262,7 +304,12 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if contentType == "" {
+	if !ingest.ValidMode(mode) {
+		writeErr(w, http.StatusBadRequest, `"mode" must be "toc", "full" or "minimal"`)
+		return
+	}
+	// A server's generic type says nothing; the extension does.
+	if contentType == "" || contentType == "application/octet-stream" || contentType == "binary/octet-stream" {
 		contentType = guessContentType(filename)
 	}
 
@@ -327,6 +374,7 @@ func (h *DocumentsHandler) HandleIngestDocument(w http.ResponseWriter, r *http.R
 		SourceRef:   key,
 		Title:       titleOverride,
 		Profile:     r.Header.Get("X-Vectorless-Profile"),
+		Mode:        mode,
 	})
 	if err := h.queue.Enqueue(ctx, queue.Job{
 		Kind:      queue.KindIngestDocument,
@@ -366,7 +414,7 @@ func (h *DocumentsHandler) HandleGetDocument(w http.ResponseWriter, r *http.Requ
 	if n, cerr := h.db.CountSections(r.Context(), id, orgID, storeID(r)); cerr == nil {
 		sectionCount = n
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"doc_id":        doc.ID,
 		"id":            doc.ID,
 		"title":         doc.Title,
@@ -379,7 +427,17 @@ func (h *DocumentsHandler) HandleGetDocument(w http.ResponseWriter, r *http.Requ
 		"metadata":      doc.Metadata,
 		"created_at":    doc.CreatedAt,
 		"updated_at":    doc.UpdatedAt,
-	})
+	}
+	// The verified structure ingest built, when there is one; the
+	// dashboard shows it instead of the parser's raw section count.
+	if n, pages := structureSize(doc.TOCTree); n > 0 {
+		resp["structure_count"] = n
+		resp["page_count"] = pages
+		resp["structure_source"] = "toc"
+	} else {
+		resp["structure_source"] = "sections"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleDeleteDocument removes a document and cascades to its sections.
@@ -461,6 +519,28 @@ func (h *DocumentsHandler) HandleGetTree(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, t.BuildView())
+}
+
+// structureSize counts a stored table of contents' nodes and the last
+// page it reaches.
+func structureSize(raw []byte) (nodes, pages int) {
+	if len(raw) == 0 {
+		return 0, 0
+	}
+	var toc []tree.TOCNode
+	if json.Unmarshal(raw, &toc) != nil {
+		return 0, 0
+	}
+	var walk func([]tree.TOCNode)
+	walk = func(ns []tree.TOCNode) {
+		for _, n := range ns {
+			nodes++
+			pages = max(pages, n.StartPage, n.EndPage)
+			walk(n.Nodes)
+		}
+	}
+	walk(toc)
+	return nodes, pages
 }
 
 // structureNode is one node of a document's structure as the structure
@@ -634,7 +714,7 @@ func (h *DocumentsHandler) HandleGetSection(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"id":          sec.ID,
 		"document_id": sec.DocumentID,
 		"parent_id":   sec.ParentID,
@@ -645,5 +725,11 @@ func (h *DocumentsHandler) HandleGetSection(w http.ResponseWriter, r *http.Reque
 		"token_count": sec.TokenCount,
 		"metadata":    sec.Metadata,
 		"content":     content,
-	})
+	}
+	// Page spans are omitted for formats without pages, as the spec says.
+	if sec.PageStart > 0 {
+		out["page_start"] = sec.PageStart
+		out["page_end"] = max(sec.PageEnd, sec.PageStart)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
