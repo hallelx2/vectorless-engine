@@ -75,6 +75,10 @@ type Deps struct {
 	// places citations on the page (HAL-832). Nil leaves citations
 	// without regions and the page routes answering 501.
 	Pincites *pincite.Service
+
+	// BYOK builds a client on a caller's own model key for the answer
+	// step (X-LLM-* headers). Nil refuses such requests with 501.
+	BYOK LLMFactory
 }
 
 // Router builds the chi router with all v1 routes and the full
@@ -155,7 +159,7 @@ func Router(d Deps) http.Handler {
 	queryStream := NewQueryStreamHandler(d.Logger, d.DB, d.Storage, d.Strategy)
 	queryMulti := NewQueryMultiHandler(d.Logger, d.Storage, d.Strategy, d.MultiDoc)
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
-	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay).WithPincites(d.Judge, d.Pincites)
+	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay).WithPincites(d.Judge, d.Pincites).WithBYOK(d.BYOK)
 	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk)
 	answerTreeWalk.pincites = d.Pincites
 	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel)

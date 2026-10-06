@@ -224,6 +224,7 @@ func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *h
 	}
 
 	finalIDs := append([]tree.SectionID(nil), res.SelectedIDs...)
+	setTokenHeaders(w.Header(), resp)
 	raw, err := marshalJSONForReplay(resp)
 	if err != nil {
 		writeJSON(w, http.StatusOK, resp)
@@ -249,6 +250,7 @@ func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	declareTokenTrailers(w.Header())
 	w.WriteHeader(http.StatusOK)
 
 	var writeMu sync.Mutex
@@ -305,6 +307,7 @@ func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Reque
 		"pages_read":  res.PagesRead,
 	}
 	emitSSE("answer", final)
+	setTokenHeaders(w.Header(), final)
 }
 
 // buildCitations transforms the strategy's FINAL cited ranges + the

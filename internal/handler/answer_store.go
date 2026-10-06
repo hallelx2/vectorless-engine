@@ -195,7 +195,7 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 	citations := buildStoreCitations(sections, cited)
 	h.annotate(r.Context(), orgID, storeID(r), citations)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	storeResp := map[string]any{
 		"query":                  body.Query,
 		"answer":                 answer,
 		"citations":              citations,
@@ -204,7 +204,9 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 		"sections_used":          len(sections),
 		"usage":                  usageMap(totalUsage),
 		"elapsed_ms":             time.Since(started).Milliseconds(),
-	})
+	}
+	setTokenHeaders(w.Header(), storeResp)
+	writeJSON(w, http.StatusOK, storeResp)
 }
 
 // manifestRef maps a manifest index to a section id + whether it carries

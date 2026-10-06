@@ -69,8 +69,8 @@ func (h *AnswerHandler) answerFromPages(
 		"usage":        usageMap(res.Usage),
 	})
 
-	model := h.synthModel(body.Model)
-	answer, synthUsage, err := synthesiseFromPages(ctx, h.llm, model, body.Query, evidence, h.maxAnswerTokens(body, 2048))
+	client, model := body.byok.or(h.llm, h.synthModel(body.Model))
+	answer, synthUsage, err := synthesiseFromPages(ctx, client, model, body.Query, evidence, h.maxAnswerTokens(body, 2048))
 	if err != nil {
 		return nil, nil, "", "", fmt.Errorf("synthesis failed: %w", err)
 	}
@@ -212,6 +212,7 @@ func (h *AnswerHandler) answerFromPages(
 		"markers_stripped": stripped,
 		"strategy":         h.strategy.Name(),
 		"model":            model,
+		"own_model_key":    body.byok != nil,
 		"confidence":       res.Confidence,
 		"usage":            usageMap(total),
 		"timings_ms": map[string]any{

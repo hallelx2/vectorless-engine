@@ -316,6 +316,7 @@ func run() error {
 			TreeWalk:         cfg.Engine.Retrieval.TreeWalk,
 			Judge:            judge,
 			Pincites:         pincites,
+			BYOK:             byokFactory,
 		}
 
 		srv := &http.Server{
@@ -547,6 +548,40 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 	default:
 		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)
 	}
+}
+
+// byokDefaultModel is the answer model used for a caller's own key when
+// the request names none (X-LLM-Model). Callers on another model pass it.
+var byokDefaultModel = map[string]string{
+	"anthropic": "claude-sonnet-5",
+	"openai":    "gpt-4.1-mini",
+	"gemini":    "gemini-2.5-flash",
+}
+
+// byokFactory builds a client on a caller-supplied provider and key for
+// the answer step. Nothing about the key is logged or stored.
+func byokFactory(provider, apiKey, model string) (llmgate.Client, string, error) {
+	def, ok := byokDefaultModel[provider]
+	if !ok {
+		return nil, "", fmt.Errorf("unsupported provider %q (anthropic, openai, gemini)", provider)
+	}
+	if model == "" {
+		model = def
+	}
+	c := enginecfg.LLMConfig{Driver: provider}
+	switch provider {
+	case "anthropic":
+		c.Anthropic = enginecfg.AnthropicBlock{APIKey: apiKey, Model: model}
+	case "openai":
+		c.OpenAI = enginecfg.OpenAIBlock{APIKey: apiKey, Model: model}
+	case "gemini":
+		c.Gemini = enginecfg.GeminiBlock{APIKey: apiKey, Model: model}
+	}
+	client, err := buildLLM(c)
+	if err != nil {
+		return nil, "", err
+	}
+	return client, model, nil
 }
 
 // buildStrategy constructs the retrieval strategy named by

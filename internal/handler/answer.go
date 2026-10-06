@@ -47,6 +47,8 @@ type AnswerHandler struct {
 	// layouts. Both optional — see WithPincites.
 	judge    llmgate.Judge
 	pincites *pincite.Service
+
+	byokFactory LLMFactory
 }
 
 // WithPincites enables page-level pincites on answers built from
@@ -97,6 +99,56 @@ type answerRequest struct {
 	MaxAnswerTokens   int             `json:"max_answer_tokens"`
 	// Stream answers as Server-Sent Events; ?stream=true also works.
 	Stream bool `json:"stream"`
+
+	// byok is the caller's own model for the answer step, from the
+	// X-LLM-* headers (see resolveBYOK). Never serialised.
+	byok *byokClient
+}
+
+// byokClient is a per-request model the caller brought.
+type byokClient struct {
+	client   llmgate.Client
+	model    string
+	provider string
+}
+
+// LLMFactory builds a client for a caller-supplied provider and key.
+type LLMFactory func(provider, apiKey, model string) (llmgate.Client, string, error)
+
+// WithBYOK lets callers answer on their own model: X-LLM-Provider
+// (anthropic | openai | gemini), X-LLM-Api-Key and optionally
+// X-LLM-Model. Retrieval is unaffected; only the one generative call —
+// writing the answer — runs on the caller's key.
+func (h *AnswerHandler) WithBYOK(f LLMFactory) *AnswerHandler {
+	h.byokFactory = f
+	return h
+}
+
+// resolveBYOK reads the X-LLM-* headers. ok is false (and the response
+// written) when they are present but unusable.
+func (h *AnswerHandler) resolveBYOK(w http.ResponseWriter, r *http.Request) (*byokClient, bool) {
+	key := r.Header.Get("X-LLM-Api-Key")
+	if key == "" {
+		return nil, true
+	}
+	if h.byokFactory == nil {
+		writeErr(w, http.StatusNotImplemented, "this server does not accept caller-supplied model keys")
+		return nil, false
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.Header.Get("X-LLM-Provider")))
+	c, model, err := h.byokFactory(provider, key, r.Header.Get("X-LLM-Model"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "model key: "+err.Error())
+		return nil, false
+	}
+	return &byokClient{client: c, model: model, provider: provider}, true
+}
+
+func (b *byokClient) or(c llmgate.Client, model string) (llmgate.Client, string) {
+	if b == nil {
+		return c, model
+	}
+	return b.client, b.model
 }
 
 // HandleAnswer runs retrieval, then answers from what it found.
@@ -137,6 +189,11 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("stream") == "true" {
 		body.Stream = true
 	}
+	byok, ok := h.resolveBYOK(w, r)
+	if !ok {
+		return
+	}
+	body.byok = byok
 
 	t, err := h.db.LoadTree(r.Context(), body.DocumentID, orgID, storeID(r))
 	if err != nil {
@@ -180,6 +237,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
+		declareTokenTrailers(w.Header())
 		w.WriteHeader(http.StatusOK)
 		var mu sync.Mutex
 		emit = func(event string, payload any) {
@@ -239,6 +297,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	entry := retrieval.ReplayEntry{DocumentID: body.DocumentID, Query: body.Query, Model: model, SelectedIDs: finalIDs}
 	if body.Stream {
 		emit("answer", resp)
+		setTokenHeaders(w.Header(), resp)
 		if err == nil && h.replay != nil && token != "" {
 			entry.ResponseJSON = raw
 			entry.CreatedAt = time.Now()
@@ -246,6 +305,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	setTokenHeaders(w.Header(), resp)
 	if err != nil {
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -292,8 +352,8 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 	spanExtractor := h.spanExtractor(body.Model)
 	runAnswerSpansConcurrent(ctx, spanExtractor, body.Query, enriched, h.answerSpan.MaxConcurrency, h.logger)
 
-	synthModel := h.synthModel(body.Model)
-	answerText, synthUsage, err := synthesiseAnswer(ctx, h.llm, synthModel, body.Query, enriched, h.maxAnswerTokens(body, 1024))
+	client, synthModel := body.byok.or(h.llm, h.synthModel(body.Model))
+	answerText, synthUsage, err := synthesiseAnswer(ctx, client, synthModel, body.Query, enriched, h.maxAnswerTokens(body, 1024))
 	if err != nil {
 		return nil, nil, "", "", fmt.Errorf("synthesis failed: %w", err)
 	}
