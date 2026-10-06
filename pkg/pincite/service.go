@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 
@@ -55,10 +57,44 @@ type Service struct {
 	// long filing's layout is several MB decoded.
 	CacheSize int
 
-	mu    sync.Mutex
-	cache map[string]*Layout
-	order []string
-	group singleflight.Group
+	// RenderSlots bounds concurrent renderer processes. Default: half
+	// the CPUs, at least 2. Ingest warm-up and readers' on-demand pages
+	// share the slots, so a reader's page interleaves with a warm-up
+	// instead of competing with it for every core.
+	RenderSlots int
+
+	mu       sync.Mutex
+	cache    map[string]*Layout
+	order    []string
+	group    singleflight.Group
+	slotOnce sync.Once
+	slots    chan struct{}
+}
+
+// warmChunk is how many pages one warm-up renderer call covers. Each
+// chunk is stored as soon as it is rendered, so a freshly ingested
+// document's first pages appear in seconds, not after the whole file.
+const warmChunk = 12
+
+// onDemandTimeout bounds one on-demand page render. It runs detached
+// from the request, so a page the reader stopped waiting for is still
+// stored for the next view.
+const onDemandTimeout = 2 * time.Minute
+
+func (s *Service) acquire(ctx context.Context) (func(), error) {
+	s.slotOnce.Do(func() {
+		n := s.RenderSlots
+		if n <= 0 {
+			n = max(2, runtime.NumCPU()/2)
+		}
+		s.slots = make(chan struct{}, n)
+	})
+	select {
+	case s.slots <- struct{}{}:
+		return func() { <-s.slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // LayoutKey and PageKey are where the derived artefacts live.
@@ -122,18 +158,31 @@ func (s *Service) PageImage(ctx context.Context, src Source, n int) ([]byte, err
 	if s.Raster == nil || !s.Raster.Available() {
 		return nil, ErrNoRenderer
 	}
-	v, err, _ := s.group.Do(fmt.Sprintf("page:%s:%d", src.DocumentID, n), func() (any, error) {
-		if b, err := s.readKey(ctx, PageKey(src.DocumentID, n)); err == nil {
+	// Shared by every concurrent reader of this page, and detached from
+	// any one request: the render finishes and is stored regardless.
+	ch := s.group.DoChan(fmt.Sprintf("page:%s:%d", src.DocumentID, n), func() (any, error) {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), onDemandTimeout)
+		defer cancel()
+		if b, err := s.readKey(rctx, PageKey(src.DocumentID, n)); err == nil {
 			return b, nil
 		}
-		pdf, err := s.readSource(ctx, src)
+		release, err := s.acquire(rctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		// The warm-up may have stored it while this waited for a slot.
+		if b, err := s.readKey(rctx, PageKey(src.DocumentID, n)); err == nil {
+			return b, nil
+		}
+		pdf, err := s.readSource(rctx, src)
 		if err != nil {
 			return nil, err
 		}
 		var out []byte
-		err = s.Raster.RenderPages(ctx, pdf, n, n, func(page int, jpeg []byte) error {
+		err = s.Raster.RenderPages(rctx, pdf, n, n, func(page int, jpeg []byte) error {
 			out = jpeg
-			return s.Storage.Put(ctx, PageKey(src.DocumentID, page), bytes.NewReader(jpeg), storage.Metadata{ContentType: "image/jpeg"})
+			return s.Storage.Put(rctx, PageKey(src.DocumentID, page), bytes.NewReader(jpeg), storage.Metadata{ContentType: "image/jpeg"})
 		})
 		if err != nil {
 			return nil, err
@@ -143,10 +192,15 @@ func (s *Service) PageImage(ctx context.Context, src Source, n int) ([]byte, err
 		}
 		return out, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.([]byte), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.([]byte), nil
 }
 
 // Warm builds the layout and renders every page, so the first reader
@@ -177,9 +231,26 @@ func (s *Service) Warm(ctx context.Context, src Source) error {
 	if err != nil {
 		return err
 	}
-	return s.Raster.RenderPages(ctx, pdf, 1, last, func(page int, jpeg []byte) error {
-		return s.Storage.Put(ctx, PageKey(src.DocumentID, page), bytes.NewReader(jpeg), storage.Metadata{ContentType: "image/jpeg"})
-	})
+	// In chunks, each stored as it lands and each holding one render
+	// slot, so readers' pages interleave with the warm-up.
+	for from := 1; from <= last; from += warmChunk {
+		to := min(last, from+warmChunk-1)
+		if ok, _ := s.Storage.Exists(ctx, PageKey(src.DocumentID, to)); ok {
+			continue
+		}
+		release, err := s.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		err = s.Raster.RenderPages(ctx, pdf, from, to, func(page int, jpeg []byte) error {
+			return s.Storage.Put(ctx, PageKey(src.DocumentID, page), bytes.NewReader(jpeg), storage.Metadata{ContentType: "image/jpeg"})
+		})
+		release()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) cached(id string) *Layout {
