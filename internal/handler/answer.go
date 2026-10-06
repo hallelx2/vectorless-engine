@@ -200,7 +200,15 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	res, err := h.runSelection(r.Context(), t, body.Query, budget)
+	// Streaming callers see each navigation stage as it completes.
+	strategy := h.strategy
+	if ss, ok := strategy.(retrieval.StepStrategy); ok && body.Stream {
+		stepStart := time.Now()
+		strategy = ss.WithSteps(func(st retrieval.NavStep) {
+			emit("step", map[string]any{"step": st, "elapsed_ms": time.Since(stepStart).Milliseconds()})
+		})
+	}
+	res, err := h.runSelection(r.Context(), strategy, t, body.Query, budget)
 	if err != nil {
 		h.logger.Error("answer: strategy failed", "err", err, "document_id", body.DocumentID)
 		fail(http.StatusInternalServerError, "retrieval failed: "+err.Error())
@@ -358,8 +366,8 @@ func (h *AnswerHandler) maxAnswerTokens(body answerRequest, fallback int) int {
 
 // runSelection runs the strategy, surfacing cost and evidence pages
 // when it implements CostStrategy.
-func (h *AnswerHandler) runSelection(ctx context.Context, t *tree.Tree, query string, budget retrieval.ContextBudget) (*retrieval.Result, error) {
-	if cs, ok := h.strategy.(retrieval.CostStrategy); ok {
+func (h *AnswerHandler) runSelection(ctx context.Context, strategy retrieval.Strategy, t *tree.Tree, query string, budget retrieval.ContextBudget) (*retrieval.Result, error) {
+	if cs, ok := strategy.(retrieval.CostStrategy); ok {
 		res, err := cs.SelectWithCost(ctx, t, query, budget)
 		if err != nil {
 			return nil, err
@@ -369,7 +377,7 @@ func (h *AnswerHandler) runSelection(ctx context.Context, t *tree.Tree, query st
 		}
 		return res, nil
 	}
-	ids, err := h.strategy.Select(ctx, t, query, budget)
+	ids, err := strategy.Select(ctx, t, query, budget)
 	if err != nil {
 		return nil, err
 	}

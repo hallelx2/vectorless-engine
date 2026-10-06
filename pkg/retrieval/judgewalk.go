@@ -69,8 +69,67 @@ type NavResult struct {
 }
 
 // JudgeNavigator ranks leaves, then pages, on a Judge.
+// NavStep is one completed stage of navigation, for display. Scores are
+// probabilities in [0,1].
+type NavStep struct {
+	// Kind is "structure", "sections", "skim", "read", "pages" or "follow".
+	Kind string `json:"kind"`
+	// Sections are the sections the stage concerns, best first.
+	Sections []NavStepSection `json:"sections,omitempty"`
+	// Pages are page numbers the stage concerns, with scores when the
+	// stage scored them.
+	Pages []NavStepPage `json:"pages,omitempty"`
+	// Count is the stage's headline number: sections in the structure,
+	// pages skimmed, pages read.
+	Count int `json:"count,omitempty"`
+	// Total is the document's page count, on "structure".
+	Total int `json:"total,omitempty"`
+}
+
+// NavStepSection is a section as a step shows it.
+type NavStepSection struct {
+	Title string  `json:"title"`
+	Path  string  `json:"path,omitempty"`
+	Start int     `json:"start_page,omitempty"`
+	End   int     `json:"end_page,omitempty"`
+	Score float64 `json:"score,omitempty"`
+}
+
+// NavStepPage is a page as a step shows it.
+type NavStepPage struct {
+	Page  int     `json:"page"`
+	Score float64 `json:"score,omitempty"`
+}
+
+func (n *JudgeNavigator) step(s NavStep) {
+	if n.OnStep != nil {
+		n.OnStep(s)
+	}
+}
+
+func stepSections(ls []LeafScore, k int) []NavStepSection {
+	out := make([]NavStepSection, 0, min(k, len(ls)))
+	for _, l := range ls[:min(k, len(ls))] {
+		out = append(out, NavStepSection{Title: l.Leaf.Title, Path: l.Leaf.Path, Start: l.Leaf.Start, End: l.Leaf.End, Score: l.P})
+	}
+	return out
+}
+
+func stepPages(ps []PageScore, k int) []NavStepPage {
+	out := make([]NavStepPage, 0, min(k, len(ps)))
+	for _, p := range ps[:min(k, len(ps))] {
+		out = append(out, NavStepPage{Page: p.Page.Number, Score: p.P})
+	}
+	return out
+}
+
 type JudgeNavigator struct {
 	Judge llmgate.Judge
+
+	// OnStep, when set, is told about each stage of navigation as it
+	// completes, so a caller can show the reader what is happening. It
+	// runs on Navigate's goroutine, between stages; keep it cheap.
+	OnStep func(NavStep)
 
 	// Threshold is the probability at or above which a page counts as
 	// evidence. Zero selects 0.5.
@@ -470,6 +529,13 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 		return out, nil
 	}
 	maxP := n.maxPages()
+	{
+		last := 0
+		for _, l := range leaves {
+			last = max(last, l.End)
+		}
+		n.step(NavStep{Kind: "structure", Count: len(leaves), Total: last})
+	}
 
 	// With SkimAll the section ranking and the head skim of every page go
 	// out together; otherwise the skim waits for the ranking below.
@@ -527,6 +593,10 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 		out.Requests += r
 	}
 	out.Leaves = ranked
+	n.step(NavStep{Kind: "sections", Count: len(ranked), Sections: stepSections(ranked, 6)})
+	if skimmed {
+		n.step(NavStep{Kind: "skim", Count: len(heads), Pages: stepPages(heads, 8)})
+	}
 
 	// Gather the pages of the best leaves, in rank order, up to the
 	// coarse budget. A leaf below threshold is still read when nothing
@@ -587,6 +657,17 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 		}
 		sort.Slice(pages, func(i, j int) bool { return pages[i].Number < pages[j].Number })
 	}
+	{
+		read := make([]NavStepPage, 0, len(pages))
+		for _, p := range pages {
+			read = append(read, NavStepPage{Page: p.Number})
+		}
+		var secs []NavStepSection
+		for _, l := range out.Selected {
+			secs = append(secs, NavStepSection{Title: l.Title, Path: l.Path, Start: l.Start, End: l.End})
+		}
+		n.step(NavStep{Kind: "read", Count: len(pages), Pages: read, Sections: secs})
+	}
 	scored, u, r, err := n.RankPages(ctx, query, pages)
 	if err != nil {
 		return nil, fmt.Errorf("judgewalk: rank pages: %w", err)
@@ -609,6 +690,7 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 		}
 	}
 	fill(scored)
+	n.step(NavStep{Kind: "pages", Count: len(scored), Pages: stepPages(scored, 8)})
 
 	// One more hop when the evidence points elsewhere. Code reads the
 	// reference, the tree names the leaf, the Judge reads its pages.
@@ -639,6 +721,11 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 			}
 		}
 		if len(refPages) > 0 {
+			var secs []NavStepSection
+			for _, l := range out.Followed {
+				secs = append(secs, NavStepSection{Title: l.Title, Path: l.Path, Start: l.Start, End: l.End})
+			}
+			n.step(NavStep{Kind: "follow", Count: len(refPages), Sections: secs})
 			more, u, r, err := n.RankPages(ctx, query, refPages)
 			if err != nil {
 				return nil, fmt.Errorf("judgewalk: rank referenced pages: %w", err)
@@ -778,6 +865,14 @@ func NewJudgeWalkStrategy(j llmgate.Judge) *JudgeWalkStrategy {
 }
 
 func (s *JudgeWalkStrategy) Name() string { return strategyNameJudgeWalk }
+
+// WithSteps returns a copy of the strategy that reports each
+// navigation stage to onStep. The shared instance is never mutated.
+func (s *JudgeWalkStrategy) WithSteps(onStep func(NavStep)) Strategy {
+	c := *s
+	c.Navigator.OnStep = onStep
+	return &c
+}
 
 // Select returns the section IDs the evidence pages came from.
 func (s *JudgeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {

@@ -463,6 +463,127 @@ func (h *DocumentsHandler) HandleGetTree(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, t.BuildView())
 }
 
+// structureNode is one node of a document's structure as the structure
+// explorer draws it: title, page span, and children.
+type structureNode struct {
+	ID        string          `json:"id"`
+	Structure string          `json:"structure,omitempty"`
+	Title     string          `json:"title"`
+	StartPage int             `json:"start_page,omitempty"`
+	EndPage   int             `json:"end_page,omitempty"`
+	Summary   string          `json:"summary,omitempty"`
+	SectionID string          `json:"section_id,omitempty"`
+	Nodes     []structureNode `json:"nodes,omitempty"`
+}
+
+// HandleGetStructure returns the document's structure with page spans:
+//
+//	{"document_id", "title", "source": "toc"|"sections", "page_count", "nodes": [...]}
+//
+// It is the table of contents ingest built and verified against the
+// pages (source "toc") when there is one, else the parser's section
+// tree with its page ranges (source "sections"). Open-ended end pages
+// are closed against the next sibling, so every node has a span.
+func (h *DocumentsHandler) HandleGetStructure(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrgID(w, r)
+	if !ok {
+		return
+	}
+	id := tree.DocumentID(chi.URLParam(r, "id"))
+	doc, err := h.db.GetDocument(r.Context(), id, orgID, storeID(r))
+	if err != nil {
+		writeDocErr(w, err)
+		return
+	}
+	t, err := h.db.LoadTree(r.Context(), id, orgID, storeID(r))
+	if err != nil {
+		writeDocErr(w, err)
+		return
+	}
+	resp := map[string]any{"document_id": id, "title": doc.Title}
+
+	var toc []tree.TOCNode
+	if len(doc.TOCTree) > 0 && json.Unmarshal(doc.TOCTree, &toc) == nil && len(toc) > 0 {
+		last := 0
+		for _, n := range toc {
+			last = max(last, maxEnd(n))
+		}
+		if pages := maxSectionPage(t); pages > last {
+			last = pages
+		}
+		resp["source"] = "toc"
+		resp["page_count"] = last
+		resp["nodes"] = fromTOC(toc, last)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	last := maxSectionPage(t)
+	resp["source"] = "sections"
+	resp["page_count"] = last
+	var nodes []structureNode
+	if t != nil && t.Root != nil {
+		kids := t.Root.Children
+		if len(kids) == 0 {
+			kids = []*tree.Section{t.Root}
+		}
+		for _, c := range kids {
+			nodes = append(nodes, fromSection(c))
+		}
+	}
+	resp["nodes"] = nodes
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func maxEnd(n tree.TOCNode) int {
+	m := max(n.StartPage, n.EndPage)
+	for _, c := range n.Nodes {
+		m = max(m, maxEnd(c))
+	}
+	return m
+}
+
+func maxSectionPage(t *tree.Tree) int {
+	m := 0
+	if t == nil || t.Root == nil {
+		return 0
+	}
+	t.Root.Walk(func(s *tree.Section) bool {
+		m = max(m, s.PageEnd, s.PageStart)
+		return true
+	})
+	return m
+}
+
+// fromTOC converts TOC nodes, closing an open end page against the next
+// sibling's start (or the parent's end).
+func fromTOC(ns []tree.TOCNode, parentEnd int) []structureNode {
+	out := make([]structureNode, 0, len(ns))
+	for i, n := range ns {
+		end := n.EndPage
+		if end == 0 {
+			if i+1 < len(ns) && ns[i+1].StartPage > 0 {
+				end = max(n.StartPage, ns[i+1].StartPage-1)
+			} else {
+				end = parentEnd
+			}
+		}
+		out = append(out, structureNode{
+			ID: n.NodeID, Structure: n.Structure, Title: n.Title,
+			StartPage: n.StartPage, EndPage: end, Summary: n.Summary,
+			Nodes: fromTOC(n.Nodes, end),
+		})
+	}
+	return out
+}
+
+func fromSection(s *tree.Section) structureNode {
+	n := structureNode{ID: string(s.ID), Title: s.Title, StartPage: s.PageStart, EndPage: s.PageEnd, Summary: s.Summary, SectionID: string(s.ID)}
+	for _, c := range s.Children {
+		n.Nodes = append(n.Nodes, fromSection(c))
+	}
+	return n
+}
+
 // HandleGetLlmsTxt renders the document tree as an llms.txt Markdown map —
 // the navigable, LLM-friendly index of the document (H1 title, blockquote
 // summary, nested section headings with one-line summaries).

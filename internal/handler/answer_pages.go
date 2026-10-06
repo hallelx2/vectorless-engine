@@ -65,7 +65,7 @@ func (h *AnswerHandler) answerFromPages(
 	emit("retrieved", map[string]any{
 		"evidence":       evList,
 		"retrieval_ms":   retrievalMS,
-		"judge_requests": res.HopsTaken,
+		"requests":       res.HopsTaken,
 		"usage":          usageMap(res.Usage),
 	})
 
@@ -151,10 +151,10 @@ func (h *AnswerHandler) answerFromPages(
 			"regions":   nonNilRegions(match.Regions),
 			"precision": match.Precision,
 			"claim":     m.Claim,
-			"chosen_by": ch.By,
+			"selected_by": publicSelector(ch.By),
 		}
 		if ch.By == "judge" {
-			p["judge_p"] = ch.P
+			p["selection_confidence"] = ch.P
 		}
 		pincites = append(pincites, p)
 		if inline {
@@ -223,6 +223,19 @@ func (h *AnswerHandler) answerFromPages(
 		"trace_token": traceToken,
 	}
 	return resp, finalIDs, model, traceToken, nil
+}
+
+// publicSelector names how a pincite's sentence was chosen, without
+// exposing which model makes the choice: "model" or "overlap" (the
+// lexical fallback).
+func publicSelector(by string) string {
+	switch by {
+	case "judge":
+		return "model"
+	case "lexical":
+		return "overlap"
+	}
+	return ""
 }
 
 // locate places a chosen sentence on its page. With no layout the
