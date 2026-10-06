@@ -257,6 +257,35 @@ func (p *Pool) CountSections(ctx context.Context, docID tree.DocumentID, orgID, 
 	return n, nil
 }
 
+// CountSectionsByDocument returns the section count of each document in
+// ids, in one query. The caller has already scoped ids to the tenant.
+func (p *Pool) CountSectionsByDocument(ctx context.Context, ids []tree.DocumentID) (map[tree.DocumentID]int, error) {
+	out := make(map[tree.DocumentID]int, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = string(id)
+	}
+	rows, err := p.Query(ctx, `
+        SELECT document_id, count(*) FROM sections
+        WHERE document_id = ANY($1) GROUP BY document_id`, strs)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[tree.DocumentID(id)] = n
+	}
+	return out, rows.Err()
+}
+
 // GetSection fetches a single section, scoped to an org (and optional
 // store) via JOIN on the parent document. Cross-scope reads return
 // ErrNotFound, so section IDs from other tenants/stores can't be probed.

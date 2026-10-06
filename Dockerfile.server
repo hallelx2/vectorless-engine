@@ -30,9 +30,23 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
       ./cmd/server
 
 # ── Runtime stage ──────────────────────────────────────────────────
-FROM gcr.io/distroless/static:nonroot
+# Alpine rather than distroless/static for one program: poppler's
+# pdftoppm, which renders PDF pages to the images pincite cards and the
+# document viewer show (HAL-834). It runs out of process, so the server
+# binary itself stays pure Go (CGO_ENABLED=0 above). Without it the
+# server still starts; citations keep their regions and page images
+# report 501.
+FROM alpine:3.20
 
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --no-cache ca-certificates poppler-utils \
+ && addgroup -S -g 65532 nonroot \
+ && adduser -S -u 65532 -G nonroot -h /home/nonroot -s /sbin/nologin nonroot
+
+# pdfcpu (under pdftable) writes its configuration to $HOME/.config on first
+# use and panics if it cannot: with no home directory, every PDF ingest
+# failed with "mkdir /home/nonroot: permission denied".
+ENV HOME=/home/nonroot
+
 COPY --from=build /bin/vectorless-server /vectorless-server
 
 USER nonroot:nonroot

@@ -40,6 +40,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
+	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -216,8 +217,35 @@ func run() error {
 		)
 	}
 
+	// ── Pincites (HAL-832) ────────────────────────────────────────
+	// Page layouts come from the PDF parser's word positions; page
+	// images from poppler's pdftoppm when the runtime image carries it.
+	// Without pdftoppm, citations still carry regions and the viewer
+	// says pages cannot be rendered here.
+	raster := pincite.Poppler{}
+	if raster.Available() {
+		logger.Info("pincites: page images enabled (pdftoppm)")
+	} else {
+		logger.Warn("pincites: pdftoppm not found — page images disabled; install poppler-utils")
+	}
+	pincites := &pincite.Service{Storage: store, Build: parser.PDFLayout, Raster: raster, Logger: logger}
+
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
+		AfterReady: func(ctx context.Context, pl ingest.Payload) {
+			src := pincite.Source{DocumentID: string(pl.DocumentID), SourceRef: pl.SourceRef, ContentType: pl.ContentType}
+			if !src.IsPDF() {
+				return
+			}
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+			start := time.Now()
+			if err := pincites.Warm(ctx, src); err != nil {
+				logger.Warn("pincites: warm failed; pages render on first view", "document_id", pl.DocumentID, "err", err)
+				return
+			}
+			logger.Info("pincites: layout and page images ready", "document_id", pl.DocumentID, "elapsed", time.Since(start).Round(time.Millisecond))
+		},
 		DB:                     pool,
 		Storage:                store,
 		LLM:                    llmClient,
@@ -286,6 +314,9 @@ func run() error {
 			Replay:           replayStore,
 			TreeWalkStrategy: treeWalkStrategy,
 			TreeWalk:         cfg.Engine.Retrieval.TreeWalk,
+			Judge:            judge,
+			Pincites:         pincites,
+			BYOK:             byokFactory,
 		}
 
 		srv := &http.Server{
@@ -517,6 +548,40 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 	default:
 		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)
 	}
+}
+
+// byokDefaultModel is the answer model used for a caller's own key when
+// the request names none (X-LLM-Model). Callers on another model pass it.
+var byokDefaultModel = map[string]string{
+	"anthropic": "claude-sonnet-5",
+	"openai":    "gpt-4.1-mini",
+	"gemini":    "gemini-2.5-flash",
+}
+
+// byokFactory builds a client on a caller-supplied provider and key for
+// the answer step. Nothing about the key is logged or stored.
+func byokFactory(provider, apiKey, model string) (llmgate.Client, string, error) {
+	def, ok := byokDefaultModel[provider]
+	if !ok {
+		return nil, "", fmt.Errorf("unsupported provider %q (anthropic, openai, gemini)", provider)
+	}
+	if model == "" {
+		model = def
+	}
+	c := enginecfg.LLMConfig{Driver: provider}
+	switch provider {
+	case "anthropic":
+		c.Anthropic = enginecfg.AnthropicBlock{APIKey: apiKey, Model: model}
+	case "openai":
+		c.OpenAI = enginecfg.OpenAIBlock{APIKey: apiKey, Model: model}
+	case "gemini":
+		c.Gemini = enginecfg.GeminiBlock{APIKey: apiKey, Model: model}
+	}
+	client, err := buildLLM(c)
+	if err != nil {
+		return nil, "", err
+	}
+	return client, model, nil
 }
 
 // buildStrategy constructs the retrieval strategy named by
