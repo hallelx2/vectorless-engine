@@ -40,7 +40,12 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates poppler-utils \
  && addgroup -S -g 65532 nonroot \
- && adduser -S -u 65532 -G nonroot -H -s /sbin/nologin nonroot
+ && adduser -S -u 65532 -G nonroot -h /home/nonroot -s /sbin/nologin nonroot
+
+# pdfcpu (under pdftable) writes its configuration to $HOME/.config on first
+# use and panics if it cannot: with no home directory, every PDF ingest
+# failed with "mkdir /home/nonroot: permission denied".
+ENV HOME=/home/nonroot
 
 COPY --from=build /bin/vectorless-server /vectorless-server
 
