@@ -137,3 +137,53 @@ func mustGetwd(t *testing.T) string {
 	}
 	return wd
 }
+
+func TestLocalDeletePrefix(t *testing.T) {
+	l, err := NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keys := []string{
+		"documents/doc-a/source.pdf",
+		"documents/doc-a/sections/s1.txt",
+		"documents/doc-ab/source.pdf", // shares a string prefix, not the directory
+		"pages/doc-a.json",
+		"pages/doc-ab.json",
+	}
+	for _, k := range keys {
+		if err := l.Put(ctx, k, strings.NewReader("x"), Metadata{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := l.DeletePrefix(ctx, "documents/doc-a/")
+	if err != nil || n != 2 {
+		t.Fatalf("DeletePrefix(documents/doc-a/) = %d, %v; want 2, nil", n, err)
+	}
+	n, err = l.DeletePrefix(ctx, "pages/doc-a.json")
+	if err != nil || n != 1 {
+		t.Fatalf("DeletePrefix(pages/doc-a.json) = %d, %v; want 1, nil", n, err)
+	}
+	if n, err := l.DeletePrefix(ctx, "pincites/doc-a/"); err != nil || n != 0 {
+		t.Fatalf("DeletePrefix on a missing prefix = %d, %v; want 0, nil", n, err)
+	}
+	if _, err := l.DeletePrefix(ctx, ""); !errors.Is(err, ErrEmptyPrefix) {
+		t.Fatalf("empty prefix: err = %v, want ErrEmptyPrefix", err)
+	}
+
+	for k, want := range map[string]bool{
+		"documents/doc-a/source.pdf":      false,
+		"documents/doc-a/sections/s1.txt": false,
+		"documents/doc-ab/source.pdf":     true,
+		"pages/doc-a.json":                false,
+		"pages/doc-ab.json":               true,
+	} {
+		if got, _ := l.Exists(ctx, k); got != want {
+			t.Errorf("Exists(%s) = %v, want %v", k, got, want)
+		}
+	}
+	if _, err := os.Stat(l.path("documents/doc-a")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("emptied directory documents/doc-a was left behind (err=%v)", err)
+	}
+}

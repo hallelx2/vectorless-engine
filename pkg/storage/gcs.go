@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gcs "cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 )
 
 // GCSConfig configures the native Google Cloud Storage backend.
@@ -104,6 +105,28 @@ func (g *GCS) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("gcs storage: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// DeletePrefix removes every object under prefix.
+func (g *GCS) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if prefix == "" {
+		return 0, ErrEmptyPrefix
+	}
+	it := g.bucket.Objects(ctx, &gcs.Query{Prefix: prefix})
+	n := 0
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return n, nil
+		}
+		if err != nil {
+			return n, fmt.Errorf("gcs storage: list %q: %w", prefix, err)
+		}
+		if err := g.bucket.Object(attrs.Name).Delete(ctx); err != nil && !errors.Is(err, gcs.ErrObjectNotExist) {
+			return n, fmt.Errorf("gcs storage: delete %q: %w", attrs.Name, err)
+		}
+		n++
+	}
 }
 
 // Exists reports whether the object is present.

@@ -155,6 +155,45 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// DeletePrefix removes every object under prefix, a listed page (at
+// most 1,000 keys) per DeleteObjects call.
+func (s *S3) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if prefix == "" {
+		return 0, ErrEmptyPrefix
+	}
+	n := 0
+	pages := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.cfg.Bucket),
+		Prefix: aws.String(prefix),
+	})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return n, fmt.Errorf("s3 storage: list %q: %w", prefix, err)
+		}
+		if len(page.Contents) == 0 {
+			continue
+		}
+		ids := make([]types.ObjectIdentifier, 0, len(page.Contents))
+		for _, o := range page.Contents {
+			ids = append(ids, types.ObjectIdentifier{Key: o.Key})
+		}
+		out, err := s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(s.cfg.Bucket),
+			Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return n, fmt.Errorf("s3 storage: delete under %q: %w", prefix, err)
+		}
+		if len(out.Errors) > 0 {
+			e := out.Errors[0]
+			return n + len(ids) - len(out.Errors), fmt.Errorf("s3 storage: delete %q: %s", aws.ToString(e.Key), aws.ToString(e.Message))
+		}
+		n += len(ids)
+	}
+	return n, nil
+}
+
 // Exists reports whether key exists via HEAD.
 func (s *S3) Exists(ctx context.Context, key string) (bool, error) {
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
