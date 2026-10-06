@@ -238,11 +238,16 @@ func (s *DocumentsService) DeleteDocument(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.db.DeleteDocument(ctx, tree.DocumentID(req.Msg.DocumentId), orgID, storeIDFromConnect(req)); err != nil {
+	id := tree.DocumentID(req.Msg.DocumentId)
+	if err := s.db.DeleteDocument(ctx, id, orgID, storeIDFromConnect(req)); err != nil {
 		if isNotFound(err) {
 			return nil, connect.NewError(connect.CodeNotFound, err)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// The row is gone; a storage failure is logged, not surfaced.
+	if n, err := ingest.PurgeDocument(ctx, s.storage, id); err != nil {
+		s.logger.Error("delete document: purge stored files", "doc_id", id, "removed", n, "err", err)
 	}
 	return connect.NewResponse(&v1.DeleteDocumentResponse{}), nil
 }

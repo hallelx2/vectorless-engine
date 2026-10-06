@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -455,6 +456,7 @@ func (h *DocumentsHandler) HandleDeleteDocument(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	purgeDocument(r.Context(), h.logger, h.storage, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -732,4 +734,16 @@ func (h *DocumentsHandler) HandleGetSection(w http.ResponseWriter, r *http.Reque
 		out["page_end"] = max(sec.PageEnd, sec.PageStart)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// purgeDocument removes a deleted document's stored files: the upload, its
+// section texts, page text and rendered pages. The row is already gone, so a
+// storage failure is logged rather than undoing the delete.
+func purgeDocument(ctx context.Context, logger *slog.Logger, st storage.Storage, id tree.DocumentID) {
+	n, err := ingest.PurgeDocument(ctx, st, id)
+	if err != nil {
+		logger.Error("delete document: purge stored files", "doc_id", id, "removed", n, "err", err)
+		return
+	}
+	logger.Info("delete document: purged stored files", "doc_id", id, "removed", n)
 }

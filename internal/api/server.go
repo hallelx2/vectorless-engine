@@ -413,6 +413,10 @@ func (d Deps) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The row is gone; a storage failure is logged, not surfaced.
+	if n, err := ingest.PurgeDocument(r.Context(), d.Storage, id); err != nil {
+		d.Logger.Error("delete document: purge stored files", "doc_id", id, "removed", n, "err", err)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

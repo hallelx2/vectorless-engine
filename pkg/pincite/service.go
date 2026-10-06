@@ -97,6 +97,9 @@ func (s *Service) acquire(ctx context.Context) (func(), error) {
 	}
 }
 
+// DocPrefix is the prefix every pincite object of a document lives under.
+func DocPrefix(docID string) string { return "pincites/" + docID + "/" }
+
 // LayoutKey and PageKey are where the derived artefacts live.
 func LayoutKey(docID string) string {
 	return fmt.Sprintf("pincites/%s/layout.v%d.json.gz", docID, LayoutVersion)
