@@ -96,6 +96,13 @@ type Pipeline struct {
 	Parsers *parser.Registry
 	Logger  *slog.Logger
 
+	// AfterReady, when set, runs once a document has reached ready, off
+	// the ingest job's path. The server uses it to build the document's
+	// pincite layout and page images (HAL-833, HAL-834) so a reader's
+	// first highlight never waits for them; the document is queryable
+	// before it finishes.
+	AfterReady func(ctx context.Context, pl Payload)
+
 	// Mode selects how much work Run does before marking a document
 	// ready. "minimal" collapses ingest to parse → build tree → persist
 	// → ready, skipping every per-section LLM stage (summarize, HyDE,
@@ -385,6 +392,17 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
+	err := p.run(ctx, pl)
+	if err == nil && p.AfterReady != nil {
+		// Detached from the job's context: the document is already
+		// ready and queryable, and this work must not hold the job open
+		// or be cancelled when it returns.
+		go p.AfterReady(context.WithoutCancel(ctx), pl)
+	}
+	return err
+}
+
+func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 	if p.Mode == ModeMinimal || p.Mode == ModeTOC {
 		return p.runMinimal(ctx, p.DB, pl)
 	}

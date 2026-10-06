@@ -17,6 +17,7 @@ import (
 
 	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
@@ -40,6 +41,10 @@ type AnswerTreeWalkHandler struct {
 	replay     retrieval.ReplayStore
 	strategy   *retrieval.TreeWalkStrategy
 	treeWalk   enginecfg.TreeWalkBlock
+
+	// pincites places each citation's quote on its page. Nil leaves
+	// citations without regions.
+	pincites *pincite.Service
 
 	// treeLoader is a test seam overriding how the handler resolves
 	// the document tree. Nil routes through the org-scoped DB lookup
@@ -192,6 +197,7 @@ func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *h
 	}
 
 	citations := h.buildCitations(r.Context(), t, res, body.Query, body.Model)
+	h.annotate(r.Context(), orgID, storeID(r), body.DocumentID, citations)
 
 	resp := map[string]any{
 		"document_id": body.DocumentID,
@@ -275,6 +281,9 @@ func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Reque
 	}
 
 	citations := h.buildCitations(r.Context(), t, res, body.Query, body.Model)
+	if orgID := r.Header.Get("X-Vectorless-Org"); orgID != "" {
+		h.annotate(r.Context(), orgID, storeID(r), body.DocumentID, citations)
+	}
 	final := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
@@ -348,6 +357,18 @@ func (h *AnswerTreeWalkHandler) buildCitations(ctx context.Context, t *tree.Tree
 	})
 
 	return citations
+}
+
+// annotate adds page, regions and precision to each citation (HAL-837).
+func (h *AnswerTreeWalkHandler) annotate(ctx context.Context, orgID, store string, docID tree.DocumentID, citations []map[string]any) {
+	if h.db == nil || len(citations) == 0 {
+		return
+	}
+	src, err := pinciteSource(ctx, h.db, docID, orgID, store)
+	if err != nil {
+		h.logger.Warn("answer/treewalk: document source unavailable; citations stay page-level", "document_id", docID, "err", err)
+	}
+	annotateRangeCitations(ctx, h.pincites, src, citations, h.logger)
 }
 
 // materialiseCitedContent loads + concatenates every cited section's

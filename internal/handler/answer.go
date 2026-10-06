@@ -16,6 +16,7 @@ import (
 
 	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
@@ -41,6 +42,20 @@ type AnswerHandler struct {
 	answerSpan enginecfg.AnswerSpanBlock
 	answer     enginecfg.AnswerBlock
 	replay     retrieval.ReplayStore
+
+	// judge chooses each pincite's sentence; pincites serves page
+	// layouts. Both optional — see WithPincites.
+	judge    llmgate.Judge
+	pincites *pincite.Service
+}
+
+// WithPincites enables page-level pincites on answers built from
+// evidence pages. judge may be nil (sentences are then chosen
+// lexically); svc may be nil (citations then carry no regions).
+func (h *AnswerHandler) WithPincites(judge llmgate.Judge, svc *pincite.Service) *AnswerHandler {
+	h.judge = judge
+	h.pincites = svc
+	return h
 }
 
 // NewAnswerHandler creates an AnswerHandler. llm may be nil, in which
@@ -80,11 +95,22 @@ type answerRequest struct {
 	MaxParallelCalls  int             `json:"max_parallel_calls"`
 	MaxSections       int             `json:"max_sections"`
 	MaxAnswerTokens   int             `json:"max_answer_tokens"`
+	// Stream answers as Server-Sent Events; ?stream=true also works.
+	Stream bool `json:"stream"`
 }
 
-// HandleAnswer runs retrieval, extracts a grounding quote per
-// returned section, synthesises a final answer, and returns it with
-// per-section citations.
+// HandleAnswer runs retrieval, then answers from what it found.
+//
+// When the strategy returns evidence pages (judgewalk), the answer is
+// written from those pages with an inline [n] marker on every claim,
+// and each marker becomes a pincite: the sentence on the cited page
+// that states the claim, chosen by the Judge, located on the page and
+// returned with its regions (HAL-837). Otherwise it is the section
+// path: a grounding quote per selected section and one synthesis call.
+//
+// stream=true (body or query) answers as Server-Sent Events: "started",
+// "retrieved" once the evidence is chosen — before the one generative
+// call — and "answer" carrying the full response.
 func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrgID(w, r)
 	if !ok {
@@ -107,6 +133,9 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	if body.DocumentID == "" || body.Query == "" {
 		writeErr(w, http.StatusBadRequest, "document_id and query are required")
 		return
+	}
+	if r.URL.Query().Get("stream") == "true" {
+		body.Stream = true
 	}
 
 	t, err := h.db.LoadTree(r.Context(), body.DocumentID, orgID, storeID(r))
@@ -136,15 +165,92 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
-	totalUsage := retrieval.Usage{}
 
-	ids, retrievalUsage, err := h.runSelection(r.Context(), t, body.Query, budget)
+	// emit is a no-op unless streaming; fail reports an error on
+	// whichever channel the caller is reading.
+	emit := func(string, any) {}
+	fail := func(status int, msg string) { writeErr(w, status, msg) }
+	if body.Stream {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeErr(w, http.StatusInternalServerError, "streaming requires http.Flusher; response writer does not support it")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		var mu sync.Mutex
+		emit = func(event string, payload any) {
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw)
+			flusher.Flush()
+		}
+		fail = func(_ int, msg string) { emit("error", map[string]string{"error": msg}) }
+		emit("started", map[string]any{
+			"document_id": body.DocumentID,
+			"query":       body.Query,
+			"strategy":    h.strategy.Name(),
+		})
+	}
+
+	res, err := h.runSelection(r.Context(), t, body.Query, budget)
 	if err != nil {
 		h.logger.Error("answer: strategy failed", "err", err, "document_id", body.DocumentID)
-		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+		fail(http.StatusInternalServerError, "retrieval failed: "+err.Error())
 		return
 	}
-	totalUsage.Add(retrievalUsage)
+
+	var (
+		resp     map[string]any
+		finalIDs []tree.SectionID
+		model    string
+		token    string
+	)
+	if len(res.EvidencePages) > 0 {
+		src, serr := pinciteSource(r.Context(), h.db, body.DocumentID, orgID, storeID(r))
+		if serr != nil {
+			h.logger.Warn("answer: document source unavailable; pincites degrade", "document_id", body.DocumentID, "err", serr)
+		}
+		resp, finalIDs, model, token, err = h.answerFromPages(r.Context(), t, src, body, res, started, emit)
+	} else {
+		resp, finalIDs, model, token, err = h.answerFromSections(r.Context(), t, body, res, started)
+	}
+	if err != nil {
+		fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	raw, err := marshalJSONForReplay(resp)
+	entry := retrieval.ReplayEntry{DocumentID: body.DocumentID, Query: body.Query, Model: model, SelectedIDs: finalIDs}
+	if body.Stream {
+		emit("answer", resp)
+		if err == nil && h.replay != nil && token != "" {
+			entry.ResponseJSON = raw
+			entry.CreatedAt = time.Now()
+			h.replay.Put(token, entry)
+		}
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	writeJSONWithReplay(w, h.replay, http.StatusOK, raw, token, entry)
+}
+
+// answerFromSections is the section path: a grounding quote per
+// selected section, one synthesis call, one citation per section.
+func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, body answerRequest, res *retrieval.Result, started time.Time) (map[string]any, []tree.SectionID, string, string, error) {
+	totalUsage := retrieval.Usage{}
+	totalUsage.Add(res.Usage)
+	ids := res.SelectedIDs
 
 	maxSections := body.MaxSections
 	if maxSections <= 0 {
@@ -157,7 +263,6 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		ids = ids[:maxSections]
 	}
 
-	// Load each section's content.
 	enriched := make([]answerSection, 0, len(ids))
 	for _, id := range ids {
 		sec := t.FindByID(id)
@@ -166,7 +271,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		}
 		var content string
 		if sec.ContentRef != "" {
-			rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
+			rc, _, getErr := h.storage.Get(ctx, sec.ContentRef)
 			if getErr == nil {
 				raw, _ := io.ReadAll(rc)
 				_ = rc.Close() // best-effort close
@@ -176,30 +281,13 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		enriched = append(enriched, answerSection{sec: sec, content: content})
 	}
 
-	// Always extract spans for /v1/answer — they ground each citation.
 	spanExtractor := h.spanExtractor(body.Model)
-	runAnswerSpansConcurrent(r.Context(), spanExtractor, body.Query, enriched, h.answerSpan.MaxConcurrency, h.logger)
+	runAnswerSpansConcurrent(ctx, spanExtractor, body.Query, enriched, h.answerSpan.MaxConcurrency, h.logger)
 
-	// Synthesise the final answer from the retrieved evidence.
-	synthModel := h.answer.Model
-	if synthModel == "" {
-		synthModel = body.Model
-	}
-	if synthModel == "" {
-		synthModel = h.llmModel
-	}
-	maxAnswerTokens := body.MaxAnswerTokens
-	if maxAnswerTokens <= 0 {
-		maxAnswerTokens = h.answer.MaxAnswerTokens
-	}
-	if maxAnswerTokens <= 0 {
-		maxAnswerTokens = 1024
-	}
-
-	answerText, synthUsage, err := synthesiseAnswer(r.Context(), h.llm, synthModel, body.Query, enriched, maxAnswerTokens)
+	synthModel := h.synthModel(body.Model)
+	answerText, synthUsage, err := synthesiseAnswer(ctx, h.llm, synthModel, body.Query, enriched, h.maxAnswerTokens(body, 1024))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "synthesis failed: "+err.Error())
-		return
+		return nil, nil, "", "", fmt.Errorf("synthesis failed: %w", err)
 	}
 	totalUsage.Add(synthUsage)
 
@@ -227,10 +315,9 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		citations = append(citations, c)
 	}
 
-	// Trace token hashes over the final IDs that ground the answer +
-	// the synthesis model. Different synth models for the same
-	// retrieval set produce different answers and therefore different
-	// tokens.
+	// Trace token covers the FINAL citation IDs (post-maxSections cap)
+	// and the synthesis model, so two calls that cite identical
+	// sections under identical models share a token.
 	traceToken := retrieval.ComputeTraceToken(body.DocumentID, "1", synthModel, finalIDs)
 
 	resp := map[string]any{
@@ -240,48 +327,53 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		"citations":   citations,
 		"strategy":    h.strategy.Name(),
 		"model":       synthModel,
-		"usage": map[string]any{
-			"input_tokens":  totalUsage.InputTokens,
-			"output_tokens": totalUsage.OutputTokens,
-			"total_tokens":  totalUsage.TotalTokens,
-			"cost_usd":      totalUsage.CostUSD,
-			"llm_calls":     totalUsage.LLMCalls,
-		},
+		"usage":       usageMap(totalUsage),
 		"elapsed_ms":  time.Since(started).Milliseconds(),
 		"trace_token": traceToken,
 	}
-
-	raw, err := marshalJSONForReplay(resp)
-	if err != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	writeJSONWithReplay(w, h.replay, http.StatusOK, raw, traceToken, retrieval.ReplayEntry{
-		DocumentID:  body.DocumentID,
-		Query:       body.Query,
-		Model:       synthModel,
-		SelectedIDs: finalIDs,
-	})
+	return resp, finalIDs, synthModel, traceToken, nil
 }
 
-// runSelection picks section IDs for the query, surfacing cost when
-// the strategy implements CostStrategy.
-func (h *AnswerHandler) runSelection(ctx context.Context, t *tree.Tree, query string, budget retrieval.ContextBudget) ([]tree.SectionID, retrieval.Usage, error) {
+func (h *AnswerHandler) synthModel(requestModel string) string {
+	m := h.answer.Model
+	if m == "" {
+		m = requestModel
+	}
+	if m == "" {
+		m = h.llmModel
+	}
+	return m
+}
+
+func (h *AnswerHandler) maxAnswerTokens(body answerRequest, fallback int) int {
+	n := body.MaxAnswerTokens
+	if n <= 0 {
+		n = h.answer.MaxAnswerTokens
+	}
+	if n <= 0 {
+		n = fallback
+	}
+	return n
+}
+
+// runSelection runs the strategy, surfacing cost and evidence pages
+// when it implements CostStrategy.
+func (h *AnswerHandler) runSelection(ctx context.Context, t *tree.Tree, query string, budget retrieval.ContextBudget) (*retrieval.Result, error) {
 	if cs, ok := h.strategy.(retrieval.CostStrategy); ok {
 		res, err := cs.SelectWithCost(ctx, t, query, budget)
 		if err != nil {
-			return nil, retrieval.Usage{}, err
+			return nil, err
 		}
 		if res == nil {
-			return nil, retrieval.Usage{}, nil
+			return &retrieval.Result{}, nil
 		}
-		return res.SelectedIDs, res.Usage, nil
+		return res, nil
 	}
 	ids, err := h.strategy.Select(ctx, t, query, budget)
 	if err != nil {
-		return nil, retrieval.Usage{}, err
+		return nil, err
 	}
-	return ids, retrieval.Usage{}, nil
+	return &retrieval.Result{SelectedIDs: ids}, nil
 }
 
 // spanExtractor builds a SpanExtractor honouring the configured model

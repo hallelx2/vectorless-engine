@@ -40,6 +40,7 @@ import (
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
+	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -216,8 +217,35 @@ func run() error {
 		)
 	}
 
+	// ── Pincites (HAL-832) ────────────────────────────────────────
+	// Page layouts come from the PDF parser's word positions; page
+	// images from poppler's pdftoppm when the runtime image carries it.
+	// Without pdftoppm, citations still carry regions and the viewer
+	// says pages cannot be rendered here.
+	raster := pincite.Poppler{}
+	if raster.Available() {
+		logger.Info("pincites: page images enabled (pdftoppm)")
+	} else {
+		logger.Warn("pincites: pdftoppm not found — page images disabled; install poppler-utils")
+	}
+	pincites := &pincite.Service{Storage: store, Build: parser.PDFLayout, Raster: raster, Logger: logger}
+
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
+		AfterReady: func(ctx context.Context, pl ingest.Payload) {
+			src := pincite.Source{DocumentID: string(pl.DocumentID), SourceRef: pl.SourceRef, ContentType: pl.ContentType}
+			if !src.IsPDF() {
+				return
+			}
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+			start := time.Now()
+			if err := pincites.Warm(ctx, src); err != nil {
+				logger.Warn("pincites: warm failed; pages render on first view", "document_id", pl.DocumentID, "err", err)
+				return
+			}
+			logger.Info("pincites: layout and page images ready", "document_id", pl.DocumentID, "elapsed", time.Since(start).Round(time.Millisecond))
+		},
 		DB:                     pool,
 		Storage:                store,
 		LLM:                    llmClient,
@@ -286,6 +314,8 @@ func run() error {
 			Replay:           replayStore,
 			TreeWalkStrategy: treeWalkStrategy,
 			TreeWalk:         cfg.Engine.Retrieval.TreeWalk,
+			Judge:            judge,
+			Pincites:         pincites,
 		}
 
 		srv := &http.Server{
