@@ -66,7 +66,7 @@ const ModeTOC = "toc"
 type docPersister interface {
 	SetDocumentStatus(ctx context.Context, id tree.DocumentID, s db.DocumentStatus, errMsg string) error
 	SetDocumentTitle(ctx context.Context, id tree.DocumentID, title string) error
-	UpsertSection(ctx context.Context, s db.Section) error
+	UpsertSections(ctx context.Context, secs []db.Section) error
 }
 
 // Payload is the JSON body attached to an ingest job.
@@ -833,66 +833,88 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 		}
 	}
 
-	ordinal := 0
-	var walk func(secs []parser.Section, parent tree.SectionID, depth int) error
-	walk = func(secs []parser.Section, parent tree.SectionID, depth int) error {
+	// Plan the whole tree in memory first: ids, parents, cleaned content.
+	// Then write the section texts concurrently and every row in one
+	// batch. Done one section at a time — a storage write and a database
+	// write each — a 450-section filing spent ~40 s here.
+	type planned struct {
+		row     db.Section
+		content string
+	}
+	var plan []planned
+	var walk func(secs []parser.Section, parent tree.SectionID, depth int)
+	walk = func(secs []parser.Section, parent tree.SectionID, depth int) {
 		for i, s := range secs {
 			id := tree.SectionID("sec_" + uuid.New().String())
-			contentKey := path.Join("documents", string(docID), "sections", string(id)+".txt")
-
 			// Strip invalid UTF-8 / disallowed control chars at storage
 			// time so we never persist bytes the LLM SDKs would reject
 			// later. PDFs with CID-mapped fonts and no ToUnicode CMap
 			// leak raw glyph IDs into extracted text.
-			// Only assign a ContentRef when we actually wrote content. A
-			// leaf whose text is empty after cleanForLLM (heading-only
-			// sections, or CID-font garbage stripped to nothing) gets NO
-			// object stored, so it must get NO ref — otherwise every later
-			// read (summarize, HyDE, treewalk get_pages) chases a key that
-			// was never written and fails with "storage: object not found".
-			// Empty ContentRef is already the canonical "no stored content"
-			// state every reader guards on (summaryFor falls back to the
-			// title; the treewalk loader returns the summary or empty).
 			cleanedContent := cleanForLLM(s.Content)
+			// Only a section whose cleaned text is non-empty gets a stored
+			// object and a ContentRef. An empty ContentRef is the canonical
+			// "no stored content" state every reader guards on; a ref to a
+			// key that was never written fails with "object not found".
 			contentRef := ""
 			if strings.TrimSpace(cleanedContent) != "" {
-				if err := p.Storage.Put(ctx, contentKey,
-					bytes.NewReader([]byte(cleanedContent)),
-					storage.Metadata{
-						ContentType: "text/plain; charset=utf-8",
-						Size:        int64(len(cleanedContent)),
-					}); err != nil {
-					return fmt.Errorf("store section %s: %w", id, err)
-				}
-				contentRef = contentKey
+				contentRef = path.Join("documents", string(docID), "sections", string(id)+".txt")
 			}
-
-			if err := store.UpsertSection(ctx, db.Section{
-				ID:         id,
-				DocumentID: docID,
-				ParentID:   parent,
-				Ordinal:    i,
-				Depth:      depth,
-				Title:      cleanForLLM(s.Title),
-				ContentRef: contentRef,
-				TokenCount: approxTokens(cleanedContent),
-				PageStart:  s.PageStart,
-				PageEnd:    s.PageEnd,
-				Metadata:   s.Metadata,
-			}); err != nil {
-				return err
-			}
-			ordinal++
-
-			if err := walk(s.Children, id, depth+1); err != nil {
-				return err
-			}
+			plan = append(plan, planned{
+				row: db.Section{
+					ID:         id,
+					DocumentID: docID,
+					ParentID:   parent,
+					Ordinal:    i,
+					Depth:      depth,
+					Title:      cleanForLLM(s.Title),
+					ContentRef: contentRef,
+					TokenCount: approxTokens(cleanedContent),
+					PageStart:  s.PageStart,
+					PageEnd:    s.PageEnd,
+					Metadata:   s.Metadata,
+				},
+				content: cleanedContent,
+			})
+			walk(s.Children, id, depth+1)
 		}
-		return nil
+	}
+	walk(doc.Sections, "", 0)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(sectionWriteConcurrency)
+	for _, pl := range plan {
+		if pl.row.ContentRef == "" {
+			continue
+		}
+		g.Go(func() error {
+			if err := p.Storage.Put(gctx, pl.row.ContentRef,
+				strings.NewReader(pl.content),
+				storage.Metadata{
+					ContentType: "text/plain; charset=utf-8",
+					Size:        int64(len(pl.content)),
+				}); err != nil {
+				return fmt.Errorf("store section %s: %w", pl.row.ID, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
-	return walk(doc.Sections, "", 0)
+	// Depth-first order: every parent precedes its children, so the
+	// batch satisfies the parent_id foreign key row by row.
+	rows := make([]db.Section, len(plan))
+	for i, pl := range plan {
+		rows[i] = pl.row
+	}
+	return store.UpsertSections(ctx, rows)
 }
+
+// sectionWriteConcurrency bounds the section-text uploads in flight for
+// one document. Object stores take far more; this keeps one large
+// document from crowding out the other ingest workers' writes.
+const sectionWriteConcurrency = 32
 
 // summarize walks every section that lacks a summary and asks the LLM
 // for a short description of its content. Leaf sections pull content
