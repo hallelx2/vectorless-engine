@@ -354,13 +354,18 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// Split the leaves that are too big to cite or to read, at their
 	// own internal headings (HAL-1374). Needs the spans, so it runs
 	// after end pages; adds its own children's end pages.
+	splitDetail := "none over the limit"
 	if over := b.splitLeavesOver(); over > 0 {
 		if n := b.splitLargeLeaves(ctx, nodes, pages, over, &usage); n > 0 {
 			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, over)
+			splitDetail = fmt.Sprintf("%d sub-sections", n)
 		}
+	} else {
+		splitDetail = "off"
 	}
 
 	usage.phase("split", clock, calls)
+	b.end("split", splitDetail)
 
 	// Stamp stable node IDs onto every node so callers / external
 	// consumers have an opaque handle independent of position.
