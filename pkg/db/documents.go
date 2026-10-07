@@ -306,6 +306,15 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 	return out, nextCursor, nil
 }
 
+// DocumentExists reports whether a document row is present, in any org.
+// Background work that outlives its request (page rendering after
+// ingest) uses it to stop writing for a document that was deleted.
+func (p *Pool) DocumentExists(ctx context.Context, id tree.DocumentID) (bool, error) {
+	var ok bool
+	err := p.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM documents WHERE id = $1)`, string(id)).Scan(&ok)
+	return ok, mapErr(err)
+}
+
 // DeleteDocument removes a document (and cascades to its sections),
 // scoped to an org and (optionally) a store. Cross-scope deletes
 // return ErrNotFound.

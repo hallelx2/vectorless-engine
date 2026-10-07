@@ -161,6 +161,36 @@ type Usage struct {
 	// VERIZON_2022_10K once ingested with no page on any leaf after a
 	// single failed Judge request, and reported success (HAL-1369).
 	Degraded []string
+
+	// Phases is where Build's time went, in order. Logged with the
+	// totals, so an ingest that is slow says which step was slow.
+	Phases []PhaseTiming
+}
+
+// PhaseTiming is one step of Build: how long it took and how many model
+// calls it made.
+type PhaseTiming struct {
+	Name     string
+	Duration time.Duration
+	Calls    int
+}
+
+// phase closes the step that started at since with callsBefore calls
+// on the ledger, and returns the clock and count for the next one.
+func (u *Usage) phase(name string, since time.Time, callsBefore int) (time.Time, int) {
+	now := time.Now()
+	u.Phases = append(u.Phases, PhaseTiming{Name: name, Duration: now.Sub(since), Calls: u.LLMCalls - callsBefore})
+	return now, u.LLMCalls
+}
+
+// PhaseSummary renders Phases as "detect=1.2s/2 extract=31.0s/1 …"
+// (duration / model calls) for one log field.
+func (u Usage) PhaseSummary() string {
+	parts := make([]string, 0, len(u.Phases))
+	for _, p := range u.Phases {
+		parts = append(parts, fmt.Sprintf("%s=%.1fs/%d", p.Name, p.Duration.Seconds(), p.Calls))
+	}
+	return strings.Join(parts, " ")
 }
 
 // degrade records a Judge-path step that fell back.
@@ -205,6 +235,8 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		tocCheck = 20
 	}
 
+	clock, calls := time.Now(), 0
+
 	// Phase 1: detect. Scan the leading pages for a TOC.
 	//
 	// A Judge answers the whole prefix in a couple of batched requests;
@@ -215,6 +247,7 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	if !handled {
 		tocPages = b.detectTOCPages(ctx, pages, tocCheck, &usage)
 	}
+	clock, calls = usage.phase("detect", clock, calls)
 
 	// Phase 2: extract.
 	//
@@ -246,6 +279,7 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 			return nil, usage, err
 		}
 	}
+	clock, calls = usage.phase("extract", clock, calls)
 	if len(nodes) == 0 {
 		return nil, usage, nil
 	}
@@ -274,6 +308,8 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
 	}
 
+	clock, calls = usage.phase("resolve", clock, calls)
+
 	// Leaves the resolver could not place get their printed page plus
 	// the offset the resolved leaves agree on.
 	if n := calibrateFromPrinted(nodes, printed, lastPage(pages)); n > 0 {
@@ -292,6 +328,8 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, over)
 		}
 	}
+
+	usage.phase("split", clock, calls)
 
 	// Stamp stable node IDs onto every node so callers / external
 	// consumers have an opaque handle independent of position.

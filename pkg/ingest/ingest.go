@@ -549,6 +549,7 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		"input_tokens", usage.InputTokens,
 		"output_tokens", usage.OutputTokens,
 		"judge", p.Judge != nil,
+		"phases", usage.PhaseSummary(),
 	)
 	// A degraded build is not a failed one, but it is not what was
 	// configured either, and it must not look like success in the log.
