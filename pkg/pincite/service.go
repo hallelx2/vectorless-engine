@@ -53,6 +53,11 @@ type Service struct {
 	Raster Rasterizer
 	Logger *slog.Logger
 
+	// Alive, when set, reports whether a document still exists. Warm
+	// checks it before each chunk of pages and stops for a deleted one,
+	// so a delete during warm-up is not followed by fresh page images.
+	Alive func(ctx context.Context, documentID string) bool
+
 	// CacheSize bounds how many layouts stay in memory. Default 8: a
 	// long filing's layout is several MB decoded.
 	CacheSize int
@@ -206,6 +211,10 @@ func (s *Service) PageImage(ctx context.Context, src Source, n int) ([]byte, err
 	}
 }
 
+// ErrDocumentGone is returned by Warm when the document was deleted while
+// its pages were rendering.
+var ErrDocumentGone = errors.New("pincite: document deleted during warm-up")
+
 // Warm builds the layout and renders every page, so the first reader
 // never waits. Ingest calls it after a PDF is stored; it is idempotent,
 // so re-ingest or a retry costs only the existence checks.
@@ -237,6 +246,9 @@ func (s *Service) Warm(ctx context.Context, src Source) error {
 	// In chunks, each stored as it lands and each holding one render
 	// slot, so readers' pages interleave with the warm-up.
 	for from := 1; from <= last; from += warmChunk {
+		if s.Alive != nil && !s.Alive(ctx, src.DocumentID) {
+			return ErrDocumentGone
+		}
 		to := min(last, from+warmChunk-1)
 		if ok, _ := s.Storage.Exists(ctx, PageKey(src.DocumentID, to)); ok {
 			continue

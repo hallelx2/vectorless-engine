@@ -429,6 +429,10 @@ func (h *DocumentsHandler) HandleGetDocument(w http.ResponseWriter, r *http.Requ
 		"created_at":    doc.CreatedAt,
 		"updated_at":    doc.UpdatedAt,
 	}
+	// Each ingest stage's state and timing, for the live pipeline view.
+	if len(doc.Progress) > 2 {
+		resp["progress"] = json.RawMessage(doc.Progress)
+	}
 	// The verified structure ingest built, when there is one; the
 	// dashboard shows it instead of the parser's raw section count.
 	if n, pages := structureSize(doc.TOCTree); n > 0 {

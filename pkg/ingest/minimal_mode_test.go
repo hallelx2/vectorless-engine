@@ -45,10 +45,10 @@ func (f *fakeDocStore) SetDocumentTitle(_ context.Context, _ tree.DocumentID, ti
 	return nil
 }
 
-func (f *fakeDocStore) UpsertSection(_ context.Context, s db.Section) error {
+func (f *fakeDocStore) UpsertSections(_ context.Context, secs []db.Section) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sections = append(f.sections, s)
+	f.sections = append(f.sections, secs...)
 	return nil
 }
 

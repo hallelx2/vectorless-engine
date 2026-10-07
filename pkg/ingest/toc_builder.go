@@ -92,6 +92,11 @@ type TOCBuilder struct {
 	// measured tokens rather than page count.
 	Judge llmgate.Judge
 
+	// OnPhase, when set, hears each phase of Build start and finish
+	// (detect, extract, resolve, split), with the finished phase's
+	// one-line result. Ingest turns it into live progress.
+	OnPhase func(name string, started bool, detail string)
+
 	// MinimalContext turns on the three cuts that send a Judge only what it
 	// needs to answer: a structural pre-filter that skips pages with no
 	// sign of a contents page, hard per-page truncation for detection, and
@@ -161,6 +166,49 @@ type Usage struct {
 	// VERIZON_2022_10K once ingested with no page on any leaf after a
 	// single failed Judge request, and reported success (HAL-1369).
 	Degraded []string
+
+	// Phases is where Build's time went, in order. Logged with the
+	// totals, so an ingest that is slow says which step was slow.
+	Phases []PhaseTiming
+}
+
+// PhaseTiming is one step of Build: how long it took and how many model
+// calls it made.
+type PhaseTiming struct {
+	Name     string
+	Duration time.Duration
+	Calls    int
+}
+
+// phase closes the step that started at since with callsBefore calls
+// on the ledger, and returns the clock and count for the next one.
+func (u *Usage) phase(name string, since time.Time, callsBefore int) (time.Time, int) {
+	now := time.Now()
+	u.Phases = append(u.Phases, PhaseTiming{Name: name, Duration: now.Sub(since), Calls: u.LLMCalls - callsBefore})
+	return now, u.LLMCalls
+}
+
+// begin and end report a phase to OnPhase.
+func (b *TOCBuilder) begin(name string) {
+	if b.OnPhase != nil {
+		b.OnPhase(name, true, "")
+	}
+}
+
+func (b *TOCBuilder) end(name, detail string) {
+	if b.OnPhase != nil {
+		b.OnPhase(name, false, detail)
+	}
+}
+
+// PhaseSummary renders Phases as "detect=1.2s/2 extract=31.0s/1 …"
+// (duration / model calls) for one log field.
+func (u Usage) PhaseSummary() string {
+	parts := make([]string, 0, len(u.Phases))
+	for _, p := range u.Phases {
+		parts = append(parts, fmt.Sprintf("%s=%.1fs/%d", p.Name, p.Duration.Seconds(), p.Calls))
+	}
+	return strings.Join(parts, " ")
 }
 
 // degrade records a Judge-path step that fell back.
@@ -205,7 +253,10 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		tocCheck = 20
 	}
 
+	clock, calls := time.Now(), 0
+
 	// Phase 1: detect. Scan the leading pages for a TOC.
+	b.begin("detect")
 	//
 	// A Judge answers the whole prefix in a couple of batched requests;
 	// without one this is a sequential call per page. handled=false
@@ -215,6 +266,13 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	if !handled {
 		tocPages = b.detectTOCPages(ctx, pages, tocCheck, &usage)
 	}
+	clock, calls = usage.phase("detect", clock, calls)
+	if len(tocPages) > 0 {
+		b.end("detect", fmt.Sprintf("contents on page %d", tocPages[0]))
+	} else {
+		b.end("detect", "no contents page; reading headings")
+	}
+	b.begin("extract")
 
 	// Phase 2: extract.
 	//
@@ -246,9 +304,14 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 			return nil, usage, err
 		}
 	}
+	clock, calls = usage.phase("extract", clock, calls)
+	b.end("extract", fmt.Sprintf("%d entries", len(flattenForVerify(nodes))))
 	if len(nodes) == 0 {
+		b.end("resolve", "nothing to place")
+		b.end("split", "nothing to split")
 		return nil, usage, nil
 	}
+	b.begin("resolve")
 
 	// Phase 3: verify each leaf's claimed start page actually
 	// starts the section. Mismatches clear the page (set to 0)
@@ -274,6 +337,10 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		b.verifyTitlesConcurrent(ctx, nodes, pages, concurrency, &usage)
 	}
 
+	clock, calls = usage.phase("resolve", clock, calls)
+	b.end("resolve", "")
+	b.begin("split")
+
 	// Leaves the resolver could not place get their printed page plus
 	// the offset the resolved leaves agree on.
 	if n := calibrateFromPrinted(nodes, printed, lastPage(pages)); n > 0 {
@@ -287,11 +354,18 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	// Split the leaves that are too big to cite or to read, at their
 	// own internal headings (HAL-1374). Needs the spans, so it runs
 	// after end pages; adds its own children's end pages.
+	splitDetail := "none over the limit"
 	if over := b.splitLeavesOver(); over > 0 {
 		if n := b.splitLargeLeaves(ctx, nodes, pages, over, &usage); n > 0 {
 			log.Printf("toc: %d sub-leaves added inside leaves over %d pages", n, over)
+			splitDetail = fmt.Sprintf("%d sub-sections", n)
 		}
+	} else {
+		splitDetail = "off"
 	}
+
+	usage.phase("split", clock, calls)
+	b.end("split", splitDetail)
 
 	// Stamp stable node IDs onto every node so callers / external
 	// consumers have an opaque handle independent of position.

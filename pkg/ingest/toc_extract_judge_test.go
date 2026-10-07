@@ -260,9 +260,21 @@ func TestBuildExtractsOnTheJudgeWithNoGenerativeCall(t *testing.T) {
 		{PageNumber: 14, Text: "Signatures\nSigned."},
 	}
 	b := &TOCBuilder{LLM: llm, Judge: judge, TOCCheckPages: 3, Concurrency: 2, MinimalContext: true}
+	var events []string
+	b.OnPhase = func(name string, started bool, _ string) {
+		if started {
+			events = append(events, "+"+name)
+		} else {
+			events = append(events, "-"+name)
+		}
+	}
 	nodes, usage, err := b.Build(context.Background(), pages)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
+	}
+	// Every phase the live view shows starts and then ends, in order.
+	if got, want := strings.Join(events, " "), "+detect -detect +extract -extract +resolve -resolve +split -split"; got != want {
+		t.Errorf("phase events = %q, want %q", got, want)
 	}
 	if generativeExtract.Load() != 0 || usage.GenerativeCalls != 0 {
 		t.Errorf("generative extractor ran: route=%d usage=%d", generativeExtract.Load(), usage.GenerativeCalls)

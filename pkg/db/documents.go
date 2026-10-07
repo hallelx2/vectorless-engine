@@ -61,6 +61,10 @@ type Document struct {
 	// regardless of slice-element ordering inside the encoder.
 	// Callers that need the typed shape unmarshal at read time.
 	TOCTree []byte
+
+	// Progress is the ingest pipeline's stage list (JSON array; see
+	// migration 0008). Read by GetDocument only.
+	Progress []byte
 }
 
 // NewDocument inserts a fresh document row in the "pending" state.
@@ -135,7 +139,7 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, store
 	}
 	q := `
         SELECT id, org_id, store_id, title, content_type, source_ref, status, error_message,
-               byte_size, metadata, created_at, updated_at, toc_tree
+               byte_size, metadata, created_at, updated_at, toc_tree, progress
         FROM documents WHERE id = $1 AND org_id = $2`
 	args := []any{string(id), orgID}
 	if storeID != "" {
@@ -148,7 +152,7 @@ func (p *Pool) GetDocument(ctx context.Context, id tree.DocumentID, orgID, store
 	var status string
 	var rawMeta, rawTOC []byte
 	if err := row.Scan(&d.ID, &d.OrgID, &d.StoreID, &d.Title, &d.ContentType, &d.SourceRef, &status,
-		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC); err != nil {
+		&d.ErrorMessage, &d.ByteSize, &rawMeta, &d.CreatedAt, &d.UpdatedAt, &rawTOC, &d.Progress); err != nil {
 		return nil, mapErr(err)
 	}
 	d.Status = DocumentStatus(status)
@@ -194,6 +198,12 @@ func (p *Pool) SetDocumentTitle(ctx context.Context, id tree.DocumentID, title s
 	_, err := p.Exec(ctx, `
         UPDATE documents SET title = $2, updated_at = now() WHERE id = $1`,
 		string(id), title)
+	return mapErr(err)
+}
+
+// SetDocumentProgress replaces the document's stage list (a JSON array).
+func (p *Pool) SetDocumentProgress(ctx context.Context, id tree.DocumentID, progressJSON []byte) error {
+	_, err := p.Exec(ctx, `UPDATE documents SET progress = $2 WHERE id = $1`, string(id), progressJSON)
 	return mapErr(err)
 }
 
@@ -304,6 +314,15 @@ func (p *Pool) ListDocuments(ctx context.Context, o ListDocumentsOpts) ([]Docume
 		out = out[:limit]
 	}
 	return out, nextCursor, nil
+}
+
+// DocumentExists reports whether a document row is present, in any org.
+// Background work that outlives its request (page rendering after
+// ingest) uses it to stop writing for a document that was deleted.
+func (p *Pool) DocumentExists(ctx context.Context, id tree.DocumentID) (bool, error) {
+	var ok bool
+	err := p.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM documents WHERE id = $1)`, string(id)).Scan(&ok)
+	return ok, mapErr(err)
 }
 
 // DeleteDocument removes a document (and cascades to its sections),
