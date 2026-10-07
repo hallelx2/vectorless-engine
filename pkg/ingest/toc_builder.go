@@ -341,10 +341,21 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	b.end("resolve", "")
 	b.begin("split")
 
+	// Clear the starts that cannot be true (on the contents page, out
+	// of order, before the parent) before calibration, so the entries
+	// they belonged to are placed from their printed page numbers
+	// instead of keeping a wrong page.
+	cleared := repairStarts(nodes, tocPages)
+
 	// Leaves the resolver could not place get their printed page plus
 	// the offset the resolved leaves agree on.
 	if n := calibrateFromPrinted(nodes, printed, lastPage(pages)); n > 0 {
 		log.Printf("toc: %d leaves placed from printed page numbers", n)
+	}
+
+	// Calibration can be wrong too; check again what it placed.
+	if cleared += repairStarts(nodes, tocPages); cleared > 0 {
+		log.Printf("toc: %d impossible start pages cleared", cleared)
 	}
 
 	// Derive end pages from sibling order. Done last so verified
@@ -1059,6 +1070,90 @@ func deriveEndPages(nodes []tree.TOCNode, docLastPage int) {
 	deriveEndPagesIn(nodes, docLastPage)
 }
 
+// repairStarts clears start pages that cannot be true, so the end-page
+// derivation and the containers' inheritance fill them from what can:
+//
+//   - a section never begins on the contents page itself, or before its
+//     parent does;
+//   - siblings are listed in document order, so their starts must not go
+//     backwards. The largest set of siblings that is in order is kept and
+//     the rest are cleared: one entry placed far ahead must not take the
+//     correct ones after it down with it.
+//
+// Cleared means zero, the tree's "unknown" (HAL-2349: on the 3M 2018
+// 10-K, PART II and "Critical Accounting Estimates" were placed on the
+// contents page, which made PART I and Items 1B-4 run to page 128).
+// It returns how many starts it cleared.
+func repairStarts(nodes []tree.TOCNode, tocPages []int) int {
+	onTOC := make(map[int]bool, len(tocPages))
+	for _, p := range tocPages {
+		onTOC[p] = true
+	}
+	var walk func(ns []tree.TOCNode, floor int) int
+	walk = func(ns []tree.TOCNode, floor int) int {
+		cleared := 0
+		for i := range ns {
+			if p := ns[i].StartPage; p > 0 && (onTOC[p] || p < floor) {
+				ns[i].StartPage, ns[i].EndPage = 0, 0
+				cleared++
+			}
+		}
+		for _, i := range outOfOrder(ns) {
+			ns[i].StartPage, ns[i].EndPage = 0, 0
+			cleared++
+		}
+		for i := range ns {
+			childFloor := floor
+			if ns[i].StartPage > 0 {
+				childFloor = ns[i].StartPage
+			}
+			cleared += walk(ns[i].Nodes, childFloor)
+		}
+		return cleared
+	}
+	return walk(nodes, 0)
+}
+
+// outOfOrder returns the indexes of placed siblings outside the longest
+// run whose start pages never go backwards. Unplaced siblings (zero)
+// are ignored. Sibling lists are short, so the quadratic search is fine.
+func outOfOrder(ns []tree.TOCNode) []int {
+	var idx []int
+	for i, n := range ns {
+		if n.StartPage > 0 {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) < 2 {
+		return nil
+	}
+	length := make([]int, len(idx))
+	prev := make([]int, len(idx))
+	best := 0
+	for a := range idx {
+		length[a], prev[a] = 1, -1
+		for b := 0; b < a; b++ {
+			if ns[idx[b]].StartPage <= ns[idx[a]].StartPage && length[b]+1 > length[a] {
+				length[a], prev[a] = length[b]+1, b
+			}
+		}
+		if length[a] > length[best] {
+			best = a
+		}
+	}
+	keep := make(map[int]bool, length[best])
+	for a := best; a >= 0; a = prev[a] {
+		keep[idx[a]] = true
+	}
+	var out []int
+	for _, i := range idx {
+		if !keep[i] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // inheritParentStarts gives a container with no page of its own — a
 // "PART II" whose only content is its items — the first page any of its
 // children start on. Without it the container has no EndPage, and every
@@ -1092,8 +1187,20 @@ func deriveEndPagesIn(nodes []tree.TOCNode, ceiling int) {
 		// rest of the row.
 		end := 0
 		for j := i + 1; j < len(nodes); j++ {
-			if nodes[j].StartPage > n.StartPage {
-				end = nodes[j].StartPage - 1
+			next := nodes[j].StartPage
+			if next == 0 || n.StartPage == 0 {
+				continue
+			}
+			// The next placed sibling opens on this one's page: short
+			// items of a 10-K (1B, 2, 3, 4) routinely share one. This
+			// section is that page long; it must not run on to the
+			// parent's end.
+			if next == n.StartPage {
+				end = n.StartPage
+				break
+			}
+			if next > n.StartPage {
+				end = next - 1
 				break
 			}
 		}
