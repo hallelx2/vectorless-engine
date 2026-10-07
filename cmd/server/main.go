@@ -238,10 +238,10 @@ func run() error {
 
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		AfterReady: func(ctx context.Context, pl ingest.Payload) {
+		AfterReady: func(ctx context.Context, pl ingest.Payload) error {
 			src := pincite.Source{DocumentID: string(pl.DocumentID), SourceRef: pl.SourceRef, ContentType: pl.ContentType}
 			if !src.IsPDF() {
-				return
+				return ingest.ErrNothingToDo
 			}
 			ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
@@ -255,13 +255,14 @@ func run() error {
 				} else {
 					logger.Info("pincites: document deleted during warm-up; purged its files", "document_id", pl.DocumentID, "removed", n)
 				}
-				return
+				return pincite.ErrDocumentGone
 			}
 			if err != nil {
 				logger.Warn("pincites: warm failed; pages render on first view", "document_id", pl.DocumentID, "err", err)
-				return
+				return err
 			}
 			logger.Info("pincites: layout and page images ready", "document_id", pl.DocumentID, "elapsed", time.Since(start).Round(time.Millisecond))
+			return nil
 		},
 		DB:                     pool,
 		Storage:                store,

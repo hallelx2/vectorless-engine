@@ -92,6 +92,11 @@ type TOCBuilder struct {
 	// measured tokens rather than page count.
 	Judge llmgate.Judge
 
+	// OnPhase, when set, hears each phase of Build start and finish
+	// (detect, extract, resolve, split), with the finished phase's
+	// one-line result. Ingest turns it into live progress.
+	OnPhase func(name string, started bool, detail string)
+
 	// MinimalContext turns on the three cuts that send a Judge only what it
 	// needs to answer: a structural pre-filter that skips pages with no
 	// sign of a contents page, hard per-page truncation for detection, and
@@ -183,6 +188,19 @@ func (u *Usage) phase(name string, since time.Time, callsBefore int) (time.Time,
 	return now, u.LLMCalls
 }
 
+// begin and end report a phase to OnPhase.
+func (b *TOCBuilder) begin(name string) {
+	if b.OnPhase != nil {
+		b.OnPhase(name, true, "")
+	}
+}
+
+func (b *TOCBuilder) end(name, detail string) {
+	if b.OnPhase != nil {
+		b.OnPhase(name, false, detail)
+	}
+}
+
 // PhaseSummary renders Phases as "detect=1.2s/2 extract=31.0s/1 …"
 // (duration / model calls) for one log field.
 func (u Usage) PhaseSummary() string {
@@ -238,6 +256,7 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	clock, calls := time.Now(), 0
 
 	// Phase 1: detect. Scan the leading pages for a TOC.
+	b.begin("detect")
 	//
 	// A Judge answers the whole prefix in a couple of batched requests;
 	// without one this is a sequential call per page. handled=false
@@ -248,6 +267,12 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		tocPages = b.detectTOCPages(ctx, pages, tocCheck, &usage)
 	}
 	clock, calls = usage.phase("detect", clock, calls)
+	if len(tocPages) > 0 {
+		b.end("detect", fmt.Sprintf("contents on page %d", tocPages[0]))
+	} else {
+		b.end("detect", "no contents page; reading headings")
+	}
+	b.begin("extract")
 
 	// Phase 2: extract.
 	//
@@ -280,9 +305,13 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 		}
 	}
 	clock, calls = usage.phase("extract", clock, calls)
+	b.end("extract", fmt.Sprintf("%d entries", len(flattenForVerify(nodes))))
 	if len(nodes) == 0 {
+		b.end("resolve", "nothing to place")
+		b.end("split", "nothing to split")
 		return nil, usage, nil
 	}
+	b.begin("resolve")
 
 	// Phase 3: verify each leaf's claimed start page actually
 	// starts the section. Mismatches clear the page (set to 0)
@@ -309,6 +338,8 @@ func (b *TOCBuilder) Build(ctx context.Context, pages []PageText) ([]tree.TOCNod
 	}
 
 	clock, calls = usage.phase("resolve", clock, calls)
+	b.end("resolve", "")
+	b.begin("split")
 
 	// Leaves the resolver could not place get their printed page plus
 	// the offset the resolved leaves agree on.

@@ -127,7 +127,7 @@ type Pipeline struct {
 	// pincite layout and page images (HAL-833, HAL-834) so a reader's
 	// first highlight never waits for them; the document is queryable
 	// before it finishes.
-	AfterReady func(ctx context.Context, pl Payload)
+	AfterReady func(ctx context.Context, pl Payload) error
 
 	// Mode selects how much work Run does before marking a document
 	// ready. "minimal" collapses ingest to parse → build tree → persist
@@ -418,15 +418,41 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
+	var w progressWriter
+	if p.DB != nil {
+		w = p.DB
+	}
+	pr := NewProgress(ctx, w, pl.DocumentID, p.Logger, p.planFor(pl))
+	if p.DB != nil {
+		if doc, err := p.DB.GetDocumentForWorker(ctx, pl.DocumentID); err == nil {
+			pr.Span(ctx, stageQueued, doc.CreatedAt, time.Now(), "")
+		}
+	}
+	ctx = withProgress(ctx, pr)
+
 	err := p.run(ctx, pl)
 	if err == nil && p.AfterReady != nil {
 		// Detached from the job's context: the document is already
 		// ready and queryable, and this work must not hold the job open
 		// or be cancelled when it returns.
-		go p.AfterReady(context.WithoutCancel(ctx), pl)
+		go func(ctx context.Context) {
+			pr.Start(ctx, stagePages)
+			switch err := p.AfterReady(ctx, pl); {
+			case errors.Is(err, ErrNothingToDo):
+				pr.Skip(ctx, stagePages, "not a PDF")
+			case err != nil:
+				pr.Fail(ctx, stagePages, err)
+			default:
+				pr.Done(ctx, stagePages, "")
+			}
+		}(context.WithoutCancel(ctx))
 	}
 	return err
 }
+
+// ErrNothingToDo is what AfterReady returns when the document needs no
+// after-ready work (a non-PDF has no pages to render).
+var ErrNothingToDo = errors.New("ingest: nothing to do after ready")
 
 func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 	if m := p.modeFor(pl); m == ModeMinimal || m == ModeTOC {
@@ -440,23 +466,31 @@ func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 		return err
 	}
 
+	pr := progressFrom(ctx)
+	pr.Start(ctx, stageParse)
 	parsed, err := p.parse(ctx, p.Parsers, pl)
 	if err != nil {
+		pr.Fail(ctx, stageParse, err)
 		p.fail(ctx, p.DB, pl.DocumentID, "parse", err)
 		return err
 	}
+	pr.Done(ctx, stageParse, parsedDetail(parsed))
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
+	pr.Start(ctx, stageSave)
 	if err := p.persistTree(ctx, p.DB, pl.DocumentID, parsed, pl.Title); err != nil {
+		pr.Fail(ctx, stageSave, err)
 		p.fail(ctx, p.DB, pl.DocumentID, "persist tree", err)
 		return err
 	}
+	pr.Done(ctx, stageSave, fmt.Sprintf("%d sections", len(parsed.Flatten())))
 
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusSummarizing, ""); err != nil {
 		return err
 	}
 
 	stageStart := time.Now()
+	pr.Start(ctx, stageSummary)
 	summarizeFn := func(ctx context.Context) error {
 		return p.summarize(ctx, pl.DocumentID, pl.Profile)
 	}
@@ -481,6 +515,11 @@ func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 		log.Warn("ingest: hyde had errors", "err", hydeErr)
 	}
 	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
+	if sumErr != nil {
+		pr.Done(ctx, stageSummary, "some sections kept their titles only")
+	} else {
+		pr.Done(ctx, stageSummary, "")
+	}
 
 	// LLM-built TOC tree (TreeWalk-style). PDF-only because it
 	// relies on the parser's PageStart/PageEnd attribution to
@@ -512,6 +551,7 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 	pages := assemblePages(parsed)
 	if len(pages) == 0 {
 		log.Info("ingest: toc-builder skipped; no per-page text available")
+		progressFrom(ctx).Skip(ctx, stageContents, "no page text to read")
 		return nil
 	}
 	// The pages are the ground truth every page-level stage reasons
@@ -539,10 +579,21 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		// lost nothing (HAL-1366).
 		MinimalContext: p.Judge != nil,
 	}
+	pr := progressFrom(ctx)
+	pr.Start(ctx, stageContents)
+	builder.OnPhase = func(name string, started bool, detail string) {
+		if started {
+			pr.Start(ctx, stageContents+"."+name)
+		} else {
+			pr.Done(ctx, stageContents+"."+name, detail)
+		}
+	}
 	nodes, usage, err := builder.Build(ctx, pages)
 	if err != nil {
+		pr.Fail(ctx, stageContents, err)
 		return err
 	}
+	pr.Done(ctx, stageContents, contentsDetail(nodes, usage))
 	log.Info("ingest: toc-builder done",
 		"top_level_nodes", len(nodes),
 		"llm_calls", usage.LLMCalls,
@@ -768,7 +819,7 @@ func getSourceWithRetry(ctx context.Context, s storage.Storage, key string) (io.
 // is an interface so this path is testable without a live Postgres.
 func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payload) error {
 	log := p.Logger.With("document_id", string(pl.DocumentID))
-	log.Info("ingest: start (minimal mode)", "source_ref", pl.SourceRef)
+	log.Info("ingest: start ("+p.modeFor(pl)+" mode)", "source_ref", pl.SourceRef)
 
 	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusParsing, ""); err != nil {
 		return err
@@ -778,18 +829,25 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 	// regardless of ingest.tables.enabled: a nil-opts registry makes the
 	// PDF parser skip the table-finding pass entirely. All other parsers
 	// are unaffected.
+	pr := progressFrom(ctx)
 	parsers := RegistryFromTableOpts(nil)
+	pr.Start(ctx, stageParse)
 	parsed, err := p.parse(ctx, parsers, pl)
 	if err != nil {
+		pr.Fail(ctx, stageParse, err)
 		p.fail(ctx, store, pl.DocumentID, "parse", err)
 		return err
 	}
+	pr.Done(ctx, stageParse, parsedDetail(parsed))
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
+	pr.Start(ctx, stageSave)
 	if err := p.persistTree(ctx, store, pl.DocumentID, parsed, pl.Title); err != nil {
+		pr.Fail(ctx, stageSave, err)
 		p.fail(ctx, store, pl.DocumentID, "persist tree", err)
 		return err
 	}
+	pr.Done(ctx, stageSave, fmt.Sprintf("%d sections", len(parsed.Flatten())))
 
 	// Minimal mode skips summarize / HyDE / multi-axis / TOC entirely
 	// and flips straight to ready; the document is queryable via the
@@ -1449,3 +1507,32 @@ func RegistryFromIngestParams(opts *parser.TableOpts, maxSections int, parseTime
 
 // helper kept for tests — not used by the pipeline itself.
 var _ = time.Now
+
+// parsedDetail is the parse stage's one-line result for the dashboard.
+func parsedDetail(d *parser.ParsedDoc) string {
+	pages := 0
+	for _, s := range d.Flatten() {
+		pages = max(pages, s.PageEnd)
+	}
+	if pages > 0 {
+		return fmt.Sprintf("%d pages", pages)
+	}
+	return fmt.Sprintf("%d sections", len(d.Flatten()))
+}
+
+// contentsDetail is the contents stage's one-line result.
+func contentsDetail(nodes []tree.TOCNode, u Usage) string {
+	n := 0
+	var count func([]tree.TOCNode)
+	count = func(ns []tree.TOCNode) {
+		for _, x := range ns {
+			n++
+			count(x.Nodes)
+		}
+	}
+	count(nodes)
+	if len(u.Degraded) > 0 {
+		return fmt.Sprintf("%d entries · partly unverified", n)
+	}
+	return fmt.Sprintf("%d entries", n)
+}
