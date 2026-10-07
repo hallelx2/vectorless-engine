@@ -435,7 +435,17 @@ func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
 		// Detached from the job's context: the document is already
 		// ready and queryable, and this work must not hold the job open
 		// or be cancelled when it returns.
+		// Only a document whose plan has a page stage reports one; for
+		// the rest the hook has nothing to do and says so.
+		tracked := false
+		for _, s := range pr.Stages() {
+			tracked = tracked || s.Name == stagePages
+		}
 		go func(ctx context.Context) {
+			if !tracked {
+				_ = p.AfterReady(ctx, pl)
+				return
+			}
 			pr.Start(ctx, stagePages)
 			switch err := p.AfterReady(ctx, pl); {
 			case errors.Is(err, ErrNothingToDo):
