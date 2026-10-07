@@ -1094,11 +1094,17 @@ func repairStarts(nodes []tree.TOCNode, tocPages []int) int {
 		cleared := 0
 		for i := range ns {
 			if p := ns[i].StartPage; p > 0 && (onTOC[p] || p < floor) {
+				why := "before its parent"
+				if onTOC[p] {
+					why = "on the contents page"
+				}
+				log.Printf("toc: cleared p.%d for %q (%s)", p, ns[i].Title, why)
 				ns[i].StartPage, ns[i].EndPage = 0, 0
 				cleared++
 			}
 		}
 		for _, i := range outOfOrder(ns) {
+			log.Printf("toc: cleared p.%d for %q (out of order)", ns[i].StartPage, ns[i].Title)
 			ns[i].StartPage, ns[i].EndPage = 0, 0
 			cleared++
 		}
