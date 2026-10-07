@@ -104,8 +104,10 @@ func RenderTOCLLMSTxt(title string, toc []TOCNode, pageCount int, pageURL func(f
 	}
 	fmt.Fprintf(&b, "> The document's own table of contents, %s, each placed on the page where it begins. Every entry links to the text of its pages.\n\n## Contents\n\n", desc)
 
-	var walk func(ns []TOCNode, depth, ceiling int)
-	walk = func(ns []TOCNode, depth, ceiling int) {
+	// pFrom..pTo is the parent's placed range: an entry the resolver could
+	// not place (a heading in mid-page) still lies within it.
+	var walk func(ns []TOCNode, depth, ceiling, pFrom, pTo int)
+	walk = func(ns []TOCNode, depth, ceiling, pFrom, pTo int) {
 		for i, n := range ns {
 			from, to := n.StartPage, n.EndPage
 			if to == 0 {
@@ -128,6 +130,12 @@ func RenderTOCLLMSTxt(title string, toc []TOCNode, pageCount int, pageURL func(f
 			case from > 0:
 				pages = fmt.Sprintf("p. %d", from)
 				line = fmt.Sprintf("[%s](%s)", label, pageURL(from, from))
+			case pFrom > 0 && pTo > pFrom:
+				pages = fmt.Sprintf("within pp. %d–%d", pFrom, pTo)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(pFrom, pTo))
+			case pFrom > 0:
+				pages = fmt.Sprintf("within p. %d", pFrom)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(pFrom, pFrom))
 			}
 			fmt.Fprintf(&b, "%s- %s", strings.Repeat("  ", depth), line)
 			if pages != "" {
@@ -141,9 +149,13 @@ func RenderTOCLLMSTxt(title string, toc []TOCNode, pageCount int, pageURL func(f
 			if childCeiling == 0 {
 				childCeiling = ceiling
 			}
-			walk(n.Nodes, depth+1, childCeiling)
+			cFrom, cTo := from, to
+			if from == 0 {
+				cFrom, cTo = pFrom, pTo
+			}
+			walk(n.Nodes, depth+1, childCeiling, cFrom, cTo)
 		}
 	}
-	walk(toc, 0, pageCount)
+	walk(toc, 0, pageCount, 0, 0)
 	return b.String()
 }
