@@ -254,7 +254,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		emit("started", map[string]any{
 			"document_id": body.DocumentID,
 			"query":       body.Query,
-			"strategy":    h.strategy.Name(),
+			"strategy":    retrieval.PublicName(h.strategy.Name()),
 		})
 	}
 
@@ -394,7 +394,7 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 		"query":       body.Query,
 		"answer":      answerText,
 		"citations":   citations,
-		"strategy":    h.strategy.Name(),
+		"strategy":    retrieval.PublicName(h.strategy.Name()),
 		"model":       synthModel,
 		"usage":       usageMap(totalUsage),
 		"elapsed_ms":  time.Since(started).Milliseconds(),

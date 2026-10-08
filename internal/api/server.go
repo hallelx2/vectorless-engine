@@ -622,7 +622,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// never empty and a client can always tell what answered.
 	modelUsed := body.Model
 	if modelUsed == "" {
-		modelUsed = d.Strategy.Name()
+		modelUsed = retrieval.PublicName(d.Strategy.Name())
 	}
 
 	// Phase 2.4 abstention: if every confident pick is below the
