@@ -613,7 +613,10 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, judge llm
 			log.Printf("retrieval: strategy judgewalk needs llm.judge configured; using treewalk")
 			return buildTreeWalkStrategy(c, client, store, pool)
 		}
-		return buildJudgeWalkStrategy(judge, store, pool)
+		// The Judge's provider refusing service (no credit, a rejected key,
+		// an outage) falls back to treewalk instead of failing every query.
+		return retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(judge, store, pool),
+			buildTreeWalkStrategy(c, client, store, pool), nil)
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
 	case "chunked-tree":
@@ -660,7 +663,7 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
 	if judge != nil {
-		set["judgewalk"] = buildJudgeWalkStrategy(judge, store, pool)
+		set["judgewalk"] = retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(judge, store, pool), set["treewalk"], nil)
 	} else {
 		// The same fallback the default builder applies: a request that
 		// names judgewalk on a server with no Judge gets treewalk, not
