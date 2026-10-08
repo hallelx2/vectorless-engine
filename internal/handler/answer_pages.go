@@ -210,7 +210,7 @@ func (h *AnswerHandler) answerFromPages(
 		"evidence":         evList,
 		"markers_inline":   inline,
 		"markers_stripped": stripped,
-		"strategy":         h.strategy.Name(),
+		"strategy":         retrieval.PublicName(h.strategy.Name()),
 		"model":            model,
 		"own_model_key":    body.byok != nil,
 		"confidence":       res.Confidence,

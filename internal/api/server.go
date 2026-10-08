@@ -613,7 +613,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	ids, confidences, selUsage, selResult, err := d.runSelectionResult(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
-		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 	totalUsage.Add(selUsage)
@@ -622,7 +622,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// never empty and a client can always tell what answered.
 	modelUsed := body.Model
 	if modelUsed == "" {
-		modelUsed = d.Strategy.Name()
+		modelUsed = retrieval.PublicName(d.Strategy.Name())
 	}
 
 	// Phase 2.4 abstention: if every confident pick is below the
@@ -702,7 +702,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
-		"strategy":    d.Strategy.Name(),
+		"strategy":    retrieval.PublicName(d.Strategy.Name()),
 		"model":       modelUsed,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
@@ -925,7 +925,7 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 	ids, confidences, retrievalUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 	totalUsage.Add(retrievalUsage)
@@ -1046,7 +1046,7 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		"query":       body.Query,
 		"answer":      answerText,
 		"citations":   citations,
-		"strategy":    d.Strategy.Name(),
+		"strategy":    retrieval.PublicName(d.Strategy.Name()),
 		"model":       synthModel,
 		"usage": map[string]any{
 			"input_tokens":  totalUsage.InputTokens,
@@ -1186,7 +1186,7 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 	result, err := d.MultiDoc.Query(r.Context(), standaloneOrgID, "", body.DocumentIDs, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query/multi: failed", "err", err)
-		writeErr(w, http.StatusInternalServerError, "multi-doc retrieval failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 
@@ -1251,7 +1251,7 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":      body.Query,
-		"strategy":   d.Strategy.Name(),
+		"strategy":   retrieval.PublicName(d.Strategy.Name()),
 		"model":      body.Model,
 		"documents":  docs,
 		"errors":     errs,
@@ -1694,7 +1694,7 @@ func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, que
 	resp := map[string]any{
 		"document_id":              docID,
 		"query":                    query,
-		"strategy":                 d.Strategy.Name(),
+		"strategy":                 retrieval.PublicName(d.Strategy.Name()),
 		"model":                    model,
 		"usage":                    usageJSON(usage),
 		"sections":                 []any{},
@@ -1754,7 +1754,7 @@ func (d Deps) respondAbstainedAnswer(w http.ResponseWriter, docID tree.DocumentI
 		"query":       query,
 		"answer":      abstentionAnswerText,
 		"citations":   []any{},
-		"strategy":    d.Strategy.Name(),
+		"strategy":    retrieval.PublicName(d.Strategy.Name()),
 		"usage": map[string]any{
 			"input_tokens":  usage.InputTokens,
 			"output_tokens": usage.OutputTokens,

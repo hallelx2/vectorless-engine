@@ -118,7 +118,7 @@ func (s *QueryService) Query(
 	return connect.NewResponse(&v1.QueryResponse{
 		DocumentId: msg.DocumentId,
 		Query:      msg.Query,
-		Strategy:   s.strategy.Name(),
+		Strategy:   retrieval.PublicName(s.strategy.Name()),
 		Model:      msg.Model,
 		Sections:   sections,
 		ElapsedMs:  time.Since(started).Milliseconds(),
@@ -214,7 +214,7 @@ func (s *QueryService) QueryMulti(
 
 	return connect.NewResponse(&v1.QueryMultiResponse{
 		Query:     msg.Query,
-		Strategy:  s.strategy.Name(),
+		Strategy:  retrieval.PublicName(s.strategy.Name()),
 		Model:     msg.Model,
 		Documents: docs,
 		Errors:    errs,

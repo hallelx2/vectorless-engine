@@ -127,7 +127,7 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 
 		switch evt.Type {
 		case retrieval.EventStarted:
-			sse.Strategy = ss.Name()
+			sse.Strategy = retrieval.PublicName(ss.Name())
 			sse.DocumentID = string(body.DocumentID)
 			sse.Query = body.Query
 

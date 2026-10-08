@@ -143,7 +143,7 @@ func (h *QueryMultiHandler) HandleQueryMulti(w http.ResponseWriter, r *http.Requ
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":      body.Query,
-		"strategy":   h.strategy.Name(),
+		"strategy":   retrieval.PublicName(h.strategy.Name()),
 		"model":      body.Model,
 		"documents":  docs,
 		"errors":     errs,
