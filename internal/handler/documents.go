@@ -679,18 +679,124 @@ func (h *DocumentsHandler) HandleGetLlmsTxt(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	id := tree.DocumentID(chi.URLParam(r, "id"))
-	t, err := h.db.LoadTree(r.Context(), id, orgID, storeID(r))
+	doc, err := h.db.GetDocument(r.Context(), id, orgID, storeID(r))
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "document not found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeDocErr(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+
+	// The verified contents, when ingest built them: each entry placed on
+	// its page and linked to that page range's text. The parser's section
+	// tree is the fallback; its leaf titles are often a line of body text.
+	var toc []tree.TOCNode
+	if len(doc.TOCTree) > 0 && json.Unmarshal(doc.TOCTree, &toc) == nil && len(toc) > 0 {
+		last := 0
+		for _, n := range toc {
+			last = max(last, maxEnd(n))
+		}
+		if pages, err := h.readPages(r.Context(), id); err == nil && len(pages) > 0 {
+			last = max(last, pages[len(pages)-1].PageNumber)
+		}
+		base := "/v1/documents/" + string(id) + "/text?pages="
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, tree.RenderTOCLLMSTxt(doc.Title, toc, last, func(from, to int) string {
+			return fmt.Sprintf("%s%d-%d", base, from, to)
+		}))
+		return
+	}
+	t, err := h.db.LoadTree(r.Context(), id, orgID, storeID(r))
+	if err != nil {
+		writeDocErr(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, t.RenderLLMSTxt())
+}
+
+// maxTextPages bounds one /text request, so a single call cannot ask for
+// a whole 500-page filing at once.
+const maxTextPages = 60
+
+// HandleGetText returns the text of a page range as Markdown, one
+// "## Page n" block per page: GET /v1/documents/{id}/text?pages=7-14
+// (or a single page, ?pages=7). It is what llms.txt entries link to.
+func (h *DocumentsHandler) HandleGetText(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrgID(w, r)
+	if !ok {
+		return
+	}
+	id := tree.DocumentID(chi.URLParam(r, "id"))
+	if _, err := h.db.GetDocument(r.Context(), id, orgID, storeID(r)); err != nil {
+		writeDocErr(w, err)
+		return
+	}
+	from, to, err := parsePageRange(r.URL.Query().Get("pages"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if to-from+1 > maxTextPages {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("at most %d pages per request", maxTextPages))
+		return
+	}
+	pages, err := h.readPages(r.Context(), id)
+	if errors.Is(err, storage.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "this document has no per-page text (only PDFs ingested in toc or full mode do)")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read pages: "+err.Error())
+		return
+	}
+	var b strings.Builder
+	for _, p := range pages {
+		if p.PageNumber < from || p.PageNumber > to {
+			continue
+		}
+		fmt.Fprintf(&b, "## Page %d\n\n%s\n\n", p.PageNumber, strings.TrimSpace(p.Text))
+	}
+	if b.Len() == 0 {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("no pages in %d-%d", from, to))
+		return
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	_, _ = io.WriteString(w, b.String())
+}
+
+// readPages loads the per-page text ingest stored beside the contents.
+func (h *DocumentsHandler) readPages(ctx context.Context, id tree.DocumentID) ([]ingest.PageText, error) {
+	rc, _, err := h.storage.Get(ctx, ingest.PagesKey(id))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	var pages []ingest.PageText
+	if err := json.NewDecoder(rc).Decode(&pages); err != nil {
+		return nil, err
+	}
+	return pages, nil
+}
+
+// parsePageRange reads "7-14" or "7" into an inclusive 1-based range.
+func parsePageRange(s string) (int, int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, errors.New(`pages is required, as "7" or "7-14"`)
+	}
+	a, b, found := strings.Cut(s, "-")
+	from, err := strconv.Atoi(strings.TrimSpace(a))
+	if err != nil || from < 1 {
+		return 0, 0, fmt.Errorf("bad page %q", a)
+	}
+	to := from
+	if found {
+		if to, err = strconv.Atoi(strings.TrimSpace(b)); err != nil || to < from {
+			return 0, 0, fmt.Errorf("bad page range %q", s)
+		}
+	}
+	return from, to, nil
 }
 
 // HandleGetSection returns a single section with full content from storage.

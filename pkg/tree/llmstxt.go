@@ -70,3 +70,92 @@ func writeLLMSSection(b *strings.Builder, s *Section, level int) {
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
+
+// RenderTOCLLMSTxt renders a document's verified table of contents as
+// llms.txt (https://llmstxt.org): an H1 title, a blockquote saying what
+// the file is, then a "Contents" section listing every entry as a
+// Markdown link to the text of its own pages, nested by depth, with its
+// page range and summary. An agent reads the map, picks an entry, and
+// follows one link to exactly those pages.
+//
+// pageURL builds the link for a page range. pageCount is the document's
+// last page, used for the summary line and to close the last entry's
+// range; zero when unknown.
+func RenderTOCLLMSTxt(title string, toc []TOCNode, pageCount int, pageURL func(from, to int) string) string {
+	var b strings.Builder
+	title = oneLine(title)
+	if title == "" {
+		title = "Document"
+	}
+	fmt.Fprintf(&b, "# %s\n\n", title)
+
+	entries := 0
+	var count func([]TOCNode)
+	count = func(ns []TOCNode) {
+		for _, n := range ns {
+			entries++
+			count(n.Nodes)
+		}
+	}
+	count(toc)
+	desc := fmt.Sprintf("%d contents entries", entries)
+	if pageCount > 0 {
+		desc = fmt.Sprintf("%d pages, %d contents entries", pageCount, entries)
+	}
+	fmt.Fprintf(&b, "> The document's own table of contents, %s, each placed on the page where it begins. Every entry links to the text of its pages.\n\n## Contents\n\n", desc)
+
+	// pFrom..pTo is the parent's placed range: an entry the resolver could
+	// not place (a heading in mid-page) still lies within it.
+	var walk func(ns []TOCNode, depth, ceiling, pFrom, pTo int)
+	walk = func(ns []TOCNode, depth, ceiling, pFrom, pTo int) {
+		for i, n := range ns {
+			from, to := n.StartPage, n.EndPage
+			if to == 0 {
+				// Open-ended: runs to the next sibling, else the parent's end.
+				to = ceiling
+				if i+1 < len(ns) && ns[i+1].StartPage > 0 {
+					to = ns[i+1].StartPage - 1
+				}
+			}
+			label := oneLine(n.Title)
+			if label == "" {
+				label = n.Structure
+			}
+			line := label
+			pages := ""
+			switch {
+			case from > 0 && to > from:
+				pages = fmt.Sprintf("pp. %d–%d", from, to)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(from, to))
+			case from > 0:
+				pages = fmt.Sprintf("p. %d", from)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(from, from))
+			case pFrom > 0 && pTo > pFrom:
+				pages = fmt.Sprintf("within pp. %d–%d", pFrom, pTo)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(pFrom, pTo))
+			case pFrom > 0:
+				pages = fmt.Sprintf("within p. %d", pFrom)
+				line = fmt.Sprintf("[%s](%s)", label, pageURL(pFrom, pFrom))
+			}
+			fmt.Fprintf(&b, "%s- %s", strings.Repeat("  ", depth), line)
+			if pages != "" {
+				fmt.Fprintf(&b, ": %s", pages)
+			}
+			if s := oneLine(n.Summary); s != "" {
+				fmt.Fprintf(&b, " — %s", s)
+			}
+			b.WriteString("\n")
+			childCeiling := to
+			if childCeiling == 0 {
+				childCeiling = ceiling
+			}
+			cFrom, cTo := from, to
+			if from == 0 {
+				cFrom, cTo = pFrom, pTo
+			}
+			walk(n.Nodes, depth+1, childCeiling, cFrom, cTo)
+		}
+	}
+	walk(toc, 0, pageCount, 0, 0)
+	return b.String()
+}
