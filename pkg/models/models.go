@@ -202,9 +202,11 @@ type Status struct {
 	Judge      JudgeStatus      `json:"judge"`
 	// EncryptionConfigured is false when the instance has no encryption
 	// key: keys can then only come from the environment.
-	EncryptionConfigured bool      `json:"encryption_configured"`
-	UpdatedAt            time.Time `json:"updated_at,omitempty"`
-	UpdatedBy            string    `json:"updated_by,omitempty"`
+	EncryptionConfigured bool `json:"encryption_configured"`
+	// UpdatedAt is when the dashboard's settings last changed; nil when
+	// they never have.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	UpdatedBy string     `json:"updated_by,omitempty"`
 	// StoreError reports stored settings that could not be read (for
 	// example a changed encryption key).
 	StoreError string `json:"store_error,omitempty"`

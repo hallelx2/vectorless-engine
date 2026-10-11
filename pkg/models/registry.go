@@ -146,8 +146,11 @@ func (r *Registry) Status() Status {
 	s := r.cur.Load()
 	st := Status{
 		EncryptionConfigured: r.opts.Cipher != nil,
-		UpdatedAt:            s.updatedAt,
 		UpdatedBy:            s.updatedBy,
+	}
+	if !s.updatedAt.IsZero() {
+		at := s.updatedAt
+		st.UpdatedAt = &at
 	}
 	if s.storeErr != nil {
 		st.StoreError = s.storeErr.Error()
