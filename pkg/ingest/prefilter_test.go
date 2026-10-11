@@ -79,7 +79,7 @@ func TestPrefilterScoreOrdersByEvidence(t *testing.T) {
 	sec := prefilterTOC(tocPageFlattened).Score()
 	gen := prefilterTOC(tocPageGeneric).Score()
 	pro := prefilterTOC(prosePage).Score()
-	if !(sec > pro && gen > pro) {
+	if sec <= pro || gen <= pro {
 		t.Errorf("scores: sec=%d gen=%d prose=%d; both TOCs must outrank prose", sec, gen, pro)
 	}
 }

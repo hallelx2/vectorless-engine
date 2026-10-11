@@ -539,7 +539,7 @@ func splitProbeKey(qk string) (string, int) {
 		return qk, 0
 	}
 	var page int
-	fmt.Sscanf(qk[i+2:], "%d", &page)
+	_, _ = fmt.Sscanf(qk[i+2:], "%d", &page) // a malformed key leaves page 0, which matches nothing
 	return qk[:i], page
 }
 

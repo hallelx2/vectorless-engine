@@ -1390,16 +1390,6 @@ func (d Deps) runPlanner(ctx context.Context, query string, bodyOverride *bool) 
 	return plan, usage
 }
 
-// runSelection picks section IDs for the query, optionally going
-// through the Decomposer when the plan is multi-hop AND planning-level
-// decomposition is enabled. Returns the selected IDs plus the per-pick
-// confidence map (nil when the selection LLM returned the legacy
-// shape with no confidence signal).
-func (d Deps) runSelection(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, error) {
-	ids, confidences, _, err := d.runSelectionFull(ctx, t, plan, query, budget)
-	return ids, confidences, err
-}
-
 // runSelectionWithUsage is the cost-tracking variant used by /v1/answer.
 // Returns the selected IDs, per-pick confidences (nil when no signal),
 // and the Usage accumulated during selection (across all sub-questions

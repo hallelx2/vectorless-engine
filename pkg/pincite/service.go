@@ -304,7 +304,7 @@ func (s *Service) loadLayout(ctx context.Context, id string) (*Layout, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	var l Layout
 	if err := json.NewDecoder(zr).Decode(&l); err != nil {
 		return nil, err

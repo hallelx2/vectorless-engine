@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
