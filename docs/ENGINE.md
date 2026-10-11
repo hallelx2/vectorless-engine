@@ -1,24 +1,51 @@
 # Engine
 
-> The core vectorless retrieval engine — a Go library that doubles as a
+> The core vectorless retrieval engine: a Go library that doubles as a
 > long-running daemon.
+
+> **Updated 2026-10-11. What changed.** This document was written for the
+> original design, in which a chat model summarised every section at ingest
+> and navigated those summaries at query time (`single-pass`,
+> `chunked-tree`). Since 2026-10-06 production has run a different pipeline:
+> `ingest.mode: toc`, which builds the tree from the document's own contents
+> page with Jev (TypeSafe's System One model) and makes no generative call,
+> and `retrieval.strategy: judgewalk`, in which Jev ranks sections and pages
+> and the evidence pages are returned verbatim. The sections below on purpose,
+> strategies, packages and the request lifecycle are updated. Sections further
+> down (CLI subcommands, deployment topologies, open questions) still describe
+> the plan as first written and have not been rechecked. The measurements are
+> in [`evaluations/`](./evaluations/README.md); the current overview is the
+> [README](../README.md#how-it-works).
 
 ## Purpose
 
-Turn documents into hierarchical trees of titles + summaries, then
-answer queries by reasoning over those trees with an LLM. No vectors,
-no embeddings, no similarity index. The tree *is* the index.
+Turn a document into a tree of its real sections, each placed on its
+pages, then answer a query by selecting sections and pages from that tree.
+No vectors, no embeddings, no similarity index. The tree is the index.
+
+Selection, not generation, does the work. Any decision that can be written
+as a closed set of options (is this the contents page, which page does this
+entry start on, does this section answer the question, which sentence
+supports this claim) goes to a System One model, Jev, which returns a
+probability or a choice and writes no prose. A generative model writes only
+the final answer.
 
 ## What the engine does
 
-- Accept a document (Markdown, HTML, DOCX, PDF, plain text).
-- Parse it into a hierarchy of sections, preserving structure.
-- Store the raw bytes in object storage (S3-compatible).
-- Store the tree metadata (titles, summaries, token counts) in
+- Accept a document (PDF, Markdown, HTML, DOCX, plain text), by upload or URL.
+- Parse it. PDFs go through pdfgrab (imported as `github.com/hallelx2/pdftable`
+  v0.4.0), which gives every word and its rectangle.
+- Store the raw bytes and per-page text in object storage, and the tree in
   Postgres.
-- Summarise each section with an LLM call.
-- Answer a natural-language query by running a **retrieval strategy**
-  against the tree and returning the relevant section IDs + content.
+- For PDFs in `toc` mode: find the contents page, read its entries, place
+  each entry on its page, and split sections over 20 pages at their own
+  headings. Jev makes each of those decisions. No generative call.
+- After the document is ready, render each PDF page to an image (pdftoppm,
+  144 dpi) for citations.
+- Answer a query with a **retrieval strategy**. `judgewalk` returns the
+  evidence pages verbatim; `/v1/answer` then writes an answer over them and
+  pins each claim to a line of its page.
+- Store every answer under a trace token so it can be replayed.
 
 ## What the engine does not do
 
@@ -33,36 +60,39 @@ no embeddings, no similarity index. The tree *is* the index.
 - **Content rendering.** The engine returns section text, not formatted
   HTML or Markdown for display. The calling app decides how to show it.
 
-## The two retrieval strategies
+## Retrieval strategies
 
-### `single-pass`
+### `judgewalk` (production since 2026-10-06)
 
-Feed the whole tree view to the model in one call. Model returns the
-IDs it thinks are relevant. Budget-friendly, fast, works great when
-the document tree fits in the model's context window.
+Reported as `navigate` in API responses. Needs a Judge (`llm.judge.typesafe`).
 
-### `chunked-tree`
+1. Jev ranks the tree's leaves against the question, up to 120 leaves per
+   request.
+2. It skims the head of each candidate page, then reads the best pages in
+   full.
+3. It follows cross-references ("see Note N") to the page they name.
+4. The evidence pages are returned verbatim with their page ranges, ahead of
+   any section.
 
-When the tree is too big for one call, slice it into budget-sized
-chunks, reason over each in parallel, merge the picks.
+No generative call. Without a Judge, `judgewalk` is replaced by `treewalk`
+at boot. In the server binary, a Judge that refuses service (402, 401/403,
+5xx) falls back to `treewalk` per request.
 
-Pipeline:
+### `treewalk`
 
-```
-Split(tree, budget)        -> []Slice
-for each slice in parallel -> LLM.Select -> []SectionID
-Merge(results, policy)     -> []SectionID
-```
+A chat model walks the contents and pages in up to eight tool-calling hops
+(`get_document_structure`, `get_pages`, `done`). This is the generative baseline and the
+fallback. It also backs `/v1/answer/treewalk`.
 
-Each slice carries a breadcrumb (`Document X -> Part II -> slice 3 of
-12`) so the model knows where it is relative to siblings it cannot see.
-Each slice also filters the model's picks against its own section IDs
-so the model cannot fabricate IDs from other slices.
+### `auto`, `single-pass`, `chunked-tree`, `agentic` (original design)
 
-Merge policies:
-
-- **Union** (default) — any ID picked by any slice is included, sorted.
-- `TopN(ranked)` and `Vote(k-of-n)` are deferred.
+`single-pass` feeds the whole tree view to the model in one call.
+`chunked-tree` slices a large tree into budget-sized pieces, asks the model
+about each in parallel, and merges the picks (union). `agentic` lets the
+model fetch sections in hops. `auto` (the config default) picks
+`single-pass` or `treewalk`. These depend on per-section summaries from
+`ingest.mode: full`. They still build and run, but none of the evaluations
+in [`evaluations/`](./evaluations/README.md) used them.
 
 ## Package layout
 
@@ -70,15 +100,19 @@ Merge policies:
 pkg/
   tree/         - the core Tree / Section / View data model
   parser/       - parser interface + Markdown / HTML / DOCX / PDF / Text
-  ingest/       - parse -> persist -> summarise pipeline
-  retrieval/    - Strategy interface + SinglePass + ChunkedTree + Splitter
+  ingest/       - parse -> persist -> contents (toc mode) or summaries (full mode)
+  retrieval/    - Strategy interface + JudgeWalk + TreeWalk + Fallback + replay,
+                  and the original SinglePass / ChunkedTree / Agentic
+  pincite/      - bind each claim of an answer to a line of its page
   storage/      - Storage interface + Local + S3 drivers
   queue/        - Queue interface + River + Asynq + QStash drivers
   db/           - Postgres pool + embedded migrations + CRUD
   llm/          - Client interface, delegated to llmgate (external)
   api/          - HTTP + gRPC handlers (will move to vectorless-server repo)
 cmd/
-  engine/       - the binary entry point with subcommands
+  engine/       - standalone engine (--local mode, /v1/replay)
+  server/       - multi-tenant HTTP server that production ran (pincites, page images)
+  navbench/ tocdump/ tocresolve/ jevbench/ pincitecheck/ - evaluation and debugging tools
 ```
 
 `pkg/` is the promise: these packages are importable by external Go
@@ -271,24 +305,36 @@ Adding a format = implementing `Parser` + registering it.
 
 ### `pkg/ingest`
 
-Orchestrates **parse -> persist tree -> summarise**. Every stage is
-idempotent so a queue retry is safe. The pipeline owns the
-lifecycle transitions on the `documents` row
-(`pending -> parsing -> summarizing -> ready | failed`).
+Orchestrates **parse -> save sections -> contents (PDF, `toc` mode) ->
+ready**, then renders page images in the background. In `full` mode a
+summaries stage runs first, followed by contents when the TOC stage is
+enabled. Every stage records
+its progress (`queued`, `parse`, `save`, `summaries`, `contents.detect`,
+`contents.extract`, `contents.resolve`, `contents.split`, `pages`) for the
+dashboard. Every stage is idempotent so a queue retry is safe.
 
 Degradation rules:
 - Parser fails -> `failed`, `error_message` set, pipeline exits.
-- Summariser fails on a section -> use a truncated excerpt, mark
-  the summary as a fallback, continue.
+- No Judge configured -> contents decisions run on the generative driver,
+  one call per page, and leaf splitting is off.
 - Storage write fails -> retry via queue; document stays in its
   current status.
 
 ### `pkg/retrieval`
 
-`Strategy` interface + `SinglePass` + `ChunkedTree` + `Splitter` +
-merge policies. Takes a `*tree.Tree` and a query, returns section
-IDs. Calls `llm.Client` through the interface; never imports a
-concrete provider.
+`Strategy` interface + `JudgeWalkStrategy`, `TreeWalkStrategy`,
+`FallbackStrategy`, the replay store, and the original `SinglePass`,
+`ChunkedTree` and `Agentic`. Takes a tree and a query and returns
+sections and, for the page strategies, evidence pages. Calls models only
+through llmgate's `Client` and `Judge` interfaces.
+
+### `pkg/pincite`
+
+Given an answer with `[n]` markers and its evidence pages, lists candidate
+quotes from each page's own sentences and table rows, asks Jev to pick one
+per claim (shortlist of 10, with a `none` option), and locates the quote on
+the page exactly or at 80% or more token overlap. Below 0.35 confidence the
+citation stays at page level. Without a Judge it picks by word overlap.
 
 ### `pkg/storage`
 
@@ -323,58 +369,38 @@ convenience; leaves the engine repo when the server extracts.
 
 ## Request lifecycle
 
-### Ingest
+### Ingest (`toc` mode, PDF)
 
 ```
-POST /v1/documents
-  |
-  v
-api: multipart/JSON decode, size check
-  |
-  v
-db: INSERT documents row (status=pending)
-storage: write raw bytes (content-addressed key)
-queue: enqueue ingest_document{document_id}
-  |
-  v
-202 Accepted  {id, status}
+POST /v1/documents            (multipart upload or URL)
+  -> INSERT documents row, write raw bytes, enqueue ingest_document
+  -> 202 Accepted {id, status}
 
 (async, in a worker)
-  |
-  v
-ingest: load row, status=parsing
-parser: Registry.ParseFor(content_type).Parse(bytes) -> *tree.Tree
-db: UpsertSection * N (outline only)
-  |
-  v
-ingest: status=summarizing
-llm: summarise each section (sequential today, parallel Phase 3+)
-db: UpdateSectionSummary per section
-storage: write per-section content blob if large
-  |
-  v
-ingest: status=ready
+  parse      pdfgrab: words + rectangles per page; per-page text stored
+  save       sections from the parse, stored in one batch
+  contents   detect   Jev: which page is the contents page
+             extract  code lists candidate entries, Jev confirms them
+             resolve  code searches the body, Jev picks each entry's page
+             split    sections over 20 pages split at their own headings
+  -> status=ready
+  pages      pdftoppm renders each page at 144 dpi (after ready)
 ```
 
-### Query
+### Query and answer (`judgewalk`)
 
 ```
-POST /v1/query  {document_id, query, model?, ...}
-  |
-  v
-api: decode, validate
-db: LoadTree(document_id) -> *tree.Tree
-  |
-  v
-retrieval.Strategy.Select(ctx, tree, query, budget) -> []SectionID
-  (may fan out to N LLM calls via errgroup + semaphore)
-  |
-  v
-storage: fetch section content for each selected ID
-  |
-  v
-api: assemble response {sections, strategy, model, elapsed_ms}
+POST /v1/answer  {document_id, query, ...}
+  -> load the contents tree and per-page text
+  -> Jev: rank leaves -> skim page heads -> read pages -> follow "see Note N"
+  -> evidence pages, verbatim, with page ranges
+  -> generative model writes the answer with [n] markers
+  -> pincite: Jev picks one quote per claim, located on its page
+  -> response with answer, evidence pages, pincites, trace_token
+  -> response stored in the replay store under trace_token
 ```
+
+`POST /v1/query` stops after the evidence pages.
 
 ## Deployment topologies
 
@@ -462,8 +488,13 @@ care about status codes.
 - One goroutine per queue job (queue driver manages the pool).
 - Within a strategy: `errgroup.WithContext` + buffered semaphore
   channel to cap parallel LLM calls at `MaxParallelCalls`.
-- The engine is pure-IO bound (DB, S3, LLM API). Parallelism is always
-  network-bound, never CPU-bound.
+- Model calls go through llmgate's adaptive limiter, one per provider
+  (chat model and Judge).
+- The engine was assumed to be IO-bound. On 2026-09-28 that turned out to be
+  wrong: llmgate's context guard rebuilt its tokenizer on every count and
+  spent most of a 50-second query on CPU inside the limiter's slot. Fixed in
+  llmgate; see [the report](./evaluations/2026-09-28-latency-was-our-cpu.md).
+  Measure whose time it is before assuming the provider is slow.
 
 ## Failure modes and recovery
 
@@ -472,8 +503,11 @@ care about status codes.
 - **LLM fails during summarisation** -> fall back to a truncated
   excerpt so ingest still completes. Section summary marked with a
   hint that it's a fallback.
-- **LLM fails during query** -> propagate to caller. No fallback here;
-  the caller needs to know the query didn't actually run.
+- **Judge refuses during query** (402, 401/403, 5xx after retries) ->
+  the server binary serves the query with `treewalk` and logs
+  `retrieval: primary model unavailable, served by fallback`. Added after
+  the Judge provider ran out of credit on 2026-10-08 (HAL-2478).
+- **Generative model fails during query** -> propagate to caller.
 - **Queue worker crashes** -> job is redelivered by the queue driver
   up to its retry budget. Every pipeline stage is idempotent.
 - **Postgres unavailable at startup** -> engine fails to boot. No

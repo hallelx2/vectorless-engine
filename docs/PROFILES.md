@@ -4,6 +4,19 @@
 > tree into a navigable, *intelligent* map an agent can reason over
 > in a specialized domain.
 
+> **Updated 2026-10-11. What changed.** This is a design proposal from the
+> original architecture, in which every section got a generated summary and a
+> chat model navigated the summaries. The pipeline production ran from
+> 2026-10-06 (`ingest.mode: toc`, `retrieval.strategy: judgewalk`) builds the
+> tree from the document's own contents page with Jev, makes no generative call
+> at ingest or retrieval, and returns evidence pages verbatim. Profiles were
+> only ever wired into the summary prompts of `ingest.mode: full`
+> (`X-Vectorless-Profile`), so in the current pipeline a profile has no effect.
+> The typed-judgement version of this idea (per-page facets such as page kind
+> or owning item, decided by Jev rather than written as prose) is described in
+> [Judgement, not generation](./evaluations/2026-09-25-judgement-not-generation.md).
+> The rest of this document is unchanged and describes the proposal as written.
+
 ## Purpose
 
 The engine's promise is: hand an agent a navigable map of a document
@@ -259,11 +272,13 @@ So the design builds on a written starting point:
 - **Structure**: heading hierarchy → `Section` tree. Multiple
   top-level sections are wrapped in a synthetic root so the whole
   document is reachable.
-- **Summaries**: one LLM sentence per section (parallel via errgroup),
-  with a truncated-excerpt fallback when the LLM call fails.
-- **Retrieval**: `single-pass` (whole tree in one call) or
-  `chunked-tree` (slice → parallel select → merge). The map is the
-  index; no embeddings anywhere.
+- **Summaries** (as of this proposal, `ingest.mode: full` only): one LLM
+  sentence per section (parallel via errgroup), with a truncated-excerpt
+  fallback when the LLM call fails. The current `toc` mode writes none.
+- **Retrieval** (as of this proposal): `single-pass` (whole tree in one
+  call) or `chunked-tree` (slice → parallel select → merge). Since
+  2026-10-06 production uses `judgewalk` instead. The map is the index; no
+  embeddings anywhere.
 - **Multi-tenancy**: every section is scoped by `org_id` on the parent
   document; reads/writes filter by it.
 

@@ -26,14 +26,14 @@
   <!-- RIGHT: vectorless -->
   <g filter="url(#sh2)"><rect x="640" y="40" width="560" height="350" rx="18" fill="#fff" stroke="url(#sig2)" stroke-width="2"/></g>
   <text x="672" y="92" font-size="13" letter-spacing="2" font-family="monospace" font-weight="700" fill="url(#sig2)">VECTORLESS</text>
-  <text x="672" y="124" font-size="22" fill="#0A0A0A" font-weight="600">Keep the structure, reason over it</text>
+  <text x="672" y="124" font-size="22" fill="#0A0A0A" font-weight="600">Keep the pages, select among them</text>
 
   <g font-size="15" fill="#3F3F46">
-    <path d="M680 164 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="173">Parse into a tree of real sections</text>
-    <path d="M680 202 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="211">An LLM navigates by title + page</text>
-    <path d="M680 240 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="249">Returns whole sections, in context</text>
-    <path d="M680 278 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="287">Citations for free — page + quote</text>
-    <path d="M680 316 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="325">Swap models freely — nothing to recompute</text>
+    <path d="M680 164 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="173">Build the tree from the contents page</text>
+    <path d="M680 202 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="211">Jev ranks sections, then pages</text>
+    <path d="M680 240 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="249">Returns the evidence pages verbatim</text>
+    <path d="M680 278 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="287">Each claim pinned to a line of its page</text>
+    <path d="M680 316 l5 6 l9 -12" stroke="#1456F0" stroke-width="2.4" fill="none"/><text x="704" y="325">Swap answer models; nothing to re-embed</text>
   </g>
-  <text x="672" y="366" font-size="14" font-weight="600" fill="url(#sig2)">Structure-preserving · exact · just Postgres + storage</text>
+  <text x="672" y="366" font-size="14" font-weight="600" fill="url(#sig2)">No generated text in a citation · Postgres + storage</text>
 </svg>

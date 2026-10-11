@@ -13,6 +13,13 @@ Every doc here answers the same five questions:
 4. What are the concrete design decisions we've committed to?
 5. What's open, deferred, or explicitly rejected?
 
+> **Updated 2026-10-11.** Several of these docs were written for the original
+> design (generated section summaries, `single-pass` / `chunked-tree`
+> retrieval). ENGINE.md, PROFILES.md and ARCHITECTURE.md say at the top what
+> has changed. For how the engine works now, read the
+> [project README](../README.md#how-it-works) and the
+> [evaluation reports](./evaluations/README.md).
+
 ## Index
 
 Start with **ARCHITECTURE.md** for the big picture, then drill into the
@@ -33,6 +40,7 @@ specific subsystem you're working on.
 | [MCP.md](./MCP.md) | Model Context Protocol adapter for agents. |
 | [DATA.md](./DATA.md) | Data model decisions — why Postgres, schema shape. |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Where and how each piece runs in production. |
+| [evaluations/](./evaluations/README.md) | Dated measurement reports. The source for every number in the project README. |
 
 ## Roadmaps
 
