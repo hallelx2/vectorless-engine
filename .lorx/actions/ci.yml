@@ -1,21 +1,30 @@
-# CI run by Lorx's engine: `bit run --all` on a machine, or a Lorx runner on push.
+# CI run by Lorx's engine: `bit run --all` here, or a Lorx runner on push.
 # GitHub Actions on this account cannot start jobs (HAL-1712), so this is the merge gate.
-# Every top-level key is a job; a bare string is its one command.
+# Jobs run in container images so a runner needs only docker or podman, not a Go toolchain.
 
-fmt: 'test -z "$(gofmt -l . | grep -v ^vendor/)"'
+fmt:
+  image: golang:1.25
+  run: 'test -z "$(gofmt -l . | grep -v ^vendor/)"'
 
-vet: go vet ./...
+vet:
+  image: golang:1.25
+  run: go vet ./...
+  timeout: 20m
 
 build:
   needs: [fmt]
+  image: golang:1.25
   run: go build ./...
+  timeout: 20m
 
 lint:
   needs: [build]
+  image: golangci/golangci-lint:v2.14.0
   run: golangci-lint run ./...
-  timeout: 15m
+  timeout: 20m
 
 test:
   needs: [vet, build]
+  image: golang:1.25
   run: go test ./...
   timeout: 30m
