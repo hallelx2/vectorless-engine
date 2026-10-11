@@ -2,11 +2,18 @@
 
 > The whole vectorless stack, layer by layer. Read this first.
 
+> **Updated 2026-10-11.** The layer structure below is still accurate. The
+> engine's internals changed in September 2026: the tree is now built from
+> the document's contents page by Jev (TypeSafe's System One model), with no
+> generated summaries, and retrieval returns evidence pages verbatim. See the
+> [README](../README.md#how-it-works) and [ENGINE.md](./ENGINE.md). The hosted
+> service (control plane and dashboard as SaaS) is closing; the project is
+> open source and no longer actively developed.
+
 ## One-sentence summary
 
-Vectorless is a retrieval system that reasons over document structure
-(titles + summaries, organised as a tree) instead of over vector
-embeddings. The stack is five layers: an embeddable **engine**, a
+Vectorless is a retrieval system that selects sections and pages from a
+document's own contents tree instead of searching vector embeddings. The stack is five layers: an embeddable **engine**, a
 transport **server**, a multi-tenant **control plane**, a human-facing
 **dashboard**, and language **SDKs** plus an **MCP adapter** for agents.
 

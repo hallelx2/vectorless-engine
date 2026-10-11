@@ -9,7 +9,7 @@
   </defs>
   <rect width="1240" height="380" fill="#FCFCFD"/>
   <text x="40" y="52" font-size="13" letter-spacing="2.4" fill="#71717A" font-weight="600">HOW IT WORKS</text>
-  <text x="40" y="86" font-size="26" fill="#0A0A0A" font-weight="600">Reason over structure, not embeddings</text>
+  <text x="40" y="86" font-size="26" fill="#0A0A0A" font-weight="600">Select, don&#8217;t generate: one generated text, the answer</text>
 
   <!-- step cards -->
   <g filter="url(#sh)">
@@ -21,31 +21,31 @@
 
   <!-- 01 ingest -->
   <text x="64" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">01 · INGEST</text>
-  <text x="64" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Parse to a tree</text>
-  <text x="64" y="228" font-size="14" fill="#3F3F46">PDF → titled sections,</text>
-  <text x="64" y="250" font-size="14" fill="#3F3F46">page ranges, structure</text>
-  <text x="64" y="272" font-size="14" fill="#71717A">— no chunking.</text>
+  <text x="64" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Contents, placed</text>
+  <text x="64" y="228" font-size="14" fill="#3F3F46">pdfgrab reads words + boxes;</text>
+  <text x="64" y="250" font-size="14" fill="#3F3F46">Jev confirms the contents and</text>
+  <text x="64" y="272" font-size="14" fill="#71717A">picks each entry&#8217;s page.</text>
 
   <!-- 02 navigate -->
   <text x="357" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">02 · NAVIGATE</text>
-  <text x="357" y="200" font-size="19" fill="#0A0A0A" font-weight="600">LLM walks it</text>
-  <text x="357" y="228" font-size="14" fill="#3F3F46">Reads the table of</text>
-  <text x="357" y="250" font-size="14" fill="#3F3F46">contents, jumps to the</text>
-  <text x="357" y="272" font-size="14" fill="#71717A">right pages.</text>
+  <text x="357" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Jev ranks, then reads</text>
+  <text x="357" y="228" font-size="14" fill="#3F3F46">Sections, then page heads,</text>
+  <text x="357" y="250" font-size="14" fill="#3F3F46">then full pages; follows</text>
+  <text x="357" y="272" font-size="14" fill="#71717A">&#8220;see Note N&#8221;.</text>
 
   <!-- 03 read -->
-  <text x="650" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">03 · READ</text>
-  <text x="650" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Full sections</text>
-  <text x="650" y="228" font-size="14" fill="#3F3F46">Returns whole sections</text>
-  <text x="650" y="250" font-size="14" fill="#3F3F46">in context — not</text>
-  <text x="650" y="272" font-size="14" fill="#71717A">top-K fragments.</text>
+  <text x="650" y="166" font-size="13" fill="#1456F0" font-weight="700" font-family="monospace">03 · EVIDENCE</text>
+  <text x="650" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Pages, verbatim</text>
+  <text x="650" y="228" font-size="14" fill="#3F3F46">The chosen pages come</text>
+  <text x="650" y="250" font-size="14" fill="#3F3F46">back as they are, with</text>
+  <text x="650" y="272" font-size="14" fill="#71717A">page ranges.</text>
 
   <!-- 04 answer -->
   <text x="943" y="166" font-size="13" font-weight="700" font-family="monospace" fill="url(#sig)">04 · ANSWER</text>
-  <text x="943" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Cited answer</text>
-  <text x="943" y="228" font-size="14" fill="#3F3F46">Grounded answer with</text>
-  <text x="943" y="250" font-size="14" fill="#3F3F46">page ranges + verbatim</text>
-  <text x="943" y="272" font-size="14" fill="#71717A">quotes.</text>
+  <text x="943" y="200" font-size="19" fill="#0A0A0A" font-weight="600">Pincited answer</text>
+  <text x="943" y="228" font-size="14" fill="#3F3F46">Each claim pinned to a line</text>
+  <text x="943" y="250" font-size="14" fill="#3F3F46">of its page; trace kept</text>
+  <text x="943" y="272" font-size="14" fill="#71717A">for replay.</text>
 
   <!-- arrows -->
   <g stroke="url(#sig)" stroke-width="2.5" fill="none">
@@ -59,5 +59,5 @@
     </marker>
   </defs>
 
-  <text x="40" y="346" font-size="14" fill="#71717A">Postgres + object storage. No vector database, no ANN index, nothing to recompute when you swap models.</text>
+  <text x="40" y="346" font-size="14" fill="#71717A">Ingest and retrieval make no generative call. No chunking, no embeddings, no vector database: Postgres and object storage.</text>
 </svg>
