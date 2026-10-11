@@ -42,9 +42,17 @@ type Storage interface {
 	// Exists reports whether key exists.
 	Exists(ctx context.Context, key string) (bool, error)
 
+	// DeletePrefix removes every object whose key starts with prefix and
+	// returns how many it removed. No match is not an error. An empty
+	// prefix is refused: it would empty the bucket.
+	DeletePrefix(ctx context.Context, prefix string) (int, error)
+
 	// SignedURL returns a time-limited URL that allows direct reading of the
 	// object by a client. Backends that don't natively support signed URLs
 	// should return an empty string and a nil error, letting callers fall
 	// back to proxying through the engine.
 	SignedURL(ctx context.Context, key string, expiry time.Duration) (string, error)
 }
+
+// ErrEmptyPrefix is returned by DeletePrefix for an empty prefix.
+var ErrEmptyPrefix = errors.New("storage: refusing to delete an empty prefix")

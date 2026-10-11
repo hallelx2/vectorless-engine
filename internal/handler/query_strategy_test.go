@@ -66,6 +66,17 @@ func (m *memStorage) Exists(ctx context.Context, key string) (bool, error) {
 	_, ok := m.data[key]
 	return ok, nil
 }
+func (m *memStorage) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	n := 0
+	for k := range m.data {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.data, k)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *memStorage) SignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	return "", nil
 }

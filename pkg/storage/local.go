@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -136,6 +137,59 @@ func (l *Local) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("%w: %s", ErrNotFound, full)
 	}
 	return err
+}
+
+// DeletePrefix removes every file whose key starts with prefix, then any
+// directories the removal left empty.
+func (l *Local) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if prefix == "" {
+		return 0, ErrEmptyPrefix
+	}
+	// Only the directory that holds the prefix can contain matches.
+	dir := l.root
+	if i := strings.LastIndex(prefix, "/"); i >= 0 {
+		dir = l.path(prefix[:i])
+	}
+	n := 0
+	var dirs []string
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		rel, err := filepath.Rel(l.root, p)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if d.IsDir() {
+			if p != dir && !strings.HasPrefix(key+"/", prefix) && !strings.HasPrefix(prefix, key+"/") {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(key+"/", prefix) {
+				dirs = append(dirs, p)
+			}
+			return nil
+		}
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		n++
+		return nil
+	})
+	if err != nil {
+		return n, fmt.Errorf("local storage: delete prefix %q: %w", prefix, err)
+	}
+	// Deepest first, so a parent is empty by the time it is tried.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i]) // only succeeds when empty
+	}
+	return n, nil
 }
 
 func (l *Local) Exists(ctx context.Context, key string) (bool, error) {
