@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/banner.png" alt="Vectorless: document retrieval without embeddings" width="100%"/>
+  <img src="docs/media/banner.png" alt="Vectorless: a retrieval engine with no vectors, citations that land on the exact line of the PDF" width="100%"/>
 </p>
 
 <p align="center">
@@ -10,10 +10,13 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"/></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/badge/go-%3E%3D1.25-00ADD8?logo=go&logoColor=white"/></a>
-  <a href="https://hub.docker.com/r/halleluyaholudele/vectorless"><img alt="Docker Hub" src="https://img.shields.io/badge/docker-halleluyaholudele%2Fvectorless-2496ED?logo=docker&logoColor=white"/></a>
+  <img alt="FinanceBench: 40/40 right section" src="https://img.shields.io/badge/FinanceBench-40%2F40%20right%20section-ff5a00"/>
+  <img alt="Query: 1.9 s median" src="https://img.shields.io/badge/query-1.9%20s%20median-18181b"/>
+  <img alt="Status: open source, not maintained" src="https://img.shields.io/badge/status-open%20source%2C%20not%20maintained-lightgrey"/>
 </p>
 
 <p align="center">
+  <a href="#see-it-work">See it work</a> ·
   <a href="#status">Status</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#results">Results</a> ·
@@ -25,6 +28,15 @@
 
 ---
 
+## See it work
+
+Recorded live on vectorless.store on 12 October 2026, before the hosted service shut down. The 3M 2018 10-K (160 pages) was ready to query 13 seconds after upload. The question below was answered in 5.4 seconds, with 3 of its 4 citations pinned to exact lines. Clicking one opens page 39 with the "Total Company" capital spending row highlighted: $1,577M in 2018 against $1,373M in 2017.
+
+<p align="center">
+  <a href="docs/media/live-walkthrough.mp4"><img src="docs/media/live-ask-and-pincite.gif" alt="Asking the 3M 2018 10-K about capital expenditure, then clicking a citation to land on the highlighted row of page 39" width="100%"/></a>
+  <br/><sub><a href="docs/media/live-walkthrough.mp4">Watch the full 78-second walkthrough</a>: upload, live ingest, the structure tree, the question and the pincite.</sub>
+</p>
+
 ## Status
 
 The hosted Vectorless service is closing (decided 2026-10-11). The code is open source under Apache 2.0 and is no longer actively developed. Issues and pull requests may not get a reply. For anything else, write to halleluyaholudele@gmail.com.
@@ -33,8 +45,14 @@ The hosted Vectorless service is closing (decided 2026-10-11). The code is open 
 
 The engine ships as a single binary and runs on Postgres plus object storage. Ingest builds a table of contents with page numbers. A query picks sections, then pages, and returns the pages as they are. The only generated text anywhere in the pipeline is the final answer.
 
+Here is the whole pipeline drawn as one machine. The document is a cabinet with one drawer per section. The dials show the probability Jev gives each section. The crane only goes where a needle points, and the stylus on the light table is the pincite landing on its line.
+
 <p align="center">
-  <img src="docs/images/how-it-works.svg" alt="Ingest: contents found and placed. Navigate: Jev ranks sections, then pages. Evidence: pages returned verbatim. Answer: each claim pinned to a line." width="100%"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/how-it-works-dark.gif"/>
+    <img src="docs/media/how-it-works-light.gif" alt="An isometric machine: a card cabinet of sections, dials showing Jev's probabilities, a crane that pulls the chosen drawer, a light table where a stylus marks the exact line, and a printer for the answer" width="100%"/>
+  </picture>
+  <br/><sub>Ingest → ask → select → read → cite → answer. <a href="docs/media/how-it-works.mp4">As video</a>.</sub>
 </p>
 
 ### Ingest (PDF)
@@ -71,6 +89,10 @@ A pincite is a citation to the exact page or line, the way a legal brief cites a
 
 Citations come at line, page or section precision. There is no table-cell precision. Every quote is taken from the page's own text, so no generated text can reach a citation.
 
+<p align="center">
+  <img src="docs/media/pincite.png" alt="One claim becomes a highlighted line: candidate sentences from the page, Jev picks one with a probability, the quote is located and drawn as one rectangle per line" width="100%"/>
+</p>
+
 ### Replay
 
 Every answer is stored with a `trace_token`. `POST /v1/replay` with that token returns the stored response byte for byte. Replay is a record of what was answered. It does not re-run the query, and re-running would not necessarily give the same result (see [Results](#results)). The store is an in-memory LRU, 1,024 entries for 24 hours by default (`retrieval.replay`), so it does not survive a restart.
@@ -81,9 +103,17 @@ Every answer is stored with a `trace_token`. `POST /v1/replay` with that token r
 
 Choosing a contents entry, a page, a section or a quote is a selection, not writing. Jev selects. A generative model writes only the answer. The reasoning is in [Judgement, not generation](docs/evaluations/2026-09-25-judgement-not-generation.md) (2026-09-25).
 
+<p align="center">
+  <img src="docs/media/select-dont-generate.png" alt="Moving closed decisions onto Jev: the contents stage went from 103 to 840 s and up to 9.5 cents per filing to 12 to 143 s and a fraction of a cent, and page placement from 16/20 to 20/20 gold pages" width="100%"/>
+</p>
+
 ## Results
 
 All figures are from FinanceBench 10-K filings unless stated. Each links to the report that measured it. The full list is in [docs/evaluations](docs/evaluations/README.md).
+
+<p align="center">
+  <img src="docs/media/numbers.png" alt="40/40 right section; median query 50.5 s to 1.9 s; ingest 66 s to 4.1 s per filing; retrieval 1.70 s against PageIndex's 7.05 s; gold page in the top five 0.925 against 0.375 for embeddings and 0.200 for BM25" width="100%"/>
+</p>
 
 | Claim | Number | Date | Report |
 |---|---|---|---|
@@ -124,6 +154,30 @@ To reproduce the FinanceBench runs, see `cmd/navbench`, `cmd/tocdump` and the ha
 
 ## Quick start
 
+### The whole product: self-host
+
+The dashboard, control plane, engine and Postgres all start from one command in the [`vectorless`](https://github.com/hallelx2/vectorless) repository. You sign up as the first user, enter your model keys on **Settings → Model providers**, and upload a document. Keys take effect without a restart.
+
+Clone the three repositories side by side, then start the stack:
+
+```bash
+mkdir vectorless && cd vectorless
+git clone https://github.com/hallelx2/vectorless.git
+git clone https://github.com/hallelx2/vectorless-engine.git
+git clone https://github.com/hallelx2/vectorless-control-plane.git
+cd vectorless/selfhost && docker compose up -d --build
+# when every service is healthy: http://localhost:3000
+```
+
+There is no `.env` to write. Secrets are generated on first boot.
+
+<p align="center">
+  <a href="https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md"><img src="docs/media/selfhost-keys.gif" alt="A fresh self-hosted instance: the first account is created, then model keys are entered as dots on Settings, Model providers, tested and saved without a restart" width="100%"/></a>
+  <br/><sub>First boot of a self-hosted instance: the administrator account, then model keys entered on <b>Settings → Model providers</b>. The full guide is in <a href="https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md">selfhost/README.md</a>.</sub>
+</p>
+
+### The engine on its own
+
 The engine has two entry points:
 
 | Binary | What it is | Use it for |
@@ -133,7 +187,7 @@ The engine has two entry points:
 
 ### All-in-one container
 
-One container with the engine, a bundled Postgres and a web UI. The image defaults to fast `minimal` ingest and GLM through z.ai, so it does not run the Jev pipeline unless you turn it on:
+One container with the engine, a bundled Postgres and a web UI. Build it from this repository with `docker build -f Dockerfile.allinone -t vectorless .`. The `halleluyaholudele/vectorless` image on Docker Hub was last pushed on 2026-07-04, before Jev, judgewalk and pincites existed, so don't use it for the pipeline above. The image defaults to fast `minimal` ingest and GLM through z.ai, so it does not run the Jev pipeline unless you turn it on:
 
 ```bash
 docker run -p 8080:8080 -p 7654:7654 \
@@ -141,14 +195,10 @@ docker run -p 8080:8080 -p 7654:7654 \
   -e TYPESAFE_API_KEY=<your TypeSafe key> \
   -e VLE_INGEST_MODE=toc \
   -e VLE_RETRIEVAL_STRATEGY=judgewalk \
-  halleluyaholudele/vectorless
+  vectorless
 # UI  → http://localhost:8080
 # API → http://localhost:7654
 ```
-
-<p align="center">
-  <img src="docs/images/screenshot-dashboard.png" alt="Vectorless dashboard: cited answer with source page preview" width="100%"/>
-</p>
 
 ### From source (Go 1.25+, Postgres)
 
@@ -161,7 +211,7 @@ export VLE_INGEST_MODE=toc VLE_RETRIEVAL_STRATEGY=judgewalk
 go run ./cmd/engine --local      # zero-config local mode on :7654
 ```
 
-A full self-host stack (dashboard, control plane, engine and Postgres from one `docker compose up`) is being prepared in the `vectorless` repository (HAL-2663, in progress on 2026-10-11).
+For the dashboard and everything around it, use the self-host stack above.
 
 ## HTTP API
 
