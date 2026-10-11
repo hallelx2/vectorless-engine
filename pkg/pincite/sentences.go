@@ -92,7 +92,7 @@ func sentenceEnd(s string) int {
 			continue
 		}
 		prev := rs[i-1]
-		if !(unicode.IsLower(prev) || unicode.IsDigit(prev) || prev == ')' || prev == '%') {
+		if !unicode.IsLower(prev) && !unicode.IsDigit(prev) && prev != ')' && prev != '%' {
 			continue
 		}
 		if rs[i+1] != ' ' {
