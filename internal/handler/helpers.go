@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,4 +68,42 @@ func guessContentType(filename string) string {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}
 	return "application/octet-stream"
+}
+
+// Token-usage headers the control plane meters (X-Vectorless-Tokens-In/Out).
+const (
+	hdrTokensIn  = "X-Vectorless-Tokens-In"
+	hdrTokensOut = "X-Vectorless-Tokens-Out"
+)
+
+// declareTokenTrailers must run before a streamed response writes its
+// status: a stream only knows its token counts at the end, so they
+// travel as HTTP trailers.
+func declareTokenTrailers(h http.Header) {
+	h.Set("Trailer", hdrTokensIn+", "+hdrTokensOut)
+}
+
+// setTokenHeaders reports a response's token usage, read from its
+// "usage" block. On a streamed response, called after the last write,
+// the values become the trailers declared earlier.
+func setTokenHeaders(h http.Header, resp map[string]any) {
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return
+	}
+	in, out := toInt64(u["input_tokens"]), toInt64(u["output_tokens"])
+	h.Set(hdrTokensIn, strconv.FormatInt(in, 10))
+	h.Set(hdrTokensOut, strconv.FormatInt(out, 10))
+}
+
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case float64:
+		return int64(n)
+	}
+	return 0
 }

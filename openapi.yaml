@@ -134,7 +134,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [content]
+              description: Exactly one of `content` or `url`.
               properties:
                 filename:
                   type: string
@@ -144,13 +144,30 @@ paths:
                   example: text/markdown
                 content:
                   type: string
+                  description: The document itself, as text.
+                url:
+                  type: string
+                  format: uri
+                  description: |
+                    An http(s) URL Vectorless downloads the document from
+                    (public addresses only, at most 100 MB, 5 redirects).
+                    A URL that cannot be fetched is a 400.
+                title:
+                  type: string
+                mode:
+                  $ref: "#/components/schemas/IngestMode"
           multipart/form-data:
             schema:
               type: object
+              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
+                title:
+                  type: string
+                mode:
+                  $ref: "#/components/schemas/IngestMode"
       responses:
         "202":
           description: Document accepted for ingestion
@@ -214,6 +231,72 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/documents/{id}/pages:
+    get:
+      tags: [Documents]
+      summary: Page list with sizes, for pincite viewers
+      operationId: listDocumentPages
+      description: |
+        The document's pages and their sizes in PDF points, so a viewer
+        can lay every page out at the right aspect before any image
+        loads. Built from the PDF's own geometry on first request and
+        stored beside the document. Non-PDF documents return
+        `page_count: 0` — their citations are section-level.
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Pages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document_id: { type: string }
+                  page_count: { type: integer }
+                  images:
+                    type: boolean
+                    description: Whether this server can render page images (poppler's pdftoppm is installed).
+                  pages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        page: { type: integer }
+                        width: { type: number, description: PDF points }
+                        height: { type: number, description: PDF points }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/documents/{id}/pages/{n}/image:
+    get:
+      tags: [Documents]
+      summary: One page of the source PDF as a JPEG
+      operationId: getDocumentPageImage
+      description: |
+        Rendered once (at ingest, or on first view for documents
+        ingested before page images existed), stored, and served with
+        `Cache-Control: private, max-age=31536000, immutable` and an
+        ETag. A pincite's `regions` are fractions of this image.
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+        - name: n
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Page image
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "304":
+          description: Not modified (If-None-Match matched)
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          description: Page rendering is not available on this server
+
   /v1/sections/{id}:
     get:
       tags: [Sections]
@@ -276,6 +359,24 @@ paths:
         This is the most regulator-defensible endpoint: the answer is
         grounded in retrieved sections, and each claim carries a
         replayable provenance trail.
+
+        **Pincites.** When the configured strategy returns evidence
+        pages, the answer is written from those pages with
+        an inline `[n]` marker on every claim, and each marker becomes a
+        pincite: the sentence on the cited page that states the claim
+        (selected from the page's own sentences — never written by a
+        model), located on the page from the PDF's word
+        positions and returned as normalised `regions`. Markers that
+        point at no evidence are stripped and counted in
+        `markers_stripped`. The `[n]` in the returned `answer` are
+        pincite ids.
+
+        **Streaming.** `stream: true` (or `?stream=true`) answers as
+        Server-Sent Events: `started`; one `step` per navigation stage
+        as it completes (`structure`, `sections`, `skim`, `read`,
+        `pages`, `follow`), each with the sections and pages it
+        concerns; `retrieved` (the evidence pages, before the answer is
+        written); then `answer` with the full response, or `error`.
       requestBody:
         required: true
         content:
@@ -508,6 +609,15 @@ components:
                 example: document not found
 
   schemas:
+    IngestMode:
+      type: string
+      enum: [toc, full, minimal]
+      description: |
+        How much structure to build for this document; omitted = the
+        deployment default. `toc`: the document's own table of contents,
+        verified against its pages (seconds). `full`: that plus a written
+        summary of every section (minutes on long documents). `minimal`:
+        headings only, no model calls.
     Document:
       type: object
       properties:
@@ -856,7 +966,10 @@ components:
           description: Cap on sections fed into synthesis. Defaults to retrieval.answer.max_sections (5).
         max_answer_tokens:
           type: integer
-          description: Bound the synthesised answer length. Defaults to retrieval.answer.max_answer_tokens (1024).
+          description: Bound the synthesised answer length. Defaults to retrieval.answer.max_answer_tokens (1024; 2048 on the evidence-page path).
+        stream:
+          type: boolean
+          description: Answer as Server-Sent Events (started → retrieved → answer). Also accepted as ?stream=true.
         enable_planning:
           type: boolean
           description: |
@@ -896,6 +1009,33 @@ components:
             When `abstained=true` this is the canonical refusal
             ("I cannot answer this question from the supplied
             document.") rather than synthesised prose.
+        pincites:
+          type: array
+          items: { $ref: "#/components/schemas/Pincite" }
+          description: Evidence-page path only. One per marker in `answer`, in answer order.
+        evidence:
+          type: array
+          description: Evidence-page path only. The evidence pages, best first.
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              page: { type: integer }
+              title: { type: string }
+              confidence: { type: number }
+        markers_inline:
+          type: boolean
+          description: Whether the answer carries inline markers. False when the model wrote none; every evidence page is then still cited.
+        markers_stripped:
+          type: integer
+          description: Markers removed because they pointed at no evidence.
+        timings_ms:
+          type: object
+          description: Evidence-page path only. Wall-clock split.
+          properties:
+            retrieval: { type: integer }
+            answer: { type: integer }
+            pincites: { type: integer }
         citations:
           type: array
           items:
@@ -1043,6 +1183,32 @@ components:
           type: integer
         page_end:
           type: integer
+        index:
+          type: integer
+          description: Evidence-page path only. The evidence number the answer's markers cited.
+        page:
+          type: integer
+          description: Evidence-page path only. The page the regions sit on.
+        start_page:
+          type: integer
+        end_page:
+          type: integer
+        confidence:
+          type: number
+          description: Evidence-page path only. Probability that this page holds the answer.
+        section_ids:
+          type: array
+          items: { type: string }
+        regions:
+          type: array
+          items: { $ref: "#/components/schemas/PinciteRegion" }
+        precision:
+          type: string
+          enum: [line, page, section]
+        pincites:
+          type: array
+          items: { type: integer }
+          description: Ids of the pincites that cite this page.
         score:
           type: number
           description: |
@@ -1230,6 +1396,49 @@ components:
             paraphrase).
         quote_end:
           type: integer
+        page:
+          type: integer
+          description: The page the quote was located on.
+        regions:
+          type: array
+          items: { $ref: "#/components/schemas/PinciteRegion" }
+          description: Where the quote sits on `page`. Empty unless `precision` is `line`.
+        precision:
+          type: string
+          enum: [line, page, section]
+          description: |
+            How exactly the citation is placed. `line` — the quote was
+            found and `regions` cover its words; `page` — the page is
+            known, the quote could not be placed; `section` — the source
+            has no pages (non-PDF).
+
+    PinciteRegion:
+      type: object
+      description: A rectangle on a page in 0..1 fractions of its width and height, origin top-left.
+      properties:
+        left: { type: number }
+        top: { type: number }
+        width: { type: number }
+        height: { type: number }
+        precision:
+          type: string
+          enum: [line, page, section]
+
+    Pincite:
+      type: object
+      description: One claim in the answer bound to the region of the page it rests on.
+      properties:
+        id: { type: integer, description: The marker number in `answer`. }
+        citation: { type: integer, description: The evidence number this claim cited. }
+        page: { type: integer }
+        claim: { type: string, description: The answer sentence the marker sits in. }
+        quote: { type: string, description: The page's own sentence that states the claim. Empty when none does. }
+        regions:
+          type: array
+          items: { $ref: "#/components/schemas/PinciteRegion" }
+        precision: { type: string, enum: [line, page, section] }
+        selected_by: { type: string, enum: [model, overlap], description: "How the sentence was selected: by model, or by word overlap when no model was available." }
+        selection_confidence: { type: number, description: "Probability for the selected sentence, when selected by model." }
 
     PageReadEntry:
       type: object

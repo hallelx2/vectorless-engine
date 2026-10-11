@@ -355,6 +355,24 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_LLM_ANTHROPIC_MODEL", "VLE_LLM_ANTHROPIC_MODEL"); v != "" {
 		c.Engine.LLM.Anthropic.Model = v
 	}
+	// The Judge (TypeSafe). The engine's own loader reads these; the
+	// server's did not, so a deployed server could only take the key from
+	// YAML — a secret in a config file. Same precedence as the engine:
+	// VLS_ wins, then VLE_, then the provider's own TYPESAFE_API_KEY.
+	if v := firstEnv("VLS_TYPESAFE_API_KEY", "VLE_TYPESAFE_API_KEY", "TYPESAFE_API_KEY"); v != "" {
+		c.Engine.LLM.Judge.TypeSafe.APIKey = v
+	}
+	if v := firstEnv("VLS_TYPESAFE_BASE_URL", "VLE_TYPESAFE_BASE_URL", "TYPESAFE_BASE_URL"); v != "" {
+		c.Engine.LLM.Judge.TypeSafe.BaseURL = v
+	}
+	if v := firstEnv("VLS_TYPESAFE_MODEL", "VLE_TYPESAFE_MODEL", "TYPESAFE_MODEL"); v != "" {
+		c.Engine.LLM.Judge.TypeSafe.Model = v
+	}
+	// Retrieval strategy, so a deployment can switch to judgewalk
+	// without a config edit.
+	if v := firstEnv("VLS_RETRIEVAL_STRATEGY", "VLE_RETRIEVAL_STRATEGY"); v != "" {
+		c.Engine.Retrieval.Strategy = v
+	}
 }
 
 // firstEnv returns the first non-empty value from the named env vars.

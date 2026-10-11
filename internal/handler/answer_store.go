@@ -15,6 +15,8 @@ import (
 	"github.com/hallelx2/llmgate"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
@@ -48,6 +50,45 @@ type AnswerStoreHandler struct {
 	storage  storage.Storage
 	llm      llmgate.Client
 	llmModel string
+
+	// pincites places each citation's quote on its page. Nil leaves
+	// citations without regions.
+	pincites *pincite.Service
+}
+
+// documentGetter is the part of the DB the store handler needs to find
+// a cited document's original upload.
+type documentGetter interface {
+	GetDocument(ctx context.Context, id tree.DocumentID, orgID, storeID string) (*db.Document, error)
+}
+
+// annotate places every citation on its document's page (HAL-837),
+// one document at a time.
+func (h *AnswerStoreHandler) annotate(ctx context.Context, orgID, store string, citations []map[string]any) {
+	getter, ok := h.db.(documentGetter)
+	if !ok || h.pincites == nil {
+		return
+	}
+	byDoc := map[tree.DocumentID][]map[string]any{}
+	var order []tree.DocumentID
+	for _, c := range citations {
+		id, _ := c["document_id"].(tree.DocumentID)
+		if id == "" {
+			continue
+		}
+		if _, seen := byDoc[id]; !seen {
+			order = append(order, id)
+		}
+		byDoc[id] = append(byDoc[id], c)
+	}
+	for _, id := range order {
+		doc, err := getter.GetDocument(ctx, id, orgID, store)
+		if err != nil {
+			continue
+		}
+		src := pincite.Source{DocumentID: string(doc.ID), SourceRef: doc.SourceRef, ContentType: doc.ContentType}
+		annotateRangeCitations(ctx, h.pincites, src, byDoc[id], h.logger)
+	}
 }
 
 // NewAnswerStoreHandler creates an AnswerStoreHandler. It returns 501 at
@@ -151,16 +192,21 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 	}
 	totalUsage.Add(synthUsage)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	citations := buildStoreCitations(sections, cited)
+	h.annotate(r.Context(), orgID, storeID(r), citations)
+
+	storeResp := map[string]any{
 		"query":                  body.Query,
 		"answer":                 answer,
-		"citations":              buildStoreCitations(sections, cited),
+		"citations":              citations,
 		"documents_searched":     len(docIDs),
 		"documents_with_matches": docsMatched,
 		"sections_used":          len(sections),
 		"usage":                  usageMap(totalUsage),
 		"elapsed_ms":             time.Since(started).Milliseconds(),
-	})
+	}
+	setTokenHeaders(w.Header(), storeResp)
+	writeJSON(w, http.StatusOK, storeResp)
 }
 
 // manifestRef maps a manifest index to a section id + whether it carries

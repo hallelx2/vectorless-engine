@@ -59,6 +59,12 @@ func (b ContextBudget) Available() int {
 
 // Result is returned to the API layer. It includes not just IDs but the
 // reasoning trace and cost accounting when the strategy supports it.
+// StepStrategy is a strategy that can report its progress as it runs.
+type StepStrategy interface {
+	Strategy
+	WithSteps(onStep func(NavStep)) Strategy
+}
+
 type Result struct {
 	SelectedIDs []tree.SectionID `json:"selected_ids"`
 

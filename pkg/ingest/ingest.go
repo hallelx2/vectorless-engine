@@ -86,6 +86,32 @@ type Payload struct {
 	// ("generic", "research", "medical"). Empty = generic. Sourced from
 	// the document's store (the control plane injects X-Vectorless-Profile).
 	Profile string `json:"profile,omitempty"`
+	// Mode, when set, overrides the deployment's ingest mode for this
+	// document alone: "minimal", "toc" or "full". Empty = Pipeline.Mode.
+	Mode string `json:"mode,omitempty"`
+}
+
+// ModeFull is the Payload.Mode value that asks for the full enrichment
+// pipeline (table of contents plus a written summary of every section)
+// whatever the deployment default.
+const ModeFull = "full"
+
+// ValidMode reports whether m is a per-document mode a caller may ask for.
+func ValidMode(m string) bool {
+	switch m {
+	case "", ModeMinimal, ModeTOC, ModeFull:
+		return true
+	}
+	return false
+}
+
+// modeFor is the mode this document is ingested in: its own, if it asked
+// for one, else the deployment's.
+func (p *Pipeline) modeFor(pl Payload) string {
+	if pl.Mode != "" {
+		return pl.Mode
+	}
+	return p.Mode
 }
 
 // Pipeline runs the ingest stages.
@@ -95,6 +121,13 @@ type Pipeline struct {
 	LLM     llmgate.Client
 	Parsers *parser.Registry
 	Logger  *slog.Logger
+
+	// AfterReady, when set, runs once a document has reached ready, off
+	// the ingest job's path. The server uses it to build the document's
+	// pincite layout and page images (HAL-833, HAL-834) so a reader's
+	// first highlight never waits for them; the document is queryable
+	// before it finishes.
+	AfterReady func(ctx context.Context, pl Payload)
 
 	// Mode selects how much work Run does before marking a document
 	// ready. "minimal" collapses ingest to parse → build tree → persist
@@ -385,7 +418,18 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
-	if p.Mode == ModeMinimal || p.Mode == ModeTOC {
+	err := p.run(ctx, pl)
+	if err == nil && p.AfterReady != nil {
+		// Detached from the job's context: the document is already
+		// ready and queryable, and this work must not hold the job open
+		// or be cancelled when it returns.
+		go p.AfterReady(context.WithoutCancel(ctx), pl)
+	}
+	return err
+}
+
+func (p *Pipeline) run(ctx context.Context, pl Payload) error {
+	if m := p.modeFor(pl); m == ModeMinimal || m == ModeTOC {
 		return p.runMinimal(ctx, p.DB, pl)
 	}
 
@@ -751,7 +795,7 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 	// page-based strategy on a TOC synthesised from the section tree.
 	// TOC mode builds the real table of contents first — same builder
 	// and persistence as full mode, non-fatal for the same reason.
-	if p.Mode == ModeTOC && pl.ContentType == "application/pdf" {
+	if p.modeFor(pl) == ModeTOC && pl.ContentType == "application/pdf" {
 		if err := p.runTOCBuilder(ctx, pl.DocumentID, parsed, log); err != nil {
 			log.Warn("ingest: toc-builder failed; falling back to NULL toc_tree", "err", err)
 		}
@@ -759,7 +803,7 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
 		return err
 	}
-	log.Info("ingest: ready (" + p.Mode + " mode)")
+	log.Info("ingest: ready (" + p.modeFor(pl) + " mode)")
 	return nil
 }
 
