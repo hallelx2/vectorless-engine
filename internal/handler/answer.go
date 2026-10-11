@@ -254,7 +254,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		emit("started", map[string]any{
 			"document_id": body.DocumentID,
 			"query":       body.Query,
-			"strategy":    h.strategy.Name(),
+			"strategy":    retrieval.PublicName(h.strategy.Name()),
 		})
 	}
 
@@ -269,7 +269,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	res, err := h.runSelection(r.Context(), strategy, t, body.Query, budget)
 	if err != nil {
 		h.logger.Error("answer: strategy failed", "err", err, "document_id", body.DocumentID)
-		fail(http.StatusInternalServerError, "retrieval failed: "+err.Error())
+		fail(http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 
@@ -289,7 +289,8 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		resp, finalIDs, model, token, err = h.answerFromSections(r.Context(), t, body, res, started)
 	}
 	if err != nil {
-		fail(http.StatusInternalServerError, err.Error())
+		h.logger.Error("answer: generation failed", "err", err, "document_id", body.DocumentID)
+		fail(http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 
@@ -393,7 +394,7 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 		"query":       body.Query,
 		"answer":      answerText,
 		"citations":   citations,
-		"strategy":    h.strategy.Name(),
+		"strategy":    retrieval.PublicName(h.strategy.Name()),
 		"model":       synthModel,
 		"usage":       usageMap(totalUsage),
 		"elapsed_ms":  time.Since(started).Milliseconds(),

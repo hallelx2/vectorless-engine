@@ -58,7 +58,7 @@ func (r *Recorder) Summary(w io.Writer) {
 			failed++
 		}
 	}
-	fmt.Fprintf(w, "\njudge requests %d (failed %d, tokenised by the guard %d, on a reused connection %d)\n", len(ts), failed, counted, reused)
+	_, _ = fmt.Fprintf(w, "\njudge requests %d (failed %d, tokenised by the guard %d, on a reused connection %d)\n", len(ts), failed, counted, reused)
 	for _, row := range []struct {
 		name string
 		ds   []time.Duration
@@ -67,7 +67,7 @@ func (r *Recorder) Summary(w io.Writer) {
 		{"first byte (provider)", pick(func(t typesafe.RequestTrace) time.Duration { return t.FirstByte })},
 		{"total", pick(func(t typesafe.RequestTrace) time.Duration { return t.Total })},
 	} {
-		fmt.Fprintf(w, "  %-22s p50 %7.0fms  p95 %7.0fms  max %7.0fms\n", row.name,
+		_, _ = fmt.Fprintf(w, "  %-22s p50 %7.0fms  p95 %7.0fms  max %7.0fms\n", row.name,
 			ms(pct(row.ds, 0.5)), ms(pct(row.ds, 0.95)), ms(row.ds[len(row.ds)-1]))
 	}
 }

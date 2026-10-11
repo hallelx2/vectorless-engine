@@ -95,7 +95,7 @@ func (h *QueryHandler) resolveStrategy(override string) (retrieval.Strategy, boo
 	if h.strategies == nil {
 		return nil, false
 	}
-	s, ok := h.strategies[override]
+	s, ok := h.strategies[retrieval.InternalName(override)]
 	return s, ok
 }
 
@@ -167,7 +167,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"err", err,
 				"document_id", body.DocumentID,
 			)
-			writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+			writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 			return
 		}
 		ids = result.SelectedIDs
@@ -180,7 +180,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 				"err", err,
 				"document_id", body.DocumentID,
 			)
-			writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
+			writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 			return
 		}
 	}
@@ -217,7 +217,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
-		"strategy":    strategy.Name(),
+		"strategy":    retrieval.PublicName(strategy.Name()),
 		"model":       body.Model,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),

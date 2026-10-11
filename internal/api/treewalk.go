@@ -204,7 +204,7 @@ func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 	res, err := perReq.SelectWithCost(r.Context(), t, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("answer/treewalk: strategy failed", "err", err, "document_id", body.DocumentID)
-		writeErr(w, http.StatusInternalServerError, "treewalk strategy failed: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, retrieval.PublicError(err))
 		return
 	}
 
@@ -215,7 +215,7 @@ func (d Deps) handleAnswerTreeWalk(w http.ResponseWriter, r *http.Request) {
 		"query":       body.Query,
 		"answer":      res.Reasoning, // strategy stores the agent's answer here
 		"citations":   citations,
-		"strategy":    perReq.Name(),
+		"strategy":    retrieval.PublicName(perReq.Name()),
 		"model":       budget.ModelName,
 		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,
@@ -293,7 +293,7 @@ func (d Deps) serveAnswerTreeWalkStream(w http.ResponseWriter, r *http.Request, 
 	emitSSE("started", map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
-		"strategy":    strat.Name(),
+		"strategy":    retrieval.PublicName(strat.Name()),
 		"model":       budget.ModelName,
 	})
 
@@ -309,7 +309,7 @@ func (d Deps) serveAnswerTreeWalkStream(w http.ResponseWriter, r *http.Request, 
 		"query":       body.Query,
 		"answer":      res.Reasoning,
 		"citations":   citations,
-		"strategy":    strat.Name(),
+		"strategy":    retrieval.PublicName(strat.Name()),
 		"model":       budget.ModelName,
 		"confidence":  res.Confidence,
 		"hops_taken":  res.HopsTaken,

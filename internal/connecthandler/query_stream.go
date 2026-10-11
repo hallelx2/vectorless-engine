@@ -73,7 +73,7 @@ func (s *QueryService) QueryStream(
 
 		switch evt.Type {
 		case retrieval.EventStarted:
-			protoEvt.Strategy = ss.Name()
+			protoEvt.Strategy = retrieval.PublicName(ss.Name())
 			protoEvt.DocumentId = msg.DocumentId
 			protoEvt.Query = msg.Query
 

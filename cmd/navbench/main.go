@@ -211,7 +211,9 @@ func main() {
 			report(o)
 			if of != nil {
 				b, _ := json.Marshal(o)
-				of.Write(append(b, '\n'))
+				if _, err := of.Write(append(b, '\n')); err != nil {
+					fmt.Fprintln(os.Stderr, "navbench: write results:", err)
+				}
 			}
 			outMu.Unlock()
 		}(i, q)
