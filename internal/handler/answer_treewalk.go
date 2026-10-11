@@ -32,11 +32,14 @@ import (
 // to the deployed server's multi-tenant model (org + store from
 // headers).
 type AnswerTreeWalkHandler struct {
-	logger     *slog.Logger
-	db         *db.Pool
-	storage    storage.Storage
-	llm        llmgate.Client
-	llmModel   string
+	logger   *slog.Logger
+	db       *db.Pool
+	storage  storage.Storage
+	llm      llmgate.Client
+	llmModel string
+	// llmModelFn, when set, names the default model per request: the
+	// instance's answer model can change at runtime (HAL-2663).
+	llmModelFn func() string
 	answerSpan enginecfg.AnswerSpanBlock
 	replay     retrieval.ReplayStore
 	strategy   *retrieval.TreeWalkStrategy
@@ -165,7 +168,7 @@ func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *h
 
 	budget := retrieval.ContextBudget{ModelName: body.Model}
 	if budget.ModelName == "" {
-		budget.ModelName = h.llmModel
+		budget.ModelName = h.defaultModel()
 	}
 
 	started := time.Now()
@@ -424,7 +427,7 @@ func (h *AnswerTreeWalkHandler) spanExtractor(requestModel string) *retrieval.Sp
 		model = requestModel
 	}
 	if model == "" {
-		model = h.llmModel
+		model = h.defaultModel()
 	}
 	ext := retrieval.NewSpanExtractor(h.llm, model)
 	if h.answerSpan.MaxQuoteLen > 0 {
@@ -495,4 +498,21 @@ func (p scopedTOCProvider) GetTOC(ctx context.Context, docID tree.DocumentID) ([
 		return nil, retrieval.ErrNoTOC
 	}
 	return doc.TOCTree, nil
+}
+
+// WithModelFunc makes the default model follow fn, which wins over the
+// static name whenever it returns one.
+func (h *AnswerTreeWalkHandler) WithModelFunc(fn func() string) *AnswerTreeWalkHandler {
+	h.llmModelFn = fn
+	return h
+}
+
+// defaultModel is the model used when a request names none.
+func (h *AnswerTreeWalkHandler) defaultModel() string {
+	if h.llmModelFn != nil {
+		if m := h.llmModelFn(); m != "" {
+			return m
+		}
+	}
+	return h.llmModel
 }

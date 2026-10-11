@@ -443,6 +443,10 @@ type OpenAIBlock struct {
 	APIKey         string `yaml:"api_key"`
 	Model          string `yaml:"model"`
 	ReasoningModel string `yaml:"reasoning_model"`
+	// BaseURL points the driver at any OpenAI-compatible server —
+	// OpenRouter, Ollama, vLLM, LM Studio, Azure OpenAI. Empty = official
+	// api.openai.com. Required by driver=openai-compatible.
+	BaseURL string `yaml:"base_url"`
 }
 
 // GeminiBlock configures the Gemini provider.
@@ -1311,7 +1315,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.LLM.Driver {
-	case "anthropic", "openai", "gemini":
+	case "anthropic", "openai", "gemini", "openai-compatible":
 		// API keys are checked lazily at first call so the engine can boot
 		// in dev without all providers configured.
 	default:

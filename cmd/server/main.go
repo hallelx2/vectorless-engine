@@ -39,6 +39,7 @@ import (
 
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
+	"github.com/hallelx2/vectorless-engine/pkg/models"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
@@ -142,22 +143,45 @@ func run() error {
 	}
 	defer func() { _ = q.Close() }() // best-effort close
 
-	// ── LLM + retrieval strategy ──────────────────────────────────
-	llmClient, err := buildLLM(cfg.Engine.LLM)
-	if err != nil {
-		return fmt.Errorf("init llm: %w", err)
-	}
-	llmClient = limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(llmClient)
-	judge, err := buildJudge(cfg.Engine.LLM.Judge, newLimiter("judge", cfg.Engine.LLM.Concurrency, logger), logger)
-	if err != nil {
-		logger.Error("judge: config invalid", "err", err)
-		os.Exit(1)
-	}
-	if judge != nil {
-		logger.Info("judge: typesafe enabled — TOC stage and judgewalk retrieval run on the Judge")
+	// ── Models (HAL-2663) ─────────────────────────────────────────
+	// Model providers come from the environment and from the dashboard
+	// (Settings → Model providers), sealed in instance_settings. The
+	// engine holds the registry's proxies: a change applies on the next
+	// call, on every replica, with no restart. With no key at all the
+	// engine still boots; calls that need a model fail with a typed
+	// "model keys not configured" error instead.
+	var cipher *models.Cipher
+	if cfg.Models.EncryptionKey != "" {
+		c, err := models.NewCipher(cfg.Models.EncryptionKey)
+		if err != nil {
+			return fmt.Errorf("models: %w", err)
+		}
+		cipher = c
 	} else {
-		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page (set TYPESAFE_API_KEY)")
+		logger.Warn("models: no VLE_ENCRYPTION_KEY — provider keys can come only from the environment; the dashboard cannot store any")
 	}
+	judgeLimiter := newLimiter("judge", cfg.Engine.LLM.Concurrency, logger)
+	registry := models.New(models.Options{
+		Env:    envModelSettings(cfg),
+		Store:  models.DBStore{Pool: pool},
+		Cipher: cipher,
+		BuildJudge: func(js models.JudgeSettings) (llmgate.Judge, error) {
+			return buildJudge(js, judgeLimiter, logger)
+		},
+		Logger: logger,
+	})
+	if err := registry.Reload(ctx); err != nil {
+		logger.Error("models: stored settings unreadable; using the environment's providers", "err", err)
+	}
+	go registry.Watch(ctx, time.Duration(cfg.Models.ReloadSeconds)*time.Second)
+	logModelStatus(logger, registry.Status())
+
+	// ── LLM + retrieval strategy ──────────────────────────────────
+	llmClient := limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(registry.Client())
+	// judge is always the registry's proxy. Code that takes a different
+	// path without a Judge resolves it per job or request through
+	// models.ActiveJudge; judgewalk falls back to treewalk.
+	judge := registry.Judge()
 	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, judge, store, pool)
 
 	// Wrap with caching if enabled in engine config.
@@ -327,6 +351,8 @@ func run() error {
 			Strategies:       strategies,
 			LLM:              llmClient,
 			LLMModel:         modelFor(cfg.Engine.LLM),
+			LLMModelFunc:     registry.AnswerModel,
+			Models:           registry,
 			AnswerSpan:       cfg.Engine.Retrieval.AnswerSpan,
 			Answer:           cfg.Engine.Retrieval.Answer,
 			Replay:           replayStore,
@@ -465,11 +491,6 @@ func modelFor(c enginecfg.LLMConfig) string {
 	return ""
 }
 
-// buildJudge returns the configured Judge, or nil when llm.judge has
-// no API key. Retries share the same schedule as every other provider
-// call; a Judge request that fails past them is handled by the TOC
-// builder, which keeps extraction's pages rather than degrading
-// silently (HAL-1369).
 // newLimiter builds one adaptive limiter for a provider and logs every
 // change it makes: a throttled run must be visible, never silent.
 func newLimiter(name string, c enginecfg.ConcurrencyBlock, logger *slog.Logger) *limit.Limiter {
@@ -486,14 +507,19 @@ func newLimiter(name string, c enginecfg.ConcurrencyBlock, logger *slog.Logger) 
 	})
 }
 
-func buildJudge(c enginecfg.JudgeBlock, lim *limit.Limiter, logger *slog.Logger) (llmgate.Judge, error) {
-	if c.TypeSafe.APIKey == "" {
-		return nil, nil
+// buildJudge builds the Judge from settings, wrapped in the shared
+// limiter and retries. Retries share the same schedule as every other
+// provider call; a Judge request that fails past them is handled by the
+// TOC builder, which keeps extraction's pages rather than degrading
+// silently (HAL-1369). The registry calls it again on every change.
+func buildJudge(c models.JudgeSettings, lim *limit.Limiter, logger *slog.Logger) (llmgate.Judge, error) {
+	if c.APIKey == "" {
+		return nil, errors.New("no TypeSafe API key")
 	}
 	j, err := typesafe.New(typesafe.Config{
-		APIKey:    c.TypeSafe.APIKey,
-		BaseURL:   c.TypeSafe.BaseURL,
-		Model:     c.TypeSafe.Model,
+		APIKey:    c.APIKey,
+		BaseURL:   c.BaseURL,
+		Model:     c.Model,
 		OnRequest: judgeRequestLogger(logger),
 	})
 	if err != nil {
@@ -542,6 +568,59 @@ func judgeRequestLogger(logger *slog.Logger) func(typesafe.RequestTrace) {
 	}
 }
 
+// envModelSettings is what the environment and config file configure:
+// the generative driver when its key is set, and the Judge when its key
+// is set. The dashboard's settings win over these when present.
+func envModelSettings(cfg config.Config) models.Settings {
+	var out models.Settings
+	l := cfg.Engine.LLM
+	var g *models.Generative
+	switch l.Driver {
+	case "anthropic":
+		if l.Anthropic.APIKey != "" {
+			g = &models.Generative{Provider: models.ProviderAnthropic, APIKey: l.Anthropic.APIKey, BaseURL: l.Anthropic.BaseURL, IngestModel: l.Anthropic.Model}
+		}
+	case "openai":
+		if l.OpenAI.APIKey != "" {
+			g = &models.Generative{Provider: models.ProviderOpenAI, APIKey: l.OpenAI.APIKey, BaseURL: l.OpenAI.BaseURL, IngestModel: l.OpenAI.Model}
+		}
+	case "openai-compatible":
+		if l.OpenAI.BaseURL != "" {
+			g = &models.Generative{Provider: models.ProviderOpenAICompatible, APIKey: l.OpenAI.APIKey, BaseURL: l.OpenAI.BaseURL, IngestModel: l.OpenAI.Model}
+		}
+	case "gemini":
+		if l.Gemini.APIKey != "" {
+			g = &models.Generative{Provider: models.ProviderGemini, APIKey: l.Gemini.APIKey, IngestModel: l.Gemini.Model}
+		}
+	}
+	if g != nil {
+		g.AnswerModel = cfg.Models.AnswerModel
+		out.Generative = g
+	}
+	if ts := l.Judge.TypeSafe; ts.APIKey != "" {
+		out.Judge = &models.JudgeSettings{APIKey: ts.APIKey, BaseURL: ts.BaseURL, Model: ts.Model}
+	}
+	return out
+}
+
+// logModelStatus says at boot which providers are in effect and where
+// they came from — never a key.
+func logModelStatus(logger *slog.Logger, st models.Status) {
+	if st.Generative.Configured {
+		logger.Info("models: generative provider ready",
+			"source", st.Generative.Source, "provider", st.Generative.Provider,
+			"ingest_model", st.Generative.IngestModel, "answer_model", st.Generative.AnswerModel)
+	} else {
+		logger.Warn("models: no generative provider configured — the engine is up; ingest and queries answer 503 models_not_configured until an administrator adds one in Settings → Model providers",
+			"error", st.Generative.Error)
+	}
+	if st.Judge.Configured {
+		logger.Info("judge: typesafe enabled — TOC stage and judgewalk retrieval run on the Judge", "source", st.Judge.Source)
+	} else {
+		logger.Warn("judge: none configured — TOC judgements run on the generative driver, one call per page; pincites are chosen lexically", "error", st.Judge.Error)
+	}
+}
+
 func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 	switch c.Driver {
 	case "anthropic":
@@ -556,6 +635,7 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 			APIKey:         c.OpenAI.APIKey,
 			Model:          c.OpenAI.Model,
 			ReasoningModel: c.OpenAI.ReasoningModel,
+			BaseURL:        c.OpenAI.BaseURL,
 		})
 	case "gemini":
 		return gemini.New(gemini.Config{
@@ -614,7 +694,8 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, judge llm
 			return buildTreeWalkStrategy(c, client, store, pool)
 		}
 		// The Judge's provider refusing service (no credit, a rejected key,
-		// an outage) falls back to treewalk instead of failing every query.
+		// an outage) or no Judge being configured right now falls back to
+		// treewalk instead of failing every query.
 		return retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(judge, store, pool),
 			buildTreeWalkStrategy(c, client, store, pool), nil)
 	case "single-pass":

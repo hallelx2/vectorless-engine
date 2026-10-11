@@ -10,6 +10,7 @@ import (
 
 	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
+	"github.com/hallelx2/vectorless-engine/pkg/models"
 	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/queue"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
@@ -79,6 +80,16 @@ type Deps struct {
 	// BYOK builds a client on a caller's own model key for the answer
 	// step (X-LLM-* headers). Nil refuses such requests with 501.
 	BYOK LLMFactory
+
+	// LLMModelFunc names the default answer model per request, so a
+	// model chosen in the dashboard applies without a restart. Wins over
+	// LLMModel whenever it returns a name.
+	LLMModelFunc func() string
+
+	// Models is the instance's model registry (HAL-2663). When set, the
+	// admin API at /admin/v1/models manages it, and routes that need a
+	// model answer 503 models_not_configured while none is configured.
+	Models *models.Registry
 }
 
 // Router builds the chi router with all v1 routes and the full
@@ -159,10 +170,10 @@ func Router(d Deps) http.Handler {
 	queryStream := NewQueryStreamHandler(d.Logger, d.DB, d.Storage, d.Strategy)
 	queryMulti := NewQueryMultiHandler(d.Logger, d.Storage, d.Strategy, d.MultiDoc)
 	queryStreamMulti := NewQueryStreamMultiHandler(d.Logger, d.Storage, d.MultiDoc)
-	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay).WithPincites(d.Judge, d.Pincites).WithBYOK(d.BYOK)
-	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk)
+	answer := NewAnswerHandler(d.Logger, d.DB, d.Storage, d.Strategy, d.LLM, d.LLMModel, d.AnswerSpan, d.Answer, d.Replay).WithPincites(d.Judge, d.Pincites).WithBYOK(d.BYOK).WithModelFunc(d.LLMModelFunc)
+	answerTreeWalk := NewAnswerTreeWalkHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel, d.AnswerSpan, d.Replay, d.TreeWalkStrategy, d.TreeWalk).WithModelFunc(d.LLMModelFunc)
 	answerTreeWalk.pincites = d.Pincites
-	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel)
+	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel).WithModelFunc(d.LLMModelFunc)
 	answerStore.pincites = d.Pincites
 	pages := NewPincitesHandler(d.Logger, d.DB, d.Pincites)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
@@ -179,9 +190,14 @@ func Router(d Deps) http.Handler {
 	docsPath, docsHandler := vectorlessv1connect.NewDocumentsServiceHandler(connectDocs)
 	queryPath, queryHandler := vectorlessv1connect.NewQueryServiceHandler(connectQuery)
 
+	// needsModel answers 503 models_not_configured on routes that cannot
+	// work without a generative model while none is configured.
+	needsModel := RequireModels(d.Models)
+	needsModelForIngest := RequireModelsForIngest(d.Models, d.Config.Engine.Ingest.Mode)
+
 	r.Mount(healthPath, healthHandler)
-	r.Mount(docsPath, docsHandler)
-	r.Mount(queryPath, queryHandler)
+	r.Mount(docsPath, needsModelForIngest(docsHandler))
+	r.Mount(queryPath, needsModel(queryHandler))
 
 	// ── REST Routes (kept for backward compat + curl-friendliness) ─
 
@@ -198,7 +214,7 @@ func Router(d Deps) http.Handler {
 		// Documents
 		r.Route("/documents", func(r chi.Router) {
 			r.Get("/", docs.HandleListDocuments)
-			r.Post("/", docs.HandleIngestDocument)
+			r.With(needsModelForIngest).Post("/", docs.HandleIngestDocument)
 			r.Get("/{id}", docs.HandleGetDocument)
 			r.Delete("/{id}", docs.HandleDeleteDocument)
 			r.Get("/{id}/tree", docs.HandleGetTree)
@@ -218,6 +234,7 @@ func Router(d Deps) http.Handler {
 
 		// Query
 		r.Route("/query", func(r chi.Router) {
+			r.Use(needsModel)
 			r.Post("/", query.HandleQuery)
 			r.Post("/stream", queryStream.HandleQueryStream)
 			r.Post("/multi", queryMulti.HandleQueryMulti)
@@ -227,12 +244,28 @@ func Router(d Deps) http.Handler {
 		// Answer: retrieval + synthesis in one round-trip. /answer
 		// uses the configured selection strategy; /answer/treewalk
 		// runs the page-based agentic loop end-to-end.
-		r.Post("/answer", answer.HandleAnswer)
-		r.Post("/answer/treewalk", answerTreeWalk.HandleAnswerTreeWalk)
+		r.With(needsModel).Post("/answer", answer.HandleAnswer)
+		r.With(needsModel).Post("/answer/treewalk", answerTreeWalk.HandleAnswerTreeWalk)
 		// Store answer: map-reduce a question across many documents into
 		// ONE synthesised answer with per-document citations.
-		r.Post("/answer/store", answerStore.HandleAnswerStore)
+		r.With(needsModel).Post("/answer/store", answerStore.HandleAnswerStore)
+
+		// Which model providers are in effect, for any authenticated
+		// caller: the dashboard's setup banner reads it. No keys.
+		r.Get("/models/status", ModelsStatusHandler(d.Models))
 	})
+
+	// Admin: the instance's model providers (HAL-2663). Only a caller
+	// holding the engine token — the control plane — may use it.
+	if d.Models != nil {
+		admin := NewAdminModelsHandler(d.Logger, d.Models)
+		r.Route("/admin/v1/models", func(r chi.Router) {
+			r.Use(RequireEngineToken)
+			r.Get("/", admin.HandleGet)
+			r.Put("/", admin.HandlePut)
+			r.Post("/test", admin.HandleTest)
+		})
+	}
 
 	// Internal: queue webhook (QStash).
 	r.Post("/internal/jobs/{kind}", webhook.HandleQueueWebhook)

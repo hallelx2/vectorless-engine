@@ -53,6 +53,27 @@ type Config struct {
 
 	// Governance configures request size limits and timeouts.
 	Governance GovernanceConfig `yaml:"governance"`
+
+	// Models configures model providers entered in the dashboard.
+	Models ModelsConfig `yaml:"models"`
+}
+
+// ModelsConfig configures instance-level model providers (HAL-2663).
+type ModelsConfig struct {
+	// EncryptionKey seals provider keys stored in the database
+	// (AES-256-GCM). 32 bytes as base64 or hex, or a passphrase of at
+	// least 32 characters. Empty: keys can come only from the
+	// environment, and the admin API refuses to store any.
+	EncryptionKey string `yaml:"encryption_key"`
+
+	// ReloadSeconds is how often each replica checks the stored settings
+	// for a change made elsewhere. A change made through this replica's
+	// admin API applies immediately. Default 10; 0 disables polling.
+	ReloadSeconds int `yaml:"reload_seconds"`
+
+	// AnswerModel is the environment's answer model, used when the
+	// dashboard has not set one. Empty uses the driver's model.
+	AnswerModel string `yaml:"answer_model"`
 }
 
 // ServerConfig configures the HTTP server.
@@ -187,6 +208,7 @@ func Default() Config {
 		Auth: AuthConfig{
 			Mode: "none",
 		},
+		Models: ModelsConfig{ReloadSeconds: 10},
 		Metrics: MetricsConfig{
 			Enabled: true,
 		},
@@ -302,13 +324,13 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_LOG_LEVEL", "VLE_LOG_LEVEL"); v != "" {
 		c.Engine.Log.Level = v
 	}
-	if v := firstEnv("VLS_ANTHROPIC_API_KEY", "VLE_ANTHROPIC_API_KEY"); v != "" {
+	if v := firstEnv("VLS_ANTHROPIC_API_KEY", "VLE_ANTHROPIC_API_KEY", "VLS_LLM_ANTHROPIC_API_KEY", "VLE_LLM_ANTHROPIC_API_KEY"); v != "" {
 		c.Engine.LLM.Anthropic.APIKey = v
 	}
-	if v := firstEnv("VLS_OPENAI_API_KEY", "VLE_OPENAI_API_KEY"); v != "" {
+	if v := firstEnv("VLS_OPENAI_API_KEY", "VLE_OPENAI_API_KEY", "VLS_LLM_OPENAI_API_KEY", "VLE_LLM_OPENAI_API_KEY"); v != "" {
 		c.Engine.LLM.OpenAI.APIKey = v
 	}
-	if v := firstEnv("VLS_GEMINI_API_KEY", "VLE_GEMINI_API_KEY"); v != "" {
+	if v := firstEnv("VLS_GEMINI_API_KEY", "VLE_GEMINI_API_KEY", "VLS_LLM_GEMINI_API_KEY", "VLE_LLM_GEMINI_API_KEY"); v != "" {
 		c.Engine.LLM.Gemini.APIKey = v
 	}
 	if v := firstEnv("VLS_STORAGE_DRIVER", "VLE_STORAGE_DRIVER"); v != "" {
@@ -367,6 +389,30 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := firstEnv("VLS_TYPESAFE_MODEL", "VLE_TYPESAFE_MODEL", "TYPESAFE_MODEL"); v != "" {
 		c.Engine.LLM.Judge.TypeSafe.Model = v
+	}
+	// OpenAI-compatible servers and per-driver models, so every
+	// provider the dashboard offers can also be configured from the
+	// environment alone.
+	if v := firstEnv("VLS_LLM_OPENAI_BASE_URL", "VLE_LLM_OPENAI_BASE_URL"); v != "" {
+		c.Engine.LLM.OpenAI.BaseURL = v
+	}
+	if v := firstEnv("VLS_LLM_OPENAI_MODEL", "VLE_LLM_OPENAI_MODEL"); v != "" {
+		c.Engine.LLM.OpenAI.Model = v
+	}
+	if v := firstEnv("VLS_LLM_GEMINI_MODEL", "VLE_LLM_GEMINI_MODEL"); v != "" {
+		c.Engine.LLM.Gemini.Model = v
+	}
+	if v := firstEnv("VLS_LLM_ANSWER_MODEL", "VLE_LLM_ANSWER_MODEL"); v != "" {
+		c.Models.AnswerModel = v
+	}
+	// Instance encryption key for provider keys entered in the dashboard.
+	if v := firstEnv("VLS_ENCRYPTION_KEY", "VLE_ENCRYPTION_KEY"); v != "" {
+		c.Models.EncryptionKey = v
+	}
+	if v := firstEnv("VLS_MODELS_RELOAD_SECONDS", "VLE_MODELS_RELOAD_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Models.ReloadSeconds = n
+		}
 	}
 	// Retrieval strategy, so a deployment can switch to judgewalk
 	// without a config edit.

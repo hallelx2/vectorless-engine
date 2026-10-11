@@ -20,6 +20,8 @@
 package ingest
 
 import (
+	"github.com/hallelx2/vectorless-engine/pkg/models"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -576,18 +578,22 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 	if model == "" {
 		model = p.SummaryModel
 	}
+	// Resolve the Judge once for this document: an instance whose Judge
+	// is configured in the dashboard may gain or lose it at any moment,
+	// and one ingest must take one path (HAL-2663).
+	judge := models.ActiveJudge(p.Judge)
 	builder := &TOCBuilder{
 		LLM:            p.LLM,
 		Model:          model,
 		Concurrency:    p.TOCConcurrency,
 		TOCCheckPages:  p.TOCCheckPages,
 		LLMCallTimeout: p.LLMCallTimeout,
-		Judge:          p.Judge,
+		Judge:          judge,
 		JudgeThreshold: p.JudgeThreshold,
 		// The minimum-context path: prefilter, truncation, two-stage
 		// scan. Measured on FinanceBench as the fastest detection that
 		// lost nothing (HAL-1366).
-		MinimalContext: p.Judge != nil,
+		MinimalContext: judge != nil,
 	}
 	pr := progressFrom(ctx)
 	pr.Start(ctx, stageContents)
@@ -609,7 +615,7 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		"llm_calls", usage.LLMCalls,
 		"input_tokens", usage.InputTokens,
 		"output_tokens", usage.OutputTokens,
-		"judge", p.Judge != nil,
+		"judge", judge != nil,
 		"phases", usage.PhaseSummary(),
 	)
 	// A degraded build is not a failed one, but it is not what was

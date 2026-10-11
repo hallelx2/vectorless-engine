@@ -50,6 +50,9 @@ type AnswerStoreHandler struct {
 	storage  storage.Storage
 	llm      llmgate.Client
 	llmModel string
+	// llmModelFn, when set, names the default model per request: the
+	// instance's answer model can change at runtime (HAL-2663).
+	llmModelFn func() string
 
 	// pincites places each citation's quote on its page. Nil leaves
 	// citations without regions.
@@ -159,7 +162,7 @@ func (h *AnswerStoreHandler) HandleAnswerStore(w http.ResponseWriter, r *http.Re
 	}
 	model := body.Model
 	if model == "" {
-		model = h.llmModel
+		model = h.defaultModel()
 	}
 
 	started := time.Now()
@@ -639,4 +642,21 @@ func usageMap(u retrieval.Usage) map[string]any {
 		"cost_usd":      u.CostUSD,
 		"llm_calls":     u.LLMCalls,
 	}
+}
+
+// WithModelFunc makes the default model follow fn, which wins over the
+// static name whenever it returns one.
+func (h *AnswerStoreHandler) WithModelFunc(fn func() string) *AnswerStoreHandler {
+	h.llmModelFn = fn
+	return h
+}
+
+// defaultModel is the model used when a request names none.
+func (h *AnswerStoreHandler) defaultModel() string {
+	if h.llmModelFn != nil {
+		if m := h.llmModelFn(); m != "" {
+			return m
+		}
+	}
+	return h.llmModel
 }

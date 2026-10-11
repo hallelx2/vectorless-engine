@@ -33,12 +33,15 @@ import (
 // X-Vectorless-Org / X-Vectorless-Store headers rather than the
 // standalone nil-UUID org.
 type AnswerHandler struct {
-	logger     *slog.Logger
-	db         *db.Pool
-	storage    storage.Storage
-	strategy   retrieval.Strategy
-	llm        llmgate.Client
-	llmModel   string
+	logger   *slog.Logger
+	db       *db.Pool
+	storage  storage.Storage
+	strategy retrieval.Strategy
+	llm      llmgate.Client
+	llmModel string
+	// llmModelFn, when set, names the default model per request: the
+	// instance's answer model can change at runtime (HAL-2663).
+	llmModelFn func() string
 	answerSpan enginecfg.AnswerSpanBlock
 	answer     enginecfg.AnswerBlock
 	replay     retrieval.ReplayStore
@@ -409,7 +412,7 @@ func (h *AnswerHandler) synthModel(requestModel string) string {
 		m = requestModel
 	}
 	if m == "" {
-		m = h.llmModel
+		m = h.defaultModel()
 	}
 	return m
 }
@@ -454,7 +457,7 @@ func (h *AnswerHandler) spanExtractor(requestModel string) *retrieval.SpanExtrac
 		model = requestModel
 	}
 	if model == "" {
-		model = h.llmModel
+		model = h.defaultModel()
 	}
 	ext := retrieval.NewSpanExtractor(h.llm, model)
 	if h.answerSpan.MaxQuoteLen > 0 {
@@ -561,4 +564,21 @@ func synthesiseAnswer(ctx context.Context, client llmgate.Client, model, query s
 		CostUSD:      resp.Usage.CostUSD,
 		LLMCalls:     1,
 	}, nil
+}
+
+// WithModelFunc makes the default model follow fn, which wins over the
+// static name whenever it returns one.
+func (h *AnswerHandler) WithModelFunc(fn func() string) *AnswerHandler {
+	h.llmModelFn = fn
+	return h
+}
+
+// defaultModel is the model used when a request names none.
+func (h *AnswerHandler) defaultModel() string {
+	if h.llmModelFn != nil {
+		if m := h.llmModelFn(); m != "" {
+			return m
+		}
+	}
+	return h.llmModel
 }

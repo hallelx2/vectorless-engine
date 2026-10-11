@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"github.com/hallelx2/vectorless-engine/pkg/models"
+
 	"context"
 	"errors"
 	"fmt"
@@ -110,7 +112,7 @@ func (h *AnswerHandler) answerFromPages(
 		claims[i] = pincite.Claim{Claim: m.Claim, Candidates: cands}
 	}
 	chooseStart := time.Now()
-	choices, judgeUsage, jerr := pincite.Choose(ctx, h.judge, claims)
+	choices, judgeUsage, jerr := pincite.Choose(ctx, models.ActiveJudge(h.judge), claims)
 	if jerr != nil {
 		h.logger.Warn("answer: judge could not choose pincite sentences; chose lexically", "err", jerr)
 	}
