@@ -360,7 +360,7 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 				continue
 			}
 			var i int
-			fmt.Sscanf(qk, "h_%d", &i)
+			_, _ = fmt.Sscanf(qk, "h_%d", &i) // a malformed key leaves i at its zero value, as before
 			prob[i] = p
 		}
 	}

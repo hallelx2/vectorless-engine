@@ -1,0 +1,21 @@
+# CI run by Lorx's engine: `bit run --all` on a machine, or a Lorx runner on push.
+# GitHub Actions on this account cannot start jobs (HAL-1712), so this is the merge gate.
+# Every top-level key is a job; a bare string is its one command.
+
+fmt: 'test -z "$(gofmt -l . | grep -v ^vendor/)"'
+
+vet: go vet ./...
+
+build:
+  needs: [fmt]
+  run: go build ./...
+
+lint:
+  needs: [build]
+  run: golangci-lint run ./...
+  timeout: 15m
+
+test:
+  needs: [vet, build]
+  run: go test ./...
+  timeout: 30m

@@ -115,7 +115,7 @@ func Choose(ctx context.Context, judge llmgate.Judge, claims []Claim) ([]Choice,
 	usage = res.Usage
 	for key := range questions {
 		var i int
-		fmt.Sscanf(key, "c_%d", &i)
+		_, _ = fmt.Sscanf(key, "c_%d", &i)
 		ans, aerr := res.Choice(key)
 		if aerr != nil {
 			out[i] = lexical(i)

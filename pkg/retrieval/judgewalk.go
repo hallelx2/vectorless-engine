@@ -389,7 +389,7 @@ func (n *JudgeNavigator) RankLeaves(ctx context.Context, query string, leaves []
 					continue
 				}
 				var i int
-				fmt.Sscanf(qk, "l_%d", &i)
+				_, _ = fmt.Sscanf(qk, "l_%d", &i) // a malformed key leaves i at its zero value, as before
 				scores[i].P = p
 			}
 		}(b)
@@ -507,7 +507,7 @@ func (n *JudgeNavigator) rankPages(ctx context.Context, query string, pages []Na
 					continue
 				}
 				var i int
-				fmt.Sscanf(qk, "p_%d", &i)
+				_, _ = fmt.Sscanf(qk, "p_%d", &i)
 				scores[i].P = p
 			}
 		}(b)
@@ -806,7 +806,7 @@ func referencedLeaves(text string, leaves []NavLeaf) []NavLeaf {
 			// "Note 21. Legal Proceedings", "NOTE 21 — …", "Item 1A."
 			if strings.HasPrefix(t, key) {
 				rest := t[len(key):]
-				if rest == "" || !(rest[0] >= '0' && rest[0] <= '9') && !(rest[0] >= 'a' && rest[0] <= 'z') {
+				if rest == "" || (rest[0] < '0' || rest[0] > '9') && (rest[0] < 'a' || rest[0] > 'z') {
 					out = append(out, l)
 					break
 				}

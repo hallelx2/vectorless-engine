@@ -70,7 +70,7 @@ func (p Poppler) RenderPages(ctx context.Context, pdf []byte, from, to int, emit
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	in := filepath.Join(dir, "in.pdf")
 	if err := os.WriteFile(in, pdf, 0o600); err != nil {
 		return err
