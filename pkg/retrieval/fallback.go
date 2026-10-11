@@ -45,6 +45,12 @@ func (f *FallbackStrategy) Name() string { return f.Primary.Name() }
 // ProviderUnavailable reports whether err is a model provider refusing
 // service, as opposed to a problem with the request itself.
 func ProviderUnavailable(err error) bool {
+	// A provider that is not configured at all (no key entered yet) is
+	// unavailable in the same sense: the request itself is fine.
+	var mu interface{ ModelUnavailable() bool }
+	if errors.As(err, &mu) && mu.ModelUnavailable() {
+		return true
+	}
 	var le *llmgate.LLMError
 	if !errors.As(err, &le) {
 		return false
@@ -63,6 +69,13 @@ func ProviderUnavailable(err error) bool {
 }
 
 func (f *FallbackStrategy) fellBack(ctx context.Context, err error) {
+	// No Judge configured is a setting, not an incident: say so quietly.
+	var nc interface{ NotConfigured() bool }
+	if errors.As(err, &nc) && nc.NotConfigured() {
+		f.Logger.DebugContext(ctx, "retrieval: primary not configured; using fallback",
+			"primary", f.Primary.Name(), "fallback", f.Fallback.Name())
+		return
+	}
 	var le *llmgate.LLMError
 	status := 0
 	if errors.As(err, &le) {
@@ -115,6 +128,10 @@ func selectWithCost(ctx context.Context, s Strategy, t *tree.Tree, query string,
 // provider's name, status and billing text stay in our logs: they are not
 // the customer's business, and they name a supplier.
 func PublicError(err error) string {
+	var nc interface{ NotConfigured() bool }
+	if errors.As(err, &nc) && nc.NotConfigured() {
+		return err.Error()
+	}
 	if ProviderUnavailable(err) {
 		return "retrieval is temporarily unavailable; please retry shortly"
 	}

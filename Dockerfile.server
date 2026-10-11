@@ -22,7 +22,8 @@ COPY internal/ ./internal/
 COPY gen/      ./gen/
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build \
       -trimpath \
       -ldflags="-s -w -X main.version=${VERSION}" \
@@ -46,6 +47,11 @@ RUN apk add --no-cache ca-certificates poppler-utils \
 # use and panics if it cannot: with no home directory, every PDF ingest
 # failed with "mkdir /home/nonroot: permission denied".
 ENV HOME=/home/nonroot
+
+# /data is where a self-hosted engine keeps documents with the local
+# storage driver. Created here, owned by nonroot, so a named volume
+# mounted on it starts writable (Docker copies the ownership).
+RUN mkdir -p /data/documents && chown -R nonroot:nonroot /data
 
 COPY --from=build /bin/vectorless-server /vectorless-server
 
