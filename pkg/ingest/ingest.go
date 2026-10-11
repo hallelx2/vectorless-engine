@@ -50,6 +50,14 @@ import (
 // and table extraction. Any other value runs the full pipeline.
 const ModeMinimal = "minimal"
 
+// ModeTOC is parse → build tree → table of contents → persist → ready:
+// the page-based pipeline and nothing else. On a Judge the TOC stage is
+// three requests and seconds; the per-section generative enrichment
+// (summarize, HyDE, multi-axis) that full mode adds is minutes and is
+// not used by page-based retrieval. Table extraction is skipped as in
+// minimal mode: the page text still carries the tables' text.
+const ModeTOC = "toc"
+
 // docPersister is the narrow slice of *db.Pool the parse → persist →
 // ready path depends on. Declaring it here (rather than threading the
 // concrete *db.Pool) lets the minimal-mode runner be exercised with a
@@ -377,7 +385,7 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
-	if p.Mode == ModeMinimal {
+	if p.Mode == ModeMinimal || p.Mode == ModeTOC {
 		return p.runMinimal(ctx, p.DB, pl)
 	}
 
@@ -730,13 +738,20 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 		return err
 	}
 
-	// Skip summarize / HyDE / multi-axis / TOC entirely — flip straight
-	// to ready. The document is now queryable via the page-based
-	// strategy (synthesised TOC + raw page reads).
+	// Minimal mode skips summarize / HyDE / multi-axis / TOC entirely
+	// and flips straight to ready; the document is queryable via the
+	// page-based strategy on a TOC synthesised from the section tree.
+	// TOC mode builds the real table of contents first — same builder
+	// and persistence as full mode, non-fatal for the same reason.
+	if p.Mode == ModeTOC && pl.ContentType == "application/pdf" {
+		if err := p.runTOCBuilder(ctx, pl.DocumentID, parsed, log); err != nil {
+			log.Warn("ingest: toc-builder failed; falling back to NULL toc_tree", "err", err)
+		}
+	}
 	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusReady, ""); err != nil {
 		return err
 	}
-	log.Info("ingest: ready (minimal mode)")
+	log.Info("ingest: ready (" + p.Mode + " mode)")
 	return nil
 }
 

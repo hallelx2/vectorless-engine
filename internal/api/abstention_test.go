@@ -198,7 +198,7 @@ func TestRespondAbstained(t *testing.T) {
 	confidences := map[tree.SectionID]float64{"sec_a": 0.12, "sec_b": 0.30}
 
 	rec := httptest.NewRecorder()
-	d.respondAbstained(rec, tree.DocumentID("doc_x"), "what is x?", confidences, nil)
+	d.respondAbstained(rec, tree.DocumentID("doc_x"), "what is x?", "", confidences, nil, retrieval.Usage{})
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -279,7 +279,7 @@ func TestRespondAbstainedTraceTokenAbsent(t *testing.T) {
 		Abstain:  config.AbstainBlock{Enabled: true, Below: 0.4},
 	}
 	rec := httptest.NewRecorder()
-	d.respondAbstained(rec, tree.DocumentID("doc_x"), "q", map[tree.SectionID]float64{"a": 0.1}, nil)
+	d.respondAbstained(rec, tree.DocumentID("doc_x"), "q", "", map[tree.SectionID]float64{"a": 0.1}, nil, retrieval.Usage{})
 
 	var body map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)

@@ -362,6 +362,13 @@ ingest:
   #            summary-dependent strategies (chunked-tree, agentic)
   #            degrade to titles + raw content with no summaries.
   #
+  #   toc      parse -> build tree -> table of contents -> persist ->
+  #            ready. The page-based pipeline and nothing else: on a
+  #            Judge the TOC stage is three requests and seconds, and
+  #            page-based retrieval (treewalk, judgewalk) needs none of
+  #            the per-section enrichment. Table extraction skipped as
+  #            in minimal. The mode the FinanceBench evaluations use.
+  #
   # Override per-process with VLE_INGEST_MODE; on the deployed
   # vectorless-server use VLS_INGEST_MODE=minimal (no secret edit needed).
   mode: "full"
