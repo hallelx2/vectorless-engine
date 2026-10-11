@@ -98,6 +98,13 @@ type Result struct {
 	// 102-104 leaves a concrete page footprint behind.
 	PagesRead []PageReadEntry `json:"pages_read,omitempty"`
 
+	// EvidencePages are the pages a page-based strategy judged to hold
+	// the answer, with their text — the unit such a strategy actually
+	// found, returned as-is rather than mapped back to sections whose
+	// page attribution may be wrong (HAL-1390). Empty for section-based
+	// strategies.
+	EvidencePages []EvidencePage `json:"evidence_pages,omitempty"`
+
 	// CitedPages is the FINAL set of page ranges the answer commits
 	// to — the model's cited_pages after dedup and the confidence cap,
 	// NOT every page it read (that is PagesRead). Page-based strategies
@@ -115,6 +122,14 @@ type Result struct {
 	// must not abstain on a zero here. Per-pick confidence for section
 	// strategies still lives in Confidences.
 	Confidence float64 `json:"confidence,omitempty"`
+}
+
+// EvidencePage is one page a page-based strategy returns as evidence.
+type EvidencePage struct {
+	Page       int     `json:"page"`
+	Title      string  `json:"title,omitempty"` // the section the page belongs to
+	Text       string  `json:"text"`
+	Confidence float64 `json:"confidence"`
 }
 
 // PageReadEntry is one get_pages tool call that materialised during a

@@ -62,6 +62,37 @@ Two sources, in order of trust, both "select, don't generate":
   Operations" to "Contingent Obligations"; its Item 8 became the six
   statements and twenty-one notes.
 
+## Recursive splitting: a negative result (2026-09-25)
+
+The splitter ran once over the leaves the contents pass produced, so a
+70-page Item 8 split into its notes and a 28-page Note 1 with its own
+headings stayed whole. Making it descend through each generation —
+same two sources, same per-leaf Judge confirmation, depth-capped —
+was built, tested, and measured against the single-pass trees:
+
+| | one generation | recursive |
+|---|---|---|
+| leaves per filing, median | 69 | 72 |
+| median leaf span | 1 p | 1 p |
+| leaf span, p90 | 7 p | 9 p |
+| max tree depth | 3 | 4 |
+| gold pages inside a leaf | 47 / 47 | 47 / 47 |
+| span of the leaf holding a gold page, median | **5 p** | 6 p |
+| right section chosen | 40 / 40 | 40 / 40 |
+| every gold page in the evidence | **36 / 40** | 34 / 40 |
+| pages read / question | 40.6 | 40.8 |
+| ingest: Judge requests / cost / wall | **278 / $0.13 / 489 s** | 470 / $0.21 / 1,174 s |
+
+Nothing improved and ingest paid 1.7× the requests and 2.4× the wall
+clock. The reason is visible in the first two rows: after one pass the
+median leaf is already a single page, because the per-leaf cap allows
+one sub-leaf per two pages. The leaves that remain large are the ones
+the splitter could not find headings in — and a second look at the
+same text with the same rules does not find them either.
+
+`SplitGenerations` keeps the capability for a document unlike a 10-K,
+defaulting to one. The lesson generalises: recursion is not granularity.
+
 ## What is still missed
 
 Four questions, the same four as before the split: Boeing's legal

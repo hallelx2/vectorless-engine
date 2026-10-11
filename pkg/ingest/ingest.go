@@ -470,6 +470,14 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		log.Info("ingest: toc-builder skipped; no per-page text available")
 		return nil
 	}
+	// The pages are the ground truth every page-level stage reasons
+	// over (HAL-1375). Persist them beside the table of contents so
+	// retrieval navigates the same text ingest did, not a per-section
+	// reconstruction of it. Non-fatal: without them judgewalk falls
+	// back to the section tree.
+	if err := p.persistPages(ctx, docID, pages); err != nil {
+		log.Warn("ingest: pages not persisted; judgewalk will use the section tree", "err", err)
+	}
 	model := p.TOCModel
 	if model == "" {
 		model = p.SummaryModel
@@ -1297,6 +1305,23 @@ func NewDocumentID() tree.DocumentID {
 
 // SourceKey returns the canonical storage key where an ingest payload's
 // original bytes live.
+// PagesKey is where a document's per-page text lives in storage: a
+// JSON array of {page_number, text}, written by ingest for paged
+// documents and read by page-based retrieval.
+func PagesKey(id tree.DocumentID) string { return "pages/" + string(id) + ".json" }
+
+// persistPages writes the per-page text to storage at PagesKey.
+func (p *Pipeline) persistPages(ctx context.Context, docID tree.DocumentID, pages []PageText) error {
+	if p.Storage == nil {
+		return fmt.Errorf("no storage")
+	}
+	raw, err := json.Marshal(pages)
+	if err != nil {
+		return err
+	}
+	return p.Storage.Put(ctx, PagesKey(docID), bytes.NewReader(raw), storage.Metadata{ContentType: "application/json", Size: int64(len(raw))})
+}
+
 func SourceKey(id tree.DocumentID, filename string) string {
 	// Keep the original extension so future content-type sniffing works.
 	ext := path.Ext(filename)

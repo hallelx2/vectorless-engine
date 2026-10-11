@@ -606,7 +606,7 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	totalUsage := retrieval.Usage{}
 	plan, planUsage := d.runPlanner(r.Context(), body.Query, body.EnablePlanning)
 	totalUsage.Add(planUsage)
-	ids, confidences, selUsage, err := d.runSelectionWithUsage(r.Context(), t, plan, body.Query, budget)
+	ids, confidences, selUsage, selResult, err := d.runSelectionResult(r.Context(), t, plan, body.Query, budget)
 	if err != nil {
 		d.Logger.Error("query: strategy failed", "err", err, "document_id", body.DocumentID)
 		writeErr(w, http.StatusInternalServerError, "retrieval failed: "+err.Error())
@@ -675,6 +675,12 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	sections := make([]map[string]any, 0, len(enriched))
 	finalIDs := make([]tree.SectionID, 0, len(enriched))
+	// A page-based strategy's evidence pages lead the list, as-is: the
+	// page the Judge found holds the answer; a section mapped to it by
+	// the parser's page attribution may not (HAL-1390).
+	if selResult != nil {
+		sections = append(sections, evidencePageSections(selResult.EvidencePages)...)
+	}
 	for _, e := range enriched {
 		sections = append(sections, sectionWithContentToMap(e))
 		finalIDs = append(finalIDs, e.sec.ID)
@@ -703,6 +709,9 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if plan != nil {
 		resp["plan"] = plan
+	}
+	if selResult != nil && len(selResult.CitedPages) > 0 {
+		resp["cited_pages"] = selResult.CitedPages
 	}
 	// Surface the confidence map on the response when present. Only the
 	// finalIDs survive truncation, so trim accordingly. Empty map →
@@ -1400,24 +1409,33 @@ func (d Deps) runSelectionWithUsage(ctx context.Context, t *tree.Tree, plan *ret
 // plan is multi-hop AND decomposition is enabled, and surfaces
 // confidences for the Phase 2.4 abstention check.
 func (d Deps) runSelectionFull(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, retrieval.Usage, error) {
+	ids, conf, usage, _, err := d.runSelectionResult(ctx, t, plan, query, budget)
+	return ids, conf, usage, err
+}
+
+// runSelectionResult is runSelectionFull plus the strategy's Result,
+// for callers that need what only a page-based strategy carries:
+// evidence pages and cited pages. nil when the path had no Result.
+func (d Deps) runSelectionResult(ctx context.Context, t *tree.Tree, plan *retrieval.Plan, query string, budget retrieval.ContextBudget) ([]tree.SectionID, map[tree.SectionID]float64, retrieval.Usage, *retrieval.Result, error) {
 	if d.shouldDecompose(plan) {
-		return retrieval.NewDecomposer(d.Strategy).DecomposedSelectWithConfidences(ctx, t, plan, query, budget)
+		ids, conf, usage, err := retrieval.NewDecomposer(d.Strategy).DecomposedSelectWithConfidences(ctx, t, plan, query, budget)
+		return ids, conf, usage, nil, err
 	}
 	if cs, ok := d.Strategy.(retrieval.CostStrategy); ok {
 		res, err := cs.SelectWithCost(ctx, t, query, budget)
 		if err != nil {
-			return nil, nil, retrieval.Usage{}, err
+			return nil, nil, retrieval.Usage{}, nil, err
 		}
 		if res == nil {
-			return nil, nil, retrieval.Usage{}, nil
+			return nil, nil, retrieval.Usage{}, nil, nil
 		}
-		return res.SelectedIDs, res.Confidences, res.Usage, nil
+		return res.SelectedIDs, res.Confidences, res.Usage, res, nil
 	}
 	ids, err := d.Strategy.Select(ctx, t, query, budget)
 	if err != nil {
-		return nil, nil, retrieval.Usage{}, err
+		return nil, nil, retrieval.Usage{}, nil, err
 	}
-	return ids, nil, retrieval.Usage{}, nil
+	return ids, nil, retrieval.Usage{}, nil, nil
 }
 
 // shouldDecompose returns true when the plan is multi-hop AND
@@ -1685,6 +1703,28 @@ func (d Deps) respondAbstained(w http.ResponseWriter, docID tree.DocumentID, que
 		resp["plan"] = plan
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// evidencePageSections renders a page-based strategy's evidence pages
+// in the sections shape: id "page_<n>", the owning section's title with
+// the page number, the page's text, and the Judge's confidence.
+func evidencePageSections(pages []retrieval.EvidencePage) []map[string]any {
+	out := make([]map[string]any, 0, len(pages))
+	for _, ep := range pages {
+		title := ep.Title
+		if title == "" {
+			title = fmt.Sprintf("Page %d", ep.Page)
+		}
+		out = append(out, map[string]any{
+			"id":          fmt.Sprintf("page_%d", ep.Page),
+			"title":       fmt.Sprintf("%s · p.%d", title, ep.Page),
+			"content":     ep.Text,
+			"page":        ep.Page,
+			"confidence":  ep.Confidence,
+			"token_count": len(ep.Text) / 4,
+		})
+	}
+	return out
 }
 
 // usageJSON is the wire shape of retrieval.Usage on /v1/query, the same

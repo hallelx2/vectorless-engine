@@ -309,3 +309,61 @@ func TestNavigateFillsThePageBudgetOnAFineTree(t *testing.T) {
 		t.Errorf("full read should be MaxPages=10, got %d", len(res.Pages))
 	}
 }
+
+type fakeTOC struct{ raw []byte }
+
+func (f fakeTOC) GetTOC(context.Context, tree.DocumentID) ([]byte, error) { return f.raw, nil }
+
+type fakePages struct{ pages []NavPage }
+
+func (f fakePages) LoadPages(context.Context, tree.DocumentID) ([]NavPage, error) {
+	return f.pages, nil
+}
+
+// With a persisted table of contents and pages, navigation runs over
+// them — sub-sections, real page ranges — and the API still gets the
+// sections that cover the evidence pages, plus the pages themselves.
+func TestJudgeWalkUsesThePersistedTOCAndPages(t *testing.T) {
+	j, _ := navJudge("note 21", "class action")
+	s := NewJudgeWalkStrategy(j)
+	s.TOC = fakeTOC{raw: []byte(`[{"node_id":"toc_2","title":"PART II","start_page":21,"end_page":126,"nodes":[
+		{"node_id":"toc_2_5","title":"Item 8. Financial Statements","start_page":54,"end_page":125,"nodes":[
+			{"node_id":"toc_2_5_1","title":"Note 1 - Policies","start_page":63,"end_page":73},
+			{"node_id":"toc_2_5_21","title":"Note 21 - Legal Proceedings","start_page":113,"end_page":114}]},
+		{"node_id":"toc_2_6","title":"Item 9. Changes","start_page":126,"end_page":126}]}]`)}
+	var pages []NavPage
+	for p := 21; p <= 126; p++ {
+		text := "prose"
+		if p == 113 {
+			text = "Note 21 - Legal Proceedings\nA class action filed in 2019 remains pending."
+		}
+		pages = append(pages, NavPage{Number: p, Text: text})
+	}
+	s.Pages = fakePages{pages: pages}
+	// The section tree the API answers in: Item 8's body is one section
+	// spanning 54–125 as the parser saw it.
+	tr := &tree.Tree{DocumentID: "d", Root: &tree.Section{ID: "root", Children: []*tree.Section{
+		{ID: "s7", Title: "Item 7", PageStart: 22, PageEnd: 53, ContentRef: "r7"},
+		{ID: "s8", Title: "Item 8", PageStart: 54, PageEnd: 125, ContentRef: "r8"},
+	}}}
+	res, err := s.SelectWithCost(context.Background(), tr, "legal proceedings?", ContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SelectedIDs) != 1 || res.SelectedIDs[0] != "s8" {
+		t.Errorf("sections covering the evidence page: %v want [s8]", res.SelectedIDs)
+	}
+	if len(res.CitedPages) == 0 || res.CitedPages[0] != [2]int{113, 113} {
+		t.Errorf("cited pages should be the evidence pages: %v", res.CitedPages)
+	}
+	if res.ModelUsed != "judge" || res.Usage.LLMCalls == 0 {
+		t.Errorf("usage/model: %+v", res)
+	}
+	// Without a page store it falls back to the section tree and still answers.
+	s.Pages = nil
+	s.PageLoader = mapLoader{"r8": "Note 21 - Legal Proceedings\nA class action filed in 2019 remains pending.", "r7": "prose"}
+	res, err = s.SelectWithCost(context.Background(), tr, "legal proceedings?", ContextBudget{})
+	if err != nil || len(res.SelectedIDs) == 0 {
+		t.Errorf("fallback path: %v %+v", err, res)
+	}
+}

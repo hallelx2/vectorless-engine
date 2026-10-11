@@ -23,8 +23,8 @@ import (
 // pages produced by the existing parser pipeline and over synthetic
 // fixtures used in tests.
 type PageText struct {
-	PageNumber int
-	Text       string
+	PageNumber int    `json:"page_number"`
+	Text       string `json:"text"`
 }
 
 // TOCBuilder builds an LLM-derived table-of-contents tree for a
@@ -110,6 +110,12 @@ type TOCBuilder struct {
 	// (HAL-1374). Zero selects the default of 20 when a Judge is set;
 	// negative disables splitting.
 	SplitLeavesOver int
+
+	// SplitGenerations is how many times a path may be split: 1 (the
+	// default) splits the leaves the contents pass produced and stops.
+	// More descends into the sub-leaves it creates, which measured as
+	// pure cost on FinanceBench — see defaultSplitGenerations.
+	SplitGenerations int
 
 	// DetectChars caps the characters of each page sent to detection when
 	// MinimalContext is on. Zero means detectCharsMinimal. A contents page
