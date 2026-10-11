@@ -42,6 +42,7 @@ type dump struct {
 	Doc        string         `json:"doc"`
 	Pages      int            `json:"pages"`
 	Seconds    float64        `json:"seconds"`
+	ParseSecs  float64        `json:"parse_seconds"` // PDF to per-page text, before Build; ingest end to end is the sum
 	Requests   int            `json:"requests"`
 	InTokens   int            `json:"in_tokens"`
 	CostUSD    float64        `json:"cost_usd"`
@@ -107,7 +108,9 @@ func main() {
 			name := strings.TrimSuffix(filepath.Base(path), ".pdf")
 			d := dump{Doc: name}
 
+			parseStart := time.Now()
 			pages, err := readPages(path)
+			d.ParseSecs = time.Since(parseStart).Seconds()
 			if err != nil {
 				d.Err = "parse: " + err.Error()
 				write(*out, d)

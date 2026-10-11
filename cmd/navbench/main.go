@@ -64,6 +64,11 @@ type outcome struct {
 	InTokens      int       `json:"in_tokens"`
 	CostUSD       float64   `json:"cost_usd"`
 	Seconds       float64   `json:"seconds"`
+	Answer        string    `json:"answer,omitempty"`
+	GoldAnswer    string    `json:"gold_answer,omitempty"`
+	AnswerSeconds float64   `json:"answer_seconds,omitempty"`
+	AnswerIn      int       `json:"answer_in_tokens,omitempty"`
+	AnswerOut     int       `json:"answer_out_tokens,omitempty"`
 	Err           string    `json:"err,omitempty"`
 }
 
@@ -75,10 +80,22 @@ func main() {
 	maxLeaves := flag.Int("leaves", 0, "cap on sections read per question; 0 lets the page budget decide")
 	maxPages := flag.Int("pages", 0, "pages judged in full per question (0 = the engine default)")
 	limitQ := flag.Int("limit", 0, "stop after this many questions (0 = all)")
+	headChars := flag.Int("head", 0, "characters of each page the coarse skim sees (0 = the engine default)")
+	answer := flag.Bool("answer", false, "write an answer from the evidence pages with one generative call (ANSWER_BASE_URL/ANSWER_MODEL, default GLM-4.6 on z.ai)")
+	answerThinking := flag.Bool("answer-thinking", false, "let the answer model reason before answering (GLM-4.6 does by default)")
+	answerPages := flag.Int("answer-pages", 8, "evidence pages given to the answer step")
 	skimAll := flag.Bool("skim-all", false, "skim every page's head alongside the section ranking (HAL-1566), as the persisted-pages path does")
 	parallel := flag.Int("parallel", 1, "questions in flight at once; the provider's adaptive limiter governs requests")
 	flag.Parse()
 	stats := &judgestats.Recorder{}
+	var ans *answerer
+	if *answer {
+		var err error
+		if ans, err = newAnswerer(*answerThinking, *answerPages); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 	if *qPath == "" || *trees == "" || *pdfs == "" {
 		fmt.Fprintln(os.Stderr, "usage: navbench -questions q.jsonl -trees dir -pdfs dir [-out o.jsonl]")
 		os.Exit(2)
@@ -98,7 +115,7 @@ func main() {
 	lim := limit.New(limit.Config{Initial: 16, OnChange: func(e limit.Event) {
 		fmt.Fprintf(os.Stderr, "  limiter %s %d -> %d %v\n", e.Cause, e.From, e.To, e.Err)
 	}})
-	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages, SkimAll: *skimAll}
+	nav := &retrieval.JudgeNavigator{Judge: retry.NewJudge(retry.Config{MaxRetries: 3})(limit.Judge(lim)(tj)), MaxLeaves: *maxLeaves, MaxPages: *maxPages, SkimAll: *skimAll, HeadChars: *headChars}
 
 	qs := readQuestions(*qPath)
 	if *limitQ > 0 && len(qs) > *limitQ {
@@ -177,6 +194,17 @@ func main() {
 				o.LeafHit = allInRanges(q.Evidence, o.SelectedPages)
 				o.Recall = recall(q.Evidence, o.Evidence)
 				o.Hit = o.Recall == 1
+				if ans != nil {
+					actx, acancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					a, err := ans.answer(actx, q.Question, res.Evidence)
+					acancel()
+					o.GoldAnswer = q.Answer
+					if err != nil {
+						o.Err = err.Error()
+					} else {
+						o.Answer, o.AnswerSeconds, o.AnswerIn, o.AnswerOut = a.Text, a.Seconds, a.InTokens, a.OutTokens
+					}
+				}
 			}
 			results[i] = o
 			outMu.Lock()
