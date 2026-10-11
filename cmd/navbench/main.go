@@ -26,6 +26,7 @@ import (
 	"github.com/hallelx2/llmgate/middleware/limit"
 	"github.com/hallelx2/llmgate/middleware/retry"
 
+	"github.com/hallelx2/vectorless-engine/internal/judgestats"
 	"github.com/hallelx2/vectorless-engine/pkg/ingest"
 	"github.com/hallelx2/vectorless-engine/pkg/parser"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
@@ -76,13 +77,14 @@ func main() {
 	limitQ := flag.Int("limit", 0, "stop after this many questions (0 = all)")
 	parallel := flag.Int("parallel", 1, "questions in flight at once; the provider's adaptive limiter governs requests")
 	flag.Parse()
+	stats := &judgestats.Recorder{}
 	if *qPath == "" || *trees == "" || *pdfs == "" {
 		fmt.Fprintln(os.Stderr, "usage: navbench -questions q.jsonl -trees dir -pdfs dir [-out o.jsonl]")
 		os.Exit(2)
 	}
 
 	key := os.Getenv(typesafe.EnvAPIKey)
-	tj, err := typesafe.New(typesafe.Config{APIKey: key})
+	tj, err := typesafe.New(typesafe.Config{APIKey: key, OnRequest: stats.Observe})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "judge:", err)
 		os.Exit(1)
@@ -188,6 +190,7 @@ func main() {
 	wg.Wait()
 	fmt.Printf("\nwall %.1fs for %d questions at parallel=%d; limiter now %d\n", time.Since(runStart).Seconds(), len(qs), *parallel, lim.Limit())
 	summarise(results)
+	stats.Summary(os.Stdout)
 }
 
 func load(doc, trees, pdfs string, leafCache map[string][]retrieval.NavLeaf, pageCache map[string][]ingest.PageText) ([]retrieval.NavLeaf, []ingest.PageText, error) {
