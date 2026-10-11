@@ -228,23 +228,41 @@ func run() error {
 	} else {
 		logger.Warn("pincites: pdftoppm not found — page images disabled; install poppler-utils")
 	}
-	pincites := &pincite.Service{Storage: store, Build: parser.PDFLayout, Raster: raster, Logger: logger}
+	pincites := &pincite.Service{
+		Storage: store, Build: parser.PDFLayout, Raster: raster, Logger: logger,
+		Alive: func(ctx context.Context, id string) bool {
+			ok, err := pool.DocumentExists(ctx, tree.DocumentID(id))
+			return ok || err != nil // on a lookup error, keep rendering
+		},
+	}
 
 	// ── Ingest pipeline ───────────────────────────────────────────
 	pipeline := ingest.NewPipeline(ingest.Pipeline{
-		AfterReady: func(ctx context.Context, pl ingest.Payload) {
+		AfterReady: func(ctx context.Context, pl ingest.Payload) error {
 			src := pincite.Source{DocumentID: string(pl.DocumentID), SourceRef: pl.SourceRef, ContentType: pl.ContentType}
 			if !src.IsPDF() {
-				return
+				return ingest.ErrNothingToDo
 			}
 			ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
 			start := time.Now()
-			if err := pincites.Warm(ctx, src); err != nil {
+			err := pincites.Warm(ctx, src)
+			// A delete that raced the warm-up already purged what existed
+			// then; remove whatever the last chunk wrote after it.
+			if exists, derr := pool.DocumentExists(ctx, pl.DocumentID); derr == nil && !exists {
+				if n, perr := ingest.PurgeDocument(ctx, store, pl.DocumentID); perr != nil {
+					logger.Error("pincites: purge after delete during warm-up", "document_id", pl.DocumentID, "removed", n, "err", perr)
+				} else {
+					logger.Info("pincites: document deleted during warm-up; purged its files", "document_id", pl.DocumentID, "removed", n)
+				}
+				return pincite.ErrDocumentGone
+			}
+			if err != nil {
 				logger.Warn("pincites: warm failed; pages render on first view", "document_id", pl.DocumentID, "err", err)
-				return
+				return err
 			}
 			logger.Info("pincites: layout and page images ready", "document_id", pl.DocumentID, "elapsed", time.Since(start).Round(time.Millisecond))
+			return nil
 		},
 		DB:                     pool,
 		Storage:                store,

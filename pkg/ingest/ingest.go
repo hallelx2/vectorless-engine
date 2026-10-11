@@ -66,7 +66,7 @@ const ModeTOC = "toc"
 type docPersister interface {
 	SetDocumentStatus(ctx context.Context, id tree.DocumentID, s db.DocumentStatus, errMsg string) error
 	SetDocumentTitle(ctx context.Context, id tree.DocumentID, title string) error
-	UpsertSection(ctx context.Context, s db.Section) error
+	UpsertSections(ctx context.Context, secs []db.Section) error
 }
 
 // Payload is the JSON body attached to an ingest job.
@@ -127,7 +127,7 @@ type Pipeline struct {
 	// pincite layout and page images (HAL-833, HAL-834) so a reader's
 	// first highlight never waits for them; the document is queryable
 	// before it finishes.
-	AfterReady func(ctx context.Context, pl Payload)
+	AfterReady func(ctx context.Context, pl Payload) error
 
 	// Mode selects how much work Run does before marking a document
 	// ready. "minimal" collapses ingest to parse → build tree → persist
@@ -418,15 +418,51 @@ func (p *Pipeline) Handler() queue.Handler {
 // tree → persist → ready, with no LLM enrichment and no table
 // extraction. Otherwise it runs the full enrichment pipeline below.
 func (p *Pipeline) Run(ctx context.Context, pl Payload) error {
+	var w progressWriter
+	if p.DB != nil {
+		w = p.DB
+	}
+	pr := NewProgress(ctx, w, pl.DocumentID, p.Logger, p.planFor(pl))
+	if p.DB != nil {
+		if doc, err := p.DB.GetDocumentForWorker(ctx, pl.DocumentID); err == nil {
+			pr.Span(ctx, stageQueued, doc.CreatedAt, time.Now(), "")
+		}
+	}
+	ctx = withProgress(ctx, pr)
+
 	err := p.run(ctx, pl)
 	if err == nil && p.AfterReady != nil {
 		// Detached from the job's context: the document is already
 		// ready and queryable, and this work must not hold the job open
 		// or be cancelled when it returns.
-		go p.AfterReady(context.WithoutCancel(ctx), pl)
+		// Only a document whose plan has a page stage reports one; for
+		// the rest the hook has nothing to do and says so.
+		tracked := false
+		for _, s := range pr.Stages() {
+			tracked = tracked || s.Name == stagePages
+		}
+		go func(ctx context.Context) {
+			if !tracked {
+				_ = p.AfterReady(ctx, pl)
+				return
+			}
+			pr.Start(ctx, stagePages)
+			switch err := p.AfterReady(ctx, pl); {
+			case errors.Is(err, ErrNothingToDo):
+				pr.Skip(ctx, stagePages, "not a PDF")
+			case err != nil:
+				pr.Fail(ctx, stagePages, err)
+			default:
+				pr.Done(ctx, stagePages, "")
+			}
+		}(context.WithoutCancel(ctx))
 	}
 	return err
 }
+
+// ErrNothingToDo is what AfterReady returns when the document needs no
+// after-ready work (a non-PDF has no pages to render).
+var ErrNothingToDo = errors.New("ingest: nothing to do after ready")
 
 func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 	if m := p.modeFor(pl); m == ModeMinimal || m == ModeTOC {
@@ -440,23 +476,31 @@ func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 		return err
 	}
 
+	pr := progressFrom(ctx)
+	pr.Start(ctx, stageParse)
 	parsed, err := p.parse(ctx, p.Parsers, pl)
 	if err != nil {
+		pr.Fail(ctx, stageParse, err)
 		p.fail(ctx, p.DB, pl.DocumentID, "parse", err)
 		return err
 	}
+	pr.Done(ctx, stageParse, parsedDetail(parsed))
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
+	pr.Start(ctx, stageSave)
 	if err := p.persistTree(ctx, p.DB, pl.DocumentID, parsed, pl.Title); err != nil {
+		pr.Fail(ctx, stageSave, err)
 		p.fail(ctx, p.DB, pl.DocumentID, "persist tree", err)
 		return err
 	}
+	pr.Done(ctx, stageSave, fmt.Sprintf("%d sections", len(parsed.Flatten())))
 
 	if err := p.DB.SetDocumentStatus(ctx, pl.DocumentID, db.StatusSummarizing, ""); err != nil {
 		return err
 	}
 
 	stageStart := time.Now()
+	pr.Start(ctx, stageSummary)
 	summarizeFn := func(ctx context.Context) error {
 		return p.summarize(ctx, pl.DocumentID, pl.Profile)
 	}
@@ -481,6 +525,11 @@ func (p *Pipeline) run(ctx context.Context, pl Payload) error {
 		log.Warn("ingest: hyde had errors", "err", hydeErr)
 	}
 	log.Info("ingest: summarize+hyde complete", "elapsed", time.Since(stageStart))
+	if sumErr != nil {
+		pr.Done(ctx, stageSummary, "some sections kept their titles only")
+	} else {
+		pr.Done(ctx, stageSummary, "")
+	}
 
 	// LLM-built TOC tree (TreeWalk-style). PDF-only because it
 	// relies on the parser's PageStart/PageEnd attribution to
@@ -512,6 +561,7 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 	pages := assemblePages(parsed)
 	if len(pages) == 0 {
 		log.Info("ingest: toc-builder skipped; no per-page text available")
+		progressFrom(ctx).Skip(ctx, stageContents, "no page text to read")
 		return nil
 	}
 	// The pages are the ground truth every page-level stage reasons
@@ -539,16 +589,28 @@ func (p *Pipeline) runTOCBuilder(ctx context.Context, docID tree.DocumentID, par
 		// lost nothing (HAL-1366).
 		MinimalContext: p.Judge != nil,
 	}
+	pr := progressFrom(ctx)
+	pr.Start(ctx, stageContents)
+	builder.OnPhase = func(name string, started bool, detail string) {
+		if started {
+			pr.Start(ctx, stageContents+"."+name)
+		} else {
+			pr.Done(ctx, stageContents+"."+name, detail)
+		}
+	}
 	nodes, usage, err := builder.Build(ctx, pages)
 	if err != nil {
+		pr.Fail(ctx, stageContents, err)
 		return err
 	}
+	pr.Done(ctx, stageContents, contentsDetail(nodes, usage))
 	log.Info("ingest: toc-builder done",
 		"top_level_nodes", len(nodes),
 		"llm_calls", usage.LLMCalls,
 		"input_tokens", usage.InputTokens,
 		"output_tokens", usage.OutputTokens,
 		"judge", p.Judge != nil,
+		"phases", usage.PhaseSummary(),
 	)
 	// A degraded build is not a failed one, but it is not what was
 	// configured either, and it must not look like success in the log.
@@ -767,7 +829,7 @@ func getSourceWithRetry(ctx context.Context, s storage.Storage, key string) (io.
 // is an interface so this path is testable without a live Postgres.
 func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payload) error {
 	log := p.Logger.With("document_id", string(pl.DocumentID))
-	log.Info("ingest: start (minimal mode)", "source_ref", pl.SourceRef)
+	log.Info("ingest: start ("+p.modeFor(pl)+" mode)", "source_ref", pl.SourceRef)
 
 	if err := store.SetDocumentStatus(ctx, pl.DocumentID, db.StatusParsing, ""); err != nil {
 		return err
@@ -777,18 +839,25 @@ func (p *Pipeline) runMinimal(ctx context.Context, store docPersister, pl Payloa
 	// regardless of ingest.tables.enabled: a nil-opts registry makes the
 	// PDF parser skip the table-finding pass entirely. All other parsers
 	// are unaffected.
+	pr := progressFrom(ctx)
 	parsers := RegistryFromTableOpts(nil)
+	pr.Start(ctx, stageParse)
 	parsed, err := p.parse(ctx, parsers, pl)
 	if err != nil {
+		pr.Fail(ctx, stageParse, err)
 		p.fail(ctx, store, pl.DocumentID, "parse", err)
 		return err
 	}
+	pr.Done(ctx, stageParse, parsedDetail(parsed))
 	log.Info("ingest: parsed", "sections", len(parsed.Flatten()), "title", parsed.Title)
 
+	pr.Start(ctx, stageSave)
 	if err := p.persistTree(ctx, store, pl.DocumentID, parsed, pl.Title); err != nil {
+		pr.Fail(ctx, stageSave, err)
 		p.fail(ctx, store, pl.DocumentID, "persist tree", err)
 		return err
 	}
+	pr.Done(ctx, stageSave, fmt.Sprintf("%d sections", len(parsed.Flatten())))
 
 	// Minimal mode skips summarize / HyDE / multi-axis / TOC entirely
 	// and flips straight to ready; the document is queryable via the
@@ -832,66 +901,88 @@ func (p *Pipeline) persistTree(ctx context.Context, store docPersister, docID tr
 		}
 	}
 
-	ordinal := 0
-	var walk func(secs []parser.Section, parent tree.SectionID, depth int) error
-	walk = func(secs []parser.Section, parent tree.SectionID, depth int) error {
+	// Plan the whole tree in memory first: ids, parents, cleaned content.
+	// Then write the section texts concurrently and every row in one
+	// batch. Done one section at a time — a storage write and a database
+	// write each — a 450-section filing spent ~40 s here.
+	type planned struct {
+		row     db.Section
+		content string
+	}
+	var plan []planned
+	var walk func(secs []parser.Section, parent tree.SectionID, depth int)
+	walk = func(secs []parser.Section, parent tree.SectionID, depth int) {
 		for i, s := range secs {
 			id := tree.SectionID("sec_" + uuid.New().String())
-			contentKey := path.Join("documents", string(docID), "sections", string(id)+".txt")
-
 			// Strip invalid UTF-8 / disallowed control chars at storage
 			// time so we never persist bytes the LLM SDKs would reject
 			// later. PDFs with CID-mapped fonts and no ToUnicode CMap
 			// leak raw glyph IDs into extracted text.
-			// Only assign a ContentRef when we actually wrote content. A
-			// leaf whose text is empty after cleanForLLM (heading-only
-			// sections, or CID-font garbage stripped to nothing) gets NO
-			// object stored, so it must get NO ref — otherwise every later
-			// read (summarize, HyDE, treewalk get_pages) chases a key that
-			// was never written and fails with "storage: object not found".
-			// Empty ContentRef is already the canonical "no stored content"
-			// state every reader guards on (summaryFor falls back to the
-			// title; the treewalk loader returns the summary or empty).
 			cleanedContent := cleanForLLM(s.Content)
+			// Only a section whose cleaned text is non-empty gets a stored
+			// object and a ContentRef. An empty ContentRef is the canonical
+			// "no stored content" state every reader guards on; a ref to a
+			// key that was never written fails with "object not found".
 			contentRef := ""
 			if strings.TrimSpace(cleanedContent) != "" {
-				if err := p.Storage.Put(ctx, contentKey,
-					bytes.NewReader([]byte(cleanedContent)),
-					storage.Metadata{
-						ContentType: "text/plain; charset=utf-8",
-						Size:        int64(len(cleanedContent)),
-					}); err != nil {
-					return fmt.Errorf("store section %s: %w", id, err)
-				}
-				contentRef = contentKey
+				contentRef = path.Join("documents", string(docID), "sections", string(id)+".txt")
 			}
-
-			if err := store.UpsertSection(ctx, db.Section{
-				ID:         id,
-				DocumentID: docID,
-				ParentID:   parent,
-				Ordinal:    i,
-				Depth:      depth,
-				Title:      cleanForLLM(s.Title),
-				ContentRef: contentRef,
-				TokenCount: approxTokens(cleanedContent),
-				PageStart:  s.PageStart,
-				PageEnd:    s.PageEnd,
-				Metadata:   s.Metadata,
-			}); err != nil {
-				return err
-			}
-			ordinal++
-
-			if err := walk(s.Children, id, depth+1); err != nil {
-				return err
-			}
+			plan = append(plan, planned{
+				row: db.Section{
+					ID:         id,
+					DocumentID: docID,
+					ParentID:   parent,
+					Ordinal:    i,
+					Depth:      depth,
+					Title:      cleanForLLM(s.Title),
+					ContentRef: contentRef,
+					TokenCount: approxTokens(cleanedContent),
+					PageStart:  s.PageStart,
+					PageEnd:    s.PageEnd,
+					Metadata:   s.Metadata,
+				},
+				content: cleanedContent,
+			})
+			walk(s.Children, id, depth+1)
 		}
-		return nil
+	}
+	walk(doc.Sections, "", 0)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(sectionWriteConcurrency)
+	for _, pl := range plan {
+		if pl.row.ContentRef == "" {
+			continue
+		}
+		g.Go(func() error {
+			if err := p.Storage.Put(gctx, pl.row.ContentRef,
+				strings.NewReader(pl.content),
+				storage.Metadata{
+					ContentType: "text/plain; charset=utf-8",
+					Size:        int64(len(pl.content)),
+				}); err != nil {
+				return fmt.Errorf("store section %s: %w", pl.row.ID, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
-	return walk(doc.Sections, "", 0)
+	// Depth-first order: every parent precedes its children, so the
+	// batch satisfies the parent_id foreign key row by row.
+	rows := make([]db.Section, len(plan))
+	for i, pl := range plan {
+		rows[i] = pl.row
+	}
+	return store.UpsertSections(ctx, rows)
 }
+
+// sectionWriteConcurrency bounds the section-text uploads in flight for
+// one document. Object stores take far more; this keeps one large
+// document from crowding out the other ingest workers' writes.
+const sectionWriteConcurrency = 32
 
 // summarize walks every section that lacks a summary and asks the LLM
 // for a short description of its content. Leaf sections pull content
@@ -1426,3 +1517,32 @@ func RegistryFromIngestParams(opts *parser.TableOpts, maxSections int, parseTime
 
 // helper kept for tests — not used by the pipeline itself.
 var _ = time.Now
+
+// parsedDetail is the parse stage's one-line result for the dashboard.
+func parsedDetail(d *parser.ParsedDoc) string {
+	pages := 0
+	for _, s := range d.Flatten() {
+		pages = max(pages, s.PageEnd)
+	}
+	if pages > 0 {
+		return fmt.Sprintf("%d pages", pages)
+	}
+	return fmt.Sprintf("%d sections", len(d.Flatten()))
+}
+
+// contentsDetail is the contents stage's one-line result.
+func contentsDetail(nodes []tree.TOCNode, u Usage) string {
+	n := 0
+	var count func([]tree.TOCNode)
+	count = func(ns []tree.TOCNode) {
+		for _, x := range ns {
+			n++
+			count(x.Nodes)
+		}
+	}
+	count(nodes)
+	if len(u.Degraded) > 0 {
+		return fmt.Sprintf("%d entries · partly unverified", n)
+	}
+	return fmt.Sprintf("%d entries", n)
+}

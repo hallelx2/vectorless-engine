@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -75,25 +76,43 @@ func scanSectionRow(row interface {
 // UpsertSection inserts or updates a section row. Callers should insert in
 // tree order (parents before children) so the ParentID FK is satisfied.
 func (p *Pool) UpsertSection(ctx context.Context, s Section) error {
-	meta, err := marshalMeta(s.Metadata)
+	args, err := sectionArgs(s)
 	if err != nil {
 		return err
 	}
-	var parent any
-	if s.ParentID != "" {
-		parent = string(s.ParentID)
+	_, err = p.Exec(ctx, upsertSectionSQL, args...)
+	return mapErr(err)
+}
+
+// UpsertSections writes many sections in one transaction, sent to the
+// server as a single batch: one round trip for the whole tree instead of
+// one per section (a 10-K has ~450, and per-row writes were 40 s of a
+// minute-long ingest). Order is kept, so parents listed before their
+// children satisfy the parent_id foreign key.
+func (p *Pool) UpsertSections(ctx context.Context, secs []Section) error {
+	if len(secs) == 0 {
+		return nil
 	}
-	pageStart := nullIfZero(s.PageStart)
-	pageEnd := nullIfZero(s.PageEnd)
-	candidates, err := marshalCandidateQuestions(s.CandidateQuestions)
+	tx, err := p.Begin(ctx)
 	if err != nil {
-		return err
+		return mapErr(err)
 	}
-	axes, err := marshalSummaryAxes(s.SummaryAxes)
-	if err != nil {
-		return err
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+	b := &pgx.Batch{}
+	for _, s := range secs {
+		args, err := sectionArgs(s)
+		if err != nil {
+			return err
+		}
+		b.Queue(upsertSectionSQL, args...)
 	}
-	_, err = p.Exec(ctx, `
+	if err := tx.SendBatch(ctx, b).Close(); err != nil {
+		return mapErr(err)
+	}
+	return mapErr(tx.Commit(ctx))
+}
+
+const upsertSectionSQL = `
         INSERT INTO sections
             (id, document_id, parent_id, ordinal, depth, title, summary,
              content_ref, token_count, metadata, page_start, page_end,
@@ -112,12 +131,31 @@ func (p *Pool) UpsertSection(ctx context.Context, s Section) error {
             page_end            = EXCLUDED.page_end,
             candidate_questions = EXCLUDED.candidate_questions,
             summary_axes        = EXCLUDED.summary_axes,
-            updated_at          = now()`,
+            updated_at          = now()`
+
+// sectionArgs is the argument list for upsertSectionSQL.
+func sectionArgs(s Section) ([]any, error) {
+	meta, err := marshalMeta(s.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	var parent any
+	if s.ParentID != "" {
+		parent = string(s.ParentID)
+	}
+	candidates, err := marshalCandidateQuestions(s.CandidateQuestions)
+	if err != nil {
+		return nil, err
+	}
+	axes, err := marshalSummaryAxes(s.SummaryAxes)
+	if err != nil {
+		return nil, err
+	}
+	return []any{
 		string(s.ID), string(s.DocumentID), parent, s.Ordinal, s.Depth,
 		s.Title, s.Summary, s.ContentRef, s.TokenCount, meta,
-		pageStart, pageEnd, candidates, axes,
-	)
-	return mapErr(err)
+		nullIfZero(s.PageStart), nullIfZero(s.PageEnd), candidates, axes,
+	}, nil
 }
 
 // UpdateSectionSummary patches only the summary + token count for a section.
