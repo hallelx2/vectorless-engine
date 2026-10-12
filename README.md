@@ -213,18 +213,15 @@ To reproduce the FinanceBench runs, see `cmd/navbench`, `cmd/tocdump` and the ha
 
 The dashboard, control plane, engine and Postgres all start from one command in the [`vectorless`](https://github.com/hallelx2/vectorless) repository. You sign up as the first user, enter your model keys on **Settings → Model providers**, and upload a document. Keys take effect without a restart.
 
-Clone the three repositories side by side, then start the stack:
+You need only the `vectorless` repository. The stack pulls public images from GitHub's container registry, built from each repository's `main` branch for `linux/amd64` and `linux/arm64`. This repository's server is `ghcr.io/hallelx2/vectorless-engine`.
 
 ```bash
-mkdir vectorless && cd vectorless
 git clone https://github.com/hallelx2/vectorless.git
-git clone https://github.com/hallelx2/vectorless-engine.git
-git clone https://github.com/hallelx2/vectorless-control-plane.git
-cd vectorless/selfhost && docker compose up -d --build
+cd vectorless/selfhost && docker compose up -d
 # when every service is healthy: http://localhost:3000
 ```
 
-There is no `.env` to write. Secrets are generated on first boot.
+There is no `.env` to write. Secrets are generated on first boot. Set `VECTORLESS_VERSION` in `selfhost/.env` to pin the images to a commit tag instead of `latest`. To run a change you made here, build the images from source with the stack's `docker-compose.build.yml` override; the [self-host guide](https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md#building-from-source) shows how.
 
 <p align="center">
   <a href="https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md"><img src="docs/media/selfhost-keys.gif" alt="A fresh self-hosted instance: the first account is created, then model keys are entered as dots on Settings, Model providers, tested and saved without a restart" width="100%"/></a>
@@ -237,12 +234,12 @@ The engine has two entry points:
 
 | Binary | What it is | Use it for |
 |---|---|---|
-| `cmd/server` (`Dockerfile.server`) | The multi-tenant HTTP server production ran. It has pincites, page images, live ingest progress and the strategy fallback. | Running the pipeline described above. |
+| `cmd/server` (`Dockerfile.server`, published as `ghcr.io/hallelx2/vectorless-engine`) | The multi-tenant HTTP server production ran. It has pincites, page images, live ingest progress and the strategy fallback. | Running the pipeline described above. |
 | `cmd/engine` (`Dockerfile`, `Dockerfile.allinone`) | The standalone engine with `--local` zero-config mode and the `/v1/replay` route. | Trying the engine on a laptop. |
 
 ### All-in-one container
 
-One container with the engine, a bundled Postgres and a web UI. Build it from this repository with `docker build -f Dockerfile.allinone -t vectorless .`. The `halleluyaholudele/vectorless` image on Docker Hub was last pushed on 2026-07-04, before Jev, judgewalk and pincites existed, so don't use it for the pipeline above. The image defaults to fast `minimal` ingest and GLM through z.ai, so it does not run the Jev pipeline unless you turn it on:
+One container with the engine, a bundled Postgres and a web UI. Build it from this repository with `docker build -f Dockerfile.allinone -t vectorless .`; it is not published. The images this project publishes are on GHCR: `ghcr.io/hallelx2/vectorless-engine` is the server binary (`Dockerfile.server`), tagged `latest`, `main` and the 12-character commit SHA. The old `halleluyaholudele/vectorless` image on Docker Hub was last pushed on 2026-07-04, before Jev, judgewalk and pincites existed, so don't use it. The all-in-one image defaults to fast `minimal` ingest and GLM through z.ai, so it does not run the Jev pipeline unless you turn it on:
 
 ```bash
 docker run -p 8080:8080 -p 7654:7654 \

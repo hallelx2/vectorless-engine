@@ -181,13 +181,15 @@ Distroless = no shell, no package manager, minimal CVE surface.
 
 ### Publishing
 
-- GitHub Container Registry (GHCR): `ghcr.io/vectorless/engine`,
-  `ghcr.io/vectorless/server`, etc.
+- GitHub Container Registry (GHCR): `ghcr.io/hallelx2/vectorless-engine`
+  is the server binary (`Dockerfile.server`). Its siblings are
+  `ghcr.io/hallelx2/vectorless-control-plane` and
+  `ghcr.io/hallelx2/vectorless-web`. (`ghcr.io/vectorless` belongs to an
+  unrelated GitHub account.) The images are public.
 - Tags:
-  - `latest` — the most recent release.
-  - `vX.Y.Z` — exact version.
-  - `sha-<short>` — commit SHA for reproducibility.
-  - `vX.Y` — floating pointer to latest patch of a minor version.
+  - `latest` and `main`: the newest build of `main`.
+  - `<12-character commit SHA>`: one exact build, for reproducibility.
+  - `vX.Y.Z`: exact version, once releases are tagged.
 
 ### Multi-arch
 
