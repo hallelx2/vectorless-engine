@@ -1,18 +1,23 @@
 name: docker-publish
 
-# Build and publish the engine Docker image to GitHub Container Registry
-# on every push to main and every semver tag (vX.Y.Z).
+# Build and publish the server image (Dockerfile.server, cmd/server) to
+# GitHub Container Registry on every push to main and every semver tag.
+# The self-host stack in hallelx2/vectorless pulls this image.
 #
 # Resulting tags:
-#   ghcr.io/hallelx2/vectorless-engine:main          (latest main branch)
-#   ghcr.io/hallelx2/vectorless-engine:sha-<7chars>  (immutable, per-commit)
-#   ghcr.io/hallelx2/vectorless-engine:vX.Y.Z        (release tags)
-#   ghcr.io/hallelx2/vectorless-engine:latest        (only on release tags)
+#   ghcr.io/hallelx2/vectorless-engine:<12-char sha>  (immutable, per commit)
+#   ghcr.io/hallelx2/vectorless-engine:main           (newest main)
+#   ghcr.io/hallelx2/vectorless-engine:latest         (newest main)
+#   ghcr.io/hallelx2/vectorless-engine:vX.Y.Z         (release tags)
+#
+# The tags and labels match the images published by hand for HAL-2770,
+# so a run of this workflow replaces them like for like.
 
 on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,16 +25,16 @@ permissions:
 
 jobs:
   publish:
-    name: build + push (${{ matrix.platform }})
+    name: build + push (linux/amd64, linux/arm64)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [linux/amd64]   # add linux/arm64 once you're ready to spend the build time
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -50,21 +55,27 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/vectorless-engine
           tags: |
+            type=raw,value=${{ steps.sha.outputs.short }}
             type=ref,event=branch
             type=ref,event=tag
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=vectorless-engine
+            org.opencontainers.image.description=Vectorless engine: document ingest, reasoning-based retrieval and pincited answers over HTTP and gRPC
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=Vectorless
 
       - name: Build + push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
+          file: ./Dockerfile.server
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.sha.outputs.short }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
