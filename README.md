@@ -26,6 +26,12 @@
   <a href="#configuration">Config</a>
 </p>
 
+<p align="center">
+  <a href="docs/media/how-it-works.mp4"><img src="docs/media/how-it-works-light.gif" alt="How Vectorless reads, drawn as one machine: a card cabinet of sections, dials showing Jev's probability for each, a crane that pulls the chosen drawer, a light table where a stylus marks the exact line, and a printer for the answer" width="100%"/></a>
+  <br/><sub><b>How Vectorless reads, as one machine.</b> The cabinet is the document, one drawer per section. The dials are Jev's probabilities, and the crane only goes where a needle points. On the light table the stylus marks the exact line the answer cites. Ingest → ask → select → read → cite → answer. <a href="docs/media/how-it-works.mp4">As video</a>.</sub>
+</p>
+
+
 ---
 
 ## See it work
@@ -43,17 +49,7 @@ The hosted Vectorless service is closing (decided 2026-10-11). The code is open 
 
 ## How it works
 
-The engine ships as a single binary and runs on Postgres plus object storage. Ingest builds a table of contents with page numbers. A query picks sections, then pages, and returns the pages as they are. The only generated text anywhere in the pipeline is the final answer.
-
-Here is the whole pipeline drawn as one machine. The document is a cabinet with one drawer per section. The dials show the probability Jev gives each section. The crane only goes where a needle points, and the stylus on the light table is the pincite landing on its line.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/media/how-it-works-dark.gif"/>
-    <img src="docs/media/how-it-works-light.gif" alt="An isometric machine: a card cabinet of sections, dials showing Jev's probabilities, a crane that pulls the chosen drawer, a light table where a stylus marks the exact line, and a printer for the answer" width="100%"/>
-  </picture>
-  <br/><sub>Ingest → ask → select → read → cite → answer. <a href="docs/media/how-it-works.mp4">As video</a>.</sub>
-</p>
+The engine ships as a single binary and runs on Postgres plus object storage. Ingest builds a table of contents with page numbers. A query picks sections, then pages, and returns the pages as they are. The only generated text anywhere in the pipeline is the final answer. The machine at the top of this page shows the whole loop; here it is stage by stage.
 
 ### Ingest (PDF)
 
