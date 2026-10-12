@@ -19,6 +19,7 @@
   <a href="#see-it-work">See it work</a> ·
   <a href="#status">Status</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#before-and-after-the-judge">Before and after the judge</a> ·
   <a href="#results">Results</a> ·
   <a href="#dependencies-you-should-know-about">Dependencies</a> ·
   <a href="#quick-start">Quick start</a> ·
@@ -102,6 +103,64 @@ Choosing a contents entry, a page, a section or a quote is a selection, not writ
 <p align="center">
   <img src="docs/media/select-dont-generate.png" alt="Moving closed decisions onto Jev: the contents stage went from 103 to 840 s and up to 9.5 cents per filing to 12 to 143 s and a fraction of a cent, and page placement from 16/20 to 20/20 gold pages" width="100%"/>
 </p>
+
+## Before and after the judge
+
+Vectorless did not start out like this. From May to mid-September 2026 every decision in the pipeline was written by a chat model, and then over three days in September almost all of it moved onto a System One model. That move is the reason the numbers in [Results](#results) look the way they do, so it is worth telling properly.
+
+<p align="center">
+  <img src="docs/media/before-after-the-judge.png" alt="Before: a chat model summarises every section, builds the contents tree, walks the tree in up to 8 chat-completion hops, and writes the answer. After: pdfgrab layout, contents found and placed by Jev, judgewalk selecting sections and pages, and a model writes only the answer, with Jev picking each pincite quote." width="100%"/>
+</p>
+
+### How it worked before
+
+The first design followed the PageIndex idea closely, and every stage of it generated text:
+
+- **Summaries at ingest.** A chat model read every section and wrote a summary of it, later with structured "multi-axis" summaries and HyDE questions alongside (May 2026).
+- **An LLM-built contents tree.** A chat model read the contents pages and wrote the tree, PageIndex style (27 May 2026).
+- **Navigation by writing.** `treewalk`, renamed from `pageindex` on 6 June, gave a chat model the tree with its summaries and asked it to write which branch to open next, in up to eight chat-completion hops per question.
+
+It worked, in the sense that answers came back. But each of those calls was slow, cost money, and could write something plausible and wrong. On the long 10-K filings that mattered most, the generative path placed sections on the wrong pages. The contents stage alone took 103 to 840 seconds and $0.017 to $0.095 per filing.
+
+### What changed
+
+Looking at the prompts, almost none of these decisions needed writing at all. "Is this line a contents entry?", "which of these pages does this heading start on?" and "which of these sections could hold the answer?" all have a closed set of answers. As the [25 September note](docs/evaluations/2026-09-25-judgement-not-generation.md) puts it, the question was a judgement when a chat model answered it in eight hundred tokens of prose, and it is the same judgement when a System One model answers it in one letter. The prose was only the medium the decision arrived in.
+
+A System One model such as Jev takes a shared context and a batch of typed questions (yes or no, pick one of these, place this on a scale) and answers all of them in one call with calibrated probabilities. So code builds the list of options, and Jev selects from it.
+
+### The switch, in order
+
+| Date | Change | Where |
+|---|---|---|
+| 17 Sep | llmgate gains a Judge interface for System One models | [llmgate #16](https://github.com/hallelx2/llmgate/pull/16) |
+| 17 Sep | The contents builder's yes/no phases move onto Jev | [#60](https://github.com/hallelx2/vectorless-engine/pull/60) |
+| 18 Sep | Every leaf's page is resolved by Jev: select, don't generate | [#61](https://github.com/hallelx2/vectorless-engine/pull/61) |
+| 18 Sep | The whole contents stage runs with no generative model | [#63](https://github.com/hallelx2/vectorless-engine/pull/63) |
+| 18 Sep | Navigation runs on Jev (`judgewalk`), with real per-page text | [#64](https://github.com/hallelx2/vectorless-engine/pull/64) |
+| 18 Sep | Adaptive concurrency through llmgate's limiter | [#65](https://github.com/hallelx2/vectorless-engine/pull/65), [llmgate #17](https://github.com/hallelx2/llmgate/pull/17) |
+| 19 Sep | Long sections split at their own headings, on Jev | [#66](https://github.com/hallelx2/vectorless-engine/pull/66) |
+| 25 Sep | The rule written down: a closed set of options goes to the judge | [judgement-not-generation](docs/evaluations/2026-09-25-judgement-not-generation.md) |
+| 28 Sep | The latency was our own client: median query 50.5 s became 1.9 s | [latency-was-our-cpu](docs/evaluations/2026-09-28-latency-was-our-cpu.md) |
+| Oct | Pincites: Jev picks the supporting sentence for every claim | [#72](https://github.com/hallelx2/vectorless-engine/pull/72) |
+
+### What it did to the numbers
+
+| | Generative | On Jev | Report |
+|---|---|---|---|
+| Contents stage, per filing | 103 to 840 s, $0.017 to $0.095, one generative call | 12 to 143 s, $0.0003 to $0.0015, no generative call, 0.961 title recall against the generative trees | [toc-extraction-on-a-judge](docs/evaluations/2026-09-18-toc-extraction-on-a-judge.md) |
+| Placing sections on pages (11 filings) | 16/20 gold pages covered, median leaf 183 pages, $0.246 | 20/20, median leaf 36 pages, $0.0046 | [jev-page-resolver](docs/evaluations/2026-09-18-jev-page-resolver.md) |
+| Whole corpus after the per-page text fix | lost pages on long 10-Ks | 47/47 gold pages, 21/21 filings | [retrieval-navigation-on-a-judge](docs/evaluations/2026-09-18-retrieval-navigation-on-a-judge.md) |
+| Navigation | up to 8 chat-completion hops | 40/40 right section, 36/40 every gold page, $0.0039 per question | [leaf-granularity](docs/evaluations/2026-09-19-leaf-granularity.md) |
+
+It is unusual for a change to make a system faster, cheaper and more accurate all at once. It happened here because the generative path was never the more careful reader. On structure, it was the weaker judge.
+
+There was a second effect, and it shaped everything after. Once nothing in ingest or retrieval generates prose, no generated text can end up inside a citation. That stops being a rule someone has to remember and becomes something the architecture cannot express. Pincites are built on exactly that: the quote is always selected from the page, never written.
+
+### What it cost
+
+- **Deliberation.** A judge decides one node at a time. It does not plan across sections or combine evidence the way a chat model reasoning step by step might. Multi-hop questions are unmeasured.
+- **Determinism.** Jev is not deterministic. Probabilities near a threshold move between calls, and repeated runs returned the same set of pages 0.38 of the time (Jaccard 0.83). Replay reproduces a stored answer; it does not re-run one.
+- **A hosted dependency.** Jev is TypeSafe's API, so with a key set, document text leaves your network. Without a key the engine falls back to the generative path described above (see [Dependencies](#dependencies-you-should-know-about)).
 
 ## Results
 
