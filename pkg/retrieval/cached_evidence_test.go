@@ -34,6 +34,7 @@ func (p *pageStrategy) SelectWithCost(_ context.Context, t *tree.Tree, _ string,
 		EvidencePages: []retrieval.EvidencePage{{Page: 60, Title: "Cash flows", Text: "Purchases of PP&E (1,577) (1,373)", Confidence: 0.9}},
 		CitedPages:    [][2]int{{60, 60}},
 		Confidence:    0.8,
+		HopsTaken:     4,
 		TraceToken:    "tok-from-strategy",
 	}, nil
 }
@@ -76,9 +77,48 @@ func TestCachedHitKeepsEvidencePages(t *testing.T) {
 		t.Fatalf("hit trace token %q reasoning %q", hit.TraceToken, hit.Reasoning)
 	}
 
+	if hit.HopsTaken != 0 {
+		t.Fatalf("a hit navigated nothing: HopsTaken = %d", hit.HopsTaken)
+	}
+
+	// Editing a hit's result must not reach the next hit either.
+	hit.EvidencePages[0].Text = "edited"
+	hit.CitedPages[0] = [2]int{1, 1}
+	again, err := cached.SelectWithCost(context.Background(), tr, "capex?", budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.EvidencePages[0].Text != "Purchases of PP&E (1,577) (1,373)" || again.CitedPages[0] != [2]int{60, 60} {
+		t.Fatalf("a hit's edits leaked into the cache: %+v %v", again.EvidencePages, again.CitedPages)
+	}
+
 	// Select on the same key returns the same IDs.
 	ids, err := cached.Select(context.Background(), tr, "capex?", budget)
 	if err != nil || len(ids) != 1 || ids[0] != "sec_b" || inner.calls != 1 {
 		t.Fatalf("Select hit: ids=%v err=%v calls=%d", ids, err, inner.calls)
+	}
+}
+
+// Select may fill the cache before SelectWithCost asks for the same key.
+// The entry must still be the full result, or the later hit would answer
+// without evidence pages.
+func TestCachedSelectFirstStillCachesEvidence(t *testing.T) {
+	inner := &pageStrategy{}
+	cached := retrieval.NewCached(inner, retrieval.CachedConfig{TTL: time.Minute})
+	tr := buildTree()
+	budget := retrieval.ContextBudget{MaxTokens: 100000, ModelName: "m"}
+
+	if _, err := cached.Select(context.Background(), tr, "capex?", budget); err != nil {
+		t.Fatal(err)
+	}
+	hit, err := cached.SelectWithCost(context.Background(), tr, "capex?", budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("strategy ran %d times, want 1", inner.calls)
+	}
+	if len(hit.EvidencePages) != 1 || len(hit.CitedPages) != 1 {
+		t.Fatalf("Select-first entry lost evidence: %+v %v", hit.EvidencePages, hit.CitedPages)
 	}
 }

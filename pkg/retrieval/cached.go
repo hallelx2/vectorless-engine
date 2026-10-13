@@ -63,6 +63,17 @@ func (c *Cached) Name() string { return c.inner.Name() }
 // Select checks the cache first. On a miss it delegates to the inner
 // strategy and caches the result.
 func (c *Cached) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
+	// A strategy that reports a full Result is always cached through
+	// SelectWithCost, so no entry is ever an IDs-only stand-in that a
+	// later SelectWithCost hit would serve without its evidence pages.
+	if _, ok := c.inner.(CostStrategy); ok {
+		r, err := c.SelectWithCost(ctx, t, query, budget)
+		if err != nil {
+			return nil, err
+		}
+		return r.SelectedIDs, nil
+	}
+
 	key := cache.Key(string(t.DocumentID), query, c.inner.Name(), budget.ModelName)
 
 	if r, ok := c.get(key); ok {
@@ -93,6 +104,7 @@ func (c *Cached) SelectWithCost(ctx context.Context, t *tree.Tree, query string,
 	if r, ok := c.get(key); ok {
 		r.Reasoning = "cached"
 		r.Usage = Usage{} // zero — no LLM call
+		r.HopsTaken = 0   // and no navigation on this request
 		if r.ModelUsed == "" {
 			r.ModelUsed = budget.ModelName
 		}
