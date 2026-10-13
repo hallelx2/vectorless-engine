@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -108,15 +109,10 @@ func isInternalPath(p string) bool {
 // isQueryPath reports whether the URL path is a query endpoint that
 // should receive the longer timeout.
 func isQueryPath(path string) bool {
-	// Covers both REST (/v1/query) and Connect-RPC query paths.
-	return len(path) >= 6 && containsQuery(path)
-}
-
-func containsQuery(s string) bool {
-	for i := 0; i <= len(s)-5; i++ {
-		if s[i:i+5] == "query" || s[i:i+5] == "Query" {
-			return true
-		}
-	}
-	return false
+	// Retrieval and answers, REST and Connect-RPC alike: /v1/query/*,
+	// /v1/answer/* and the Query service. Answers retrieve first and then
+	// wait on the answer model (the treewalk answer up to eight hops), so
+	// they need the query deadline, not the default one.
+	return strings.Contains(path, "query") || strings.Contains(path, "Query") ||
+		strings.HasPrefix(path, "/v1/answer")
 }

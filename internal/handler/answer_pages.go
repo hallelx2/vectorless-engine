@@ -292,6 +292,9 @@ func synthesiseFromPages(ctx context.Context, client llmgate.Client, model, quer
 	if err != nil {
 		return "", retrieval.Usage{}, err
 	}
+	if strings.TrimSpace(resp.Content) == "" {
+		return "", retrieval.Usage{}, emptyAnswerError(resp)
+	}
 	return strings.TrimSpace(resp.Content), retrieval.Usage{
 		InputTokens:  resp.Usage.InputTokens,
 		OutputTokens: resp.Usage.OutputTokens,
@@ -299,6 +302,23 @@ func synthesiseFromPages(ctx context.Context, client llmgate.Client, model, quer
 		CostUSD:      resp.Usage.CostUSD,
 		LLMCalls:     1,
 	}, nil
+}
+
+// errEmptyAnswer is a model call that succeeded and wrote nothing. A
+// reasoning model (GLM-4.6, an o-series model) can spend the whole token
+// budget thinking and return no answer; served as a 200 that looked like a
+// blank answer with page-level citations and nothing to anchor them to.
+var errEmptyAnswer = errors.New("the answer model returned no text")
+
+func emptyAnswerError(resp *llmgate.Response) error {
+	if resp == nil {
+		return errEmptyAnswer
+	}
+	if resp.ReasoningContent != "" || resp.FinishReason == "max_tokens" || resp.FinishReason == "length" {
+		return fmt.Errorf("%w: it used its %d output tokens on reasoning (finish reason %q); raise engine.retrieval.answer.max_answer_tokens or use a non-reasoning answer model",
+			errEmptyAnswer, resp.Usage.OutputTokens, resp.FinishReason)
+	}
+	return fmt.Errorf("%w (finish reason %q)", errEmptyAnswer, resp.FinishReason)
 }
 
 // textSentences is the candidate list when there is no layout: the

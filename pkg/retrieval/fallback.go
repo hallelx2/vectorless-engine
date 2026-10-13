@@ -128,15 +128,27 @@ func selectWithCost(ctx context.Context, s Strategy, t *tree.Tree, query string,
 // provider's name, status and billing text stay in our logs: they are not
 // the customer's business, and they name a supplier.
 func PublicError(err error) string {
+	return publicError("retrieval", err)
+}
+
+// PublicAnswerError is PublicError for the answer step: retrieval
+// succeeded and the model writing the answer failed. Naming the stage
+// tells an operator to look at the answer model's key and name, not at
+// the document or the structure model.
+func PublicAnswerError(err error) string {
+	return publicError("answer generation", err)
+}
+
+func publicError(stage string, err error) string {
 	var nc interface{ NotConfigured() bool }
 	if errors.As(err, &nc) && nc.NotConfigured() {
 		return err.Error()
 	}
 	if ProviderUnavailable(err) {
-		return "retrieval is temporarily unavailable; please retry shortly"
+		return stage + " is temporarily unavailable; please retry shortly"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return "retrieval timed out; please retry"
+		return stage + " timed out; please retry"
 	}
-	return "retrieval failed"
+	return stage + " failed"
 }

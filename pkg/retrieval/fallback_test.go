@@ -86,3 +86,29 @@ func TestPublicErrorNamesNoProvider(t *testing.T) {
 		}
 	}
 }
+
+// An answer that fails after retrieval succeeded must say so: "retrieval
+// failed" sent operators looking at the document and the structure model
+// when the answer model's name or key was wrong (HAL-2846). The answer
+// message hides the provider exactly as the retrieval one does.
+func TestPublicAnswerErrorNamesTheStage(t *testing.T) {
+	cases := map[error]string{
+		errors.New("anthropic: 404: model not found"): "answer generation failed",
+		providerErr(500):         "answer generation is temporarily unavailable; please retry shortly",
+		context.DeadlineExceeded: "answer generation timed out; please retry",
+	}
+	for err, want := range cases {
+		got := PublicAnswerError(err)
+		if got != want {
+			t.Errorf("%v: got %q, want %q", err, got, want)
+		}
+		for _, leak := range []string{"anthropic", "404", "500", "retrieval"} {
+			if strings.Contains(strings.ToLower(got), leak) {
+				t.Errorf("%v: answer message %q mentions %q", err, got, leak)
+			}
+		}
+	}
+	if got := PublicError(errors.New("boom")); got != "retrieval failed" {
+		t.Errorf("retrieval message changed: %q", got)
+	}
+}

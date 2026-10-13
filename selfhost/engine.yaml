@@ -1,0 +1,51 @@
+# Engine configuration for self-hosting the engine on its own.
+#
+# The same pipeline the hosted service ran (contents found and placed by
+# Jev, judgewalk retrieval, line-level pincites), with documents on a local
+# volume and the job queue in Postgres. Model keys and the API token come
+# from the environment; see .env.example.
+server:
+  addr: ":8080"
+  read_timeout: 60s
+  write_timeout: 300s
+  drain_timeout: 15s
+auth:
+  mode: "api_key"          # Authorization: Bearer $VECTORLESS_API_KEY
+  # One tenant, no control plane: requests need no X-Vectorless-Org header.
+  # The nil UUID is the org the standalone engine (cmd/engine) uses too.
+  default_org: "00000000-0000-0000-0000-000000000000"
+metrics:
+  enabled: false
+cors:
+  enabled: false
+engine:
+  database:
+    max_conns: 10
+  storage:
+    driver: "local"
+    local:
+      root: "/data/documents"
+  queue:
+    driver: "river"        # the job queue lives in Postgres: nothing else to run
+    river:
+      num_workers: 4
+  llm:
+    driver: "anthropic"    # overridden by VECTORLESS_LLM_PROVIDER
+    concurrency:
+      initial: 8
+      max: 64
+  retrieval:
+    strategy: "judgewalk"  # falls back to treewalk while no TypeSafe key is set
+    answer:
+      max_answer_tokens: 1200
+    replay:
+      enabled: true
+    treewalk:
+      enabled: true
+  ingest:
+    mode: "toc"
+    hyde:
+      enabled: false
+  log:
+    level: "info"
+    format: "json"

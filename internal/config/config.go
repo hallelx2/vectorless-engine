@@ -121,6 +121,14 @@ type AuthConfig struct {
 	// APIKey is the expected Bearer token when Mode is "api_key".
 	// Compared with crypto/subtle.ConstantTimeCompare.
 	APIKey string `yaml:"api_key"`
+
+	// DefaultOrg is the org a request belongs to when it carries no
+	// X-Vectorless-Org header. Behind the control plane every request
+	// names its org and this stays empty, so a missing header is a 400.
+	// A single-tenant self-host with no control plane sets it (the
+	// standalone engine uses the nil UUID) so callers need only the
+	// bearer token. A header on the request still wins.
+	DefaultOrg string `yaml:"default_org"`
 }
 
 // MetricsConfig configures Prometheus metrics.
@@ -266,6 +274,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("VLS_AUTH_API_KEY"); v != "" {
 		c.Auth.APIKey = v
+	}
+	if v := os.Getenv("VLS_AUTH_DEFAULT_ORG"); v != "" {
+		c.Auth.DefaultOrg = v
 	}
 
 	// ── Metrics ───────────────────────────────────────────────────

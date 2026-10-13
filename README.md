@@ -37,7 +37,7 @@
 
 ## See it work
 
-Recorded live on vectorless.store on 12 October 2026, before the hosted service shut down. The 3M 2018 10-K (160 pages) was ready to query 13 seconds after upload. The question below was answered in 5.4 seconds, with 3 of its 4 citations pinned to exact lines. Clicking one opens page 39 with the "Total Company" capital spending row highlighted: $1,577M in 2018 against $1,373M in 2017.
+Recorded live on vectorless.store on 12 October 2026, before the hosted service shut down. The 3M 2018 10-K (160 pages) was ready to query 13 seconds after upload. The question below was answered in 5.4 seconds, with 3 of its 4 citations pinned to exact lines. Clicking one opens page 39 with the "Total Company" capital spending row highlighted: $1,577M in 2018 against $1,373M in 2017. The screens are the hosted dashboard, which isn't open source. Every number and highlight in it came from this engine's API, which the [self-host setup](#self-host-the-engine) runs.
 
 <p align="center">
   <a href="docs/media/live-walkthrough.mp4"><img src="docs/media/live-ask-and-pincite.gif" alt="Asking the 3M 2018 10-K about capital expenditure, then clicking a citation to land on the highlighted row of page 39" width="100%"/></a>
@@ -46,7 +46,7 @@ Recorded live on vectorless.store on 12 October 2026, before the hosted service 
 
 ## Status
 
-The hosted Vectorless service is closing (decided 2026-10-11). The code is open source under Apache 2.0 and is no longer actively developed. Issues and pull requests may not get a reply. For anything else, write to halleluyaholudele@gmail.com.
+The hosted Vectorless service closed on 12 October 2026. This engine is open source under Apache 2.0 and is no longer actively developed. The hosted dashboard and control plane aren't part of it and aren't published. Issues and pull requests may not get a reply. For anything else, write to halleluyaholudele@gmail.com.
 
 ## How it works
 
@@ -209,24 +209,31 @@ To reproduce the FinanceBench runs, see `cmd/navbench`, `cmd/tocdump` and the ha
 
 ## Quick start
 
-### The whole product: self-host
+### Self-host the engine
 
-The dashboard, control plane, engine and Postgres all start from one command in the [`vectorless`](https://github.com/hallelx2/vectorless) repository. You sign up as the first user, enter your model keys on **Settings → Model providers**, and upload a document. Keys take effect without a restart.
-
-You need only the `vectorless` repository. The stack pulls public images from GitHub's container registry, built from each repository's `main` branch for `linux/amd64` and `linux/arm64`. This repository's server is `ghcr.io/hallelx2/vectorless-engine`.
+`selfhost/` runs the server binary production ran, with Postgres beside it. That gives you the whole pipeline above: Jev building the contents, judgewalk retrieval, answers, line-level pincites, page images and live ingest progress. It's an HTTP API protected by one bearer token. You call it with `curl`, the [SDKs](#sdks-and-mcp) or the [MCP server](https://github.com/hallelx2/vectorless-mcp). There's no web dashboard.
 
 ```bash
-git clone https://github.com/hallelx2/vectorless.git
-cd vectorless/selfhost && docker compose up -d
-# when every service is healthy: http://localhost:3000
+git clone https://github.com/hallelx2/vectorless-engine.git
+cd vectorless-engine/selfhost
+cp .env.example .env    # set VECTORLESS_API_KEY, an answer-model key and TYPESAFE_API_KEY
+docker compose up -d
 ```
 
-There is no `.env` to write. Secrets are generated on first boot. Set `VECTORLESS_VERSION` in `selfhost/.env` to pin the images to a commit tag instead of `latest`. To run a change you made here, build the images from source with the stack's `docker-compose.build.yml` override; the [self-host guide](https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md#building-from-source) shows how.
+Then ingest a filing and ask it something:
 
-<p align="center">
-  <a href="https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md"><img src="docs/media/selfhost-keys.gif" alt="A fresh self-hosted instance: the first account is created, then model keys are entered as dots on Settings, Model providers, tested and saved without a restart" width="100%"/></a>
-  <br/><sub>First boot of a self-hosted instance: the administrator account, then model keys entered on <b>Settings → Model providers</b>. The full guide is in <a href="https://github.com/hallelx2/vectorless/blob/main/selfhost/README.md">selfhost/README.md</a>.</sub>
-</p>
+```bash
+export K=<your VECTORLESS_API_KEY>
+curl -s -H "Authorization: Bearer $K" -F file=@3M_2018_10K.pdf http://localhost:8080/v1/documents
+# {"document_id":"doc_…","status":"pending"}; poll GET /v1/documents/doc_… until "ready"
+curl -s -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
+  -d '{"document_id":"doc_…","query":"What was 3M'"'"'s capital expenditure in 2018, and how did it compare with 2017?"}' \
+  http://localhost:8080/v1/answer
+```
+
+On 13 October 2026, this setup ran the 3M 2018 10-K (160 pages) with GLM-4.5-Air writing the answers. The filing was ready 10 seconds after upload. The answer took 6.1 seconds: $1,577 million in 2018 against $1,373 million in 2017. Its pincites landed at line precision on the cash-flow statement (page 60) and on the segment table (page 126).
+
+The image is `ghcr.io/hallelx2/vectorless-engine`, built from `main` for `linux/amd64` and `linux/arm64`. Pin `VECTORLESS_VERSION` in `.env` to a 12-character commit tag instead of `latest` if you want a fixed build. [`selfhost/README.md`](selfhost/README.md) has the full reference: every variable, how to choose an answer model, exposing the port, backups and building from source.
 
 ### The engine on its own
 
@@ -263,7 +270,7 @@ export VLE_INGEST_MODE=toc VLE_RETRIEVAL_STRATEGY=judgewalk
 go run ./cmd/engine --local      # zero-config local mode on :7654
 ```
 
-For the dashboard and everything around it, use the self-host stack above.
+For the pipeline as production ran it, use the self-host setup above, which runs `cmd/server`.
 
 ## HTTP API
 

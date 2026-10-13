@@ -182,10 +182,9 @@ Distroless = no shell, no package manager, minimal CVE surface.
 ### Publishing
 
 - GitHub Container Registry (GHCR): `ghcr.io/hallelx2/vectorless-engine`
-  is the server binary (`Dockerfile.server`). Its siblings are
-  `ghcr.io/hallelx2/vectorless-control-plane` and
-  `ghcr.io/hallelx2/vectorless-web`. (`ghcr.io/vectorless` belongs to an
-  unrelated GitHub account.) The images are public.
+  is the server binary (`Dockerfile.server`), and it's public.
+  `selfhost/docker-compose.yml` runs it with Postgres.
+  (`ghcr.io/vectorless` belongs to an unrelated GitHub account.)
 - Tags:
   - `latest` and `main`: the newest build of `main`.
   - `<12-character commit SHA>`: one exact build, for reproducibility.
