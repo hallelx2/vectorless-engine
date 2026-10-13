@@ -142,6 +142,12 @@ func Router(d Deps) http.Handler {
 	}
 	r.Use(middleware.Auth(auth))
 
+	// Single-tenant self-host: requests without an org header belong to
+	// the configured default org (auth.default_org).
+	if d.Config.Auth.DefaultOrg != "" {
+		r.Use(middleware.DefaultOrg(d.Config.Auth.DefaultOrg))
+	}
+
 	// Rate limit (optional).
 	if d.Config.RateLimit.Enabled {
 		r.Use(middleware.RateLimit(d.Config.RateLimit.RequestsPerMinute))

@@ -1,0 +1,72 @@
+# Self-host the Vectorless engine: the HTTP API, Postgres, nothing else.
+#
+#   cp .env.example .env     # set VECTORLESS_API_KEY and your model keys
+#
+# Every variable carries a VECTORLESS_ prefix on purpose: Compose lets the
+# shell override .env, and a shell set up for Claude Code or an SDK often
+# exports ANTHROPIC_BASE_URL or OPENAI_API_KEY, which would silently win.
+#   docker compose up -d
+#   curl -H "Authorization: Bearer $VECTORLESS_API_KEY" http://localhost:8080/v1/health
+#
+# The image is ghcr.io/hallelx2/vectorless-engine, built from this
+# repository's main branch for linux/amd64 and linux/arm64.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vectorless
+      POSTGRES_DB: engine
+      POSTGRES_PASSWORD: ${VECTORLESS_POSTGRES_PASSWORD:-vectorless}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U vectorless -d engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  engine:
+    image: ${VECTORLESS_IMAGE:-ghcr.io/hallelx2/vectorless-engine}:${VECTORLESS_VERSION:-latest}
+    restart: unless-stopped
+    command: ["--config", "/etc/vectorless/engine.yaml", "--role", "server"]
+    environment:
+      VLS_DATABASE_URL: postgres://vectorless:${VECTORLESS_POSTGRES_PASSWORD:-vectorless}@postgres:5432/engine?sslmode=disable
+      VLS_AUTH_API_KEY: ${VECTORLESS_API_KEY:?set VECTORLESS_API_KEY in .env (any long random string)}
+      # The model that writes answers. Any one of these is enough.
+      VLS_LLM_DRIVER: ${VECTORLESS_LLM_PROVIDER:-anthropic}
+      VLS_ANTHROPIC_API_KEY: ${VECTORLESS_ANTHROPIC_API_KEY:-}
+      VLS_LLM_ANTHROPIC_BASE_URL: ${VECTORLESS_ANTHROPIC_BASE_URL:-}
+      VLS_LLM_ANTHROPIC_MODEL: ${VECTORLESS_ANTHROPIC_MODEL:-}
+      VLS_OPENAI_API_KEY: ${VECTORLESS_OPENAI_API_KEY:-}
+      VLS_LLM_OPENAI_BASE_URL: ${VECTORLESS_OPENAI_BASE_URL:-}
+      VLS_LLM_OPENAI_MODEL: ${VECTORLESS_OPENAI_MODEL:-}
+      VLS_GEMINI_API_KEY: ${VECTORLESS_GEMINI_API_KEY:-}
+      VLS_LLM_GEMINI_MODEL: ${VECTORLESS_GEMINI_MODEL:-}
+      VLS_LLM_ANSWER_MODEL: ${VECTORLESS_ANSWER_MODEL:-}
+      # Jev, TypeSafe's System One model: contents, page selection, pincites.
+      VLS_TYPESAFE_API_KEY: ${VECTORLESS_TYPESAFE_API_KEY:-}
+      VLS_TYPESAFE_BASE_URL: ${VECTORLESS_TYPESAFE_BASE_URL:-}
+      VLS_TYPESAFE_MODEL: ${VECTORLESS_TYPESAFE_MODEL:-}
+      VLS_LOG_LEVEL: ${VECTORLESS_LOG_LEVEL:-info}
+      TMPDIR: /tmp
+    ports:
+      - "${VECTORLESS_BIND:-127.0.0.1}:${VECTORLESS_PORT:-8080}:8080"
+    volumes:
+      - documents:/data
+      - ./engine.yaml:/etc/vectorless/engine.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+volumes:
+  pgdata:
+  documents:

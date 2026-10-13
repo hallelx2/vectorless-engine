@@ -293,7 +293,12 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		h.logger.Error("answer: generation failed", "err", err, "document_id", body.DocumentID)
-		fail(http.StatusInternalServerError, retrieval.PublicError(err))
+		msg := retrieval.PublicAnswerError(err)
+		if errors.Is(err, errEmptyAnswer) {
+			// Names no provider, and tells an operator where to look.
+			msg = "the answer model returned no text; see the server log"
+		}
+		fail(http.StatusInternalServerError, msg)
 		return
 	}
 
