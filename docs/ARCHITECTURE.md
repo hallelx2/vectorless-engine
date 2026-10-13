@@ -7,8 +7,8 @@
 > the document's contents page by Jev (TypeSafe's System One model), with no
 > generated summaries, and retrieval returns evidence pages verbatim. See the
 > [README](../README.md#how-it-works) and [ENGINE.md](./ENGINE.md). The hosted
-> service (control plane and dashboard as SaaS) is closing; the project is
-> open source and no longer actively developed.
+> service (control plane and dashboard as SaaS) is paused; the engine is
+> open source.
 
 ## One-sentence summary
 
