@@ -3,7 +3,9 @@
 # Standalone engine build (no server wrapper).
 # Context: vectorless-engine/ directory.
 #
-FROM golang:1.25-alpine AS build
+# Compile on the build machine for the target platform: no emulated
+# go build for arm64, and the binary matches the image it ships in.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 
 RUN apk add --no-cache ca-certificates
 
@@ -20,7 +22,9 @@ COPY internal/ ./internal/
 
 # 3) Build a fully-static, stripped binary.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build \
       -trimpath \
       -ldflags="-s -w -X main.version=${VERSION}" \
