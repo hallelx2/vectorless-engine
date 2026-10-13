@@ -1,0 +1,40 @@
+name: jules-review
+
+# Optional: auto-invoke Jules for a security-focused review on every PR.
+# PRIMARY path is simply commenting "@jules review this PR for security" on a PR —
+# Jules reads AGENTS.md + .github/agents/security-reviewer.agent.md and responds.
+# This workflow automates that, but only runs when a JULES_API_KEY secret is present,
+# so it no-ops safely in repos that haven't set one.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  jules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — only run when a Jules key is configured
+        id: guard
+        run: |
+          if [ -n "${{ secrets.JULES_API_KEY }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No JULES_API_KEY set — skipping automated Jules review. Use @jules on the PR instead."
+          fi
+      - name: Jules security review
+        if: steps.guard.outputs.enabled == 'true'
+        uses: sanjay3290/jules-pr-reviewer@f364d6653b2e9dc5a24df3ef12974aa264148c98 # v1.0.1
+        with:
+          jules-api-key: ${{ secrets.JULES_API_KEY }}
+          github-token: ${{ github.token }}
+          review-prompt: >
+            Review this pull request as an adversarial application-security reviewer.
+            Follow .github/agents/security-reviewer.agent.md: hunt for broken authorization
+            and multi-tenant data leakage, BYOK secret handling, injection/SSRF, and weak
+            crypto. Default to "this is a finding" when unsure. Cite file:line and propose the fix.

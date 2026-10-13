@@ -1,0 +1,139 @@
+name: security (reusable)
+
+# Deterministic security scanners, written once and called by every repo via
+# `.github/workflows/security.yml`. The AI reviewers (Copilot agents + Jules) sit
+# on top of this. This layer catches the textbook vuln classes + real CVEs.
+# Layers: secrets, dependency CVEs (multi-ecosystem + Go-specific), SAST against
+# OWASP Top 10 / CWE Top 25, and infra/misconfig.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  secret-scan:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  sast-semgrep:
+    name: SAST — OWASP Top 10 + CWE Top 25 (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan (industry rulesets)
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/cwe-top-25 \
+            --config p/secrets \
+            --config p/javascript \
+            --config p/typescript \
+            --config p/python \
+            --config p/github-actions \
+            --sarif --output semgrep.sarif || true
+      - name: Upload Semgrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true
+
+  go-cves:
+    name: Go CVEs (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Go module
+        id: detect
+        run: |
+          if [ -f go.mod ]; then echo "is_go=true" >> "$GITHUB_OUTPUT"; else echo "is_go=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-go@v5
+        if: steps.detect.outputs.is_go == 'true'
+        with:
+          go-version: stable
+      - name: govulncheck (only CVEs that reach real call paths)
+        if: steps.detect.outputs.is_go == 'true'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./... || true
+
+  go-sast:
+    name: Go SAST (gosec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Go module
+        id: detect
+        run: |
+          if [ -f go.mod ]; then echo "is_go=true" >> "$GITHUB_OUTPUT"; else echo "is_go=false" >> "$GITHUB_OUTPUT"; fi
+      - name: gosec
+        if: steps.detect.outputs.is_go == 'true'
+        uses: securego/gosec@9e6a9843d7a4a6e3e9a8539b02612c8a4aa3f889 # v2.27.1
+        with:
+          args: -no-fail -fmt text ./...
+
+  node-cves:
+    name: Node/TS deps (npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Node project
+        id: detect
+        run: |
+          if [ -f package.json ]; then echo "is_node=true" >> "$GITHUB_OUTPUT"; else echo "is_node=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.is_node == 'true'
+        with:
+          node-version: '20'
+      - name: npm audit (high + critical)
+        if: steps.detect.outputs.is_node == 'true'
+        run: |
+          npm install --package-lock-only --ignore-scripts 2>/dev/null || true
+          npm audit --audit-level=high || true
+
+  python-sast:
+    name: Python deps + SAST (pip-audit + bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Python project
+        id: detect
+        run: |
+          if ls requirements*.txt pyproject.toml setup.py >/dev/null 2>&1; then echo "is_py=true" >> "$GITHUB_OUTPUT"; else echo "is_py=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-python@v5
+        if: steps.detect.outputs.is_py == 'true'
+        with:
+          python-version: '3.x'
+      - name: pip-audit (CVEs) + bandit (SAST)
+        if: steps.detect.outputs.is_py == 'true'
+        run: |
+          pip install --quiet pip-audit bandit
+          pip-audit || true
+          bandit -r . -ll || true
+
+  infra-trivy:
+    name: Vulns + misconfig (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Trivy (latest binary — avoids the action's broken setup-trivy pin)
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - name: Trivy filesystem scan
+        run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --no-progress .
+
+# Deepest free SAST = CodeQL. It needs per-repo language detection, so enable it
+# per PUBLIC repo via Settings → Code security → Code scanning → Default setup (auto).
+# Private repos (control-plane, deploy) rely on the Semgrep + OSV + gosec jobs above.
