@@ -12,7 +12,7 @@
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/badge/go-%3E%3D1.25-00ADD8?logo=go&logoColor=white"/></a>
   <img alt="FinanceBench: 40/40 right section" src="https://img.shields.io/badge/FinanceBench-40%2F40%20right%20section-ff5a00"/>
   <img alt="Query: 1.9 s median" src="https://img.shields.io/badge/query-1.9%20s%20median-18181b"/>
-  <img alt="Status: open source, not maintained" src="https://img.shields.io/badge/status-open%20source%2C%20not%20maintained-lightgrey"/>
+  <img alt="Status: open source, hosted service paused" src="https://img.shields.io/badge/status-open%20source%2C%20hosted%20service%20paused-lightgrey"/>
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 
 ## See it work
 
-Recorded live on vectorless.store on 12 October 2026, before the hosted service shut down. The 3M 2018 10-K (160 pages) was ready to query 13 seconds after upload. The question below was answered in 5.4 seconds, with 3 of its 4 citations pinned to exact lines. Clicking one opens page 39 with the "Total Company" capital spending row highlighted: $1,577M in 2018 against $1,373M in 2017. The screens are the hosted dashboard, which isn't open source. Every number and highlight in it came from this engine's API, which the [self-host setup](#self-host-the-engine) runs.
+Recorded live on vectorless.store on 12 October 2026, before the hosted service was paused. The 3M 2018 10-K (160 pages) was ready to query 13 seconds after upload. The question below was answered in 5.4 seconds, with 3 of its 4 citations pinned to exact lines. Clicking one opens page 39 with the "Total Company" capital spending row highlighted: $1,577M in 2018 against $1,373M in 2017. The screens are the hosted dashboard, which isn't open source. Every number and highlight in it came from this engine's API, which the [self-host setup](#self-host-the-engine) runs.
 
 <p align="center">
   <a href="docs/media/live-walkthrough.mp4"><img src="docs/media/live-ask-and-pincite.gif" alt="Asking the 3M 2018 10-K about capital expenditure, then clicking a citation to land on the highlighted row of page 39" width="100%"/></a>
@@ -46,7 +46,7 @@ Recorded live on vectorless.store on 12 October 2026, before the hosted service 
 
 ## Status
 
-The hosted Vectorless service closed on 12 October 2026. This engine is open source under Apache 2.0 and is no longer actively developed. The hosted dashboard and control plane aren't part of it and aren't published. Issues and pull requests may not get a reply. For anything else, write to halleluyaholudele@gmail.com.
+The hosted service at vectorless.store has been paused since 12 October 2026. It isn't gone for good: the data is backed up and the infrastructure is kept as code, so it can come back. In the meantime this engine is open source under Apache 2.0, and you can run it yourself with the [self-host setup](#self-host-the-engine). The hosted dashboard and control plane aren't part of this repository. Issues and pull requests are read, but replies may be slow. To talk about using the engine in production, or building on it together, write to halleluyaholudele@gmail.com.
 
 ## How it works
 
