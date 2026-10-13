@@ -11,9 +11,13 @@ import (
 // Cached wraps any Strategy and caches its Select results in an LRU.
 //
 // Cache key = sha256(document_id || query || strategy_name || model_name).
-// The cached value is the []tree.SectionID slice; the wrapping is
-// intentionally transparent — callers interact with the standard Strategy
-// interface and don't know caching is present.
+// The cached value is a copy of the whole Result, so a hit returns what
+// the strategy found: for a page strategy that includes the evidence
+// pages the answer and its pincites are built from. Caching only the
+// section IDs dropped them, and a repeated question came back with no
+// pincites (HAL-2846). The wrapping is intentionally transparent —
+// callers interact with the standard Strategy interface and don't know
+// caching is present.
 //
 // Cached also implements CostStrategy if the wrapped strategy does. On a
 // cache hit, CostUSD and LLMCalls are both zero (no LLM call was made).
@@ -59,10 +63,21 @@ func (c *Cached) Name() string { return c.inner.Name() }
 // Select checks the cache first. On a miss it delegates to the inner
 // strategy and caches the result.
 func (c *Cached) Select(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) ([]tree.SectionID, error) {
+	// A strategy that reports a full Result is always cached through
+	// SelectWithCost, so no entry is ever an IDs-only stand-in that a
+	// later SelectWithCost hit would serve without its evidence pages.
+	if _, ok := c.inner.(CostStrategy); ok {
+		r, err := c.SelectWithCost(ctx, t, query, budget)
+		if err != nil {
+			return nil, err
+		}
+		return r.SelectedIDs, nil
+	}
+
 	key := cache.Key(string(t.DocumentID), query, c.inner.Name(), budget.ModelName)
 
-	if v, ok := c.cache.Get(key); ok {
-		return v.([]tree.SectionID), nil
+	if r, ok := c.get(key); ok {
+		return r.SelectedIDs, nil
 	}
 
 	ids, err := c.inner.Select(ctx, t, query, budget)
@@ -70,8 +85,8 @@ func (c *Cached) Select(ctx context.Context, t *tree.Tree, query string, budget 
 		return nil, err
 	}
 
-	c.cache.Set(key, ids, c.ttl)
-	return ids, nil
+	c.cache.Set(key, cloneResult(&Result{SelectedIDs: ids}), c.ttl)
+	return append([]tree.SectionID(nil), ids...), nil
 }
 
 // SelectWithCost checks the cache first. On a hit it returns zero usage
@@ -86,15 +101,17 @@ func (c *Cached) Select(ctx context.Context, t *tree.Tree, query string, budget 
 func (c *Cached) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	key := cache.Key(string(t.DocumentID), query, c.inner.Name(), budget.ModelName)
 
-	if v, ok := c.cache.Get(key); ok {
-		ids := v.([]tree.SectionID)
-		return &Result{
-			SelectedIDs: ids,
-			Reasoning:   "cached",
-			ModelUsed:   budget.ModelName,
-			Usage:       Usage{}, // zero — no LLM call
-			TraceToken:  ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, ids),
-		}, nil
+	if r, ok := c.get(key); ok {
+		r.Reasoning = "cached"
+		r.Usage = Usage{} // zero — no LLM call
+		r.HopsTaken = 0   // and no navigation on this request
+		if r.ModelUsed == "" {
+			r.ModelUsed = budget.ModelName
+		}
+		if r.TraceToken == "" {
+			r.TraceToken = ComputeTraceToken(t.DocumentID, traceDocVersionV1, budget.ModelName, r.SelectedIDs)
+		}
+		return r, nil
 	}
 
 	var result *Result
@@ -115,8 +132,49 @@ func (c *Cached) SelectWithCost(ctx context.Context, t *tree.Tree, query string,
 		}
 	}
 
-	c.cache.Set(key, result.SelectedIDs, c.ttl)
+	c.cache.Set(key, cloneResult(result), c.ttl)
 	return result, nil
+}
+
+// get returns a private copy of the cached Result for key, so a caller
+// that edits its result (the answer path trims evidence, for one) never
+// changes what the next hit sees.
+func (c *Cached) get(key string) (*Result, bool) {
+	v, ok := c.cache.Get(key)
+	if !ok {
+		return nil, false
+	}
+	r, ok := v.(*Result)
+	if !ok || r == nil {
+		return nil, false
+	}
+	return cloneResult(r), true
+}
+
+// cloneResult deep-copies the parts of a Result a caller could mutate:
+// its slices and map.
+func cloneResult(r *Result) *Result {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.SelectedIDs = append([]tree.SectionID(nil), r.SelectedIDs...)
+	if r.Confidences != nil {
+		out.Confidences = make(map[tree.SectionID]float64, len(r.Confidences))
+		for k, v := range r.Confidences {
+			out.Confidences[k] = v
+		}
+	}
+	if r.PagesRead != nil {
+		out.PagesRead = make([]PageReadEntry, len(r.PagesRead))
+		for i, p := range r.PagesRead {
+			p.SectionIDs = append([]tree.SectionID(nil), p.SectionIDs...)
+			out.PagesRead[i] = p
+		}
+	}
+	out.EvidencePages = append([]EvidencePage(nil), r.EvidencePages...)
+	out.CitedPages = append([][2]int(nil), r.CitedPages...)
+	return &out
 }
 
 // SelectStream delegates to the inner strategy's SelectStream if it
