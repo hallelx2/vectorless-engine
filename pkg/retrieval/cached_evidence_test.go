@@ -29,7 +29,7 @@ func (p *pageStrategy) SelectWithCost(_ context.Context, t *tree.Tree, _ string,
 	return &retrieval.Result{
 		SelectedIDs:   ids,
 		Confidences:   map[tree.SectionID]float64{"sec_b": 0.9},
-		Usage:         retrieval.Usage{LLMCalls: 3, InputTokens: 900},
+		Usage:         retrieval.Usage{LLMCalls: 3, InputTokens: 900, OutputTokens: 40, TotalTokens: 940, CostUSD: 0.0001},
 		PagesRead:     []retrieval.PageReadEntry{{StartPage: 60, EndPage: 60}},
 		EvidencePages: []retrieval.EvidencePage{{Page: 60, Title: "Cash flows", Text: "Purchases of PP&E (1,577) (1,373)", Confidence: 0.9}},
 		CitedPages:    [][2]int{{60, 60}},
@@ -70,7 +70,7 @@ func TestCachedHitKeepsEvidencePages(t *testing.T) {
 	if len(hit.CitedPages) != 1 || len(hit.PagesRead) != 1 || hit.Confidence != 0.8 || hit.Confidences["sec_b"] != 0.9 {
 		t.Fatalf("page result lost on a hit: cited=%v read=%v conf=%v confs=%v", hit.CitedPages, hit.PagesRead, hit.Confidence, hit.Confidences)
 	}
-	if hit.Usage.LLMCalls != 0 || hit.Usage.InputTokens != 0 {
+	if hit.Usage != (retrieval.Usage{}) {
 		t.Fatalf("a hit costs nothing: usage = %+v", hit.Usage)
 	}
 	if hit.TraceToken != "tok-from-strategy" || hit.Reasoning != "cached" {
