@@ -141,7 +141,7 @@ func (h *QueryMultiHandler) HandleQueryMulti(w http.ResponseWriter, r *http.Requ
 		errs[string(docID)] = e.Error()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"query":      body.Query,
 		"strategy":   retrieval.PublicName(h.strategy.Name()),
 		"model":      body.Model,
@@ -155,5 +155,7 @@ func (h *QueryMultiHandler) HandleQueryMulti(w http.ResponseWriter, r *http.Requ
 			"cost_usd":      result.TotalUsage.CostUSD,
 			"llm_calls":     result.TotalUsage.LLMCalls,
 		},
-	})
+	}
+	withTiming(r, resp)
+	writeJSON(w, http.StatusOK, resp)
 }

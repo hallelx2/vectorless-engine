@@ -231,6 +231,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"llm_calls":     usage.LLMCalls,
 		}
 	}
+	withTiming(r, resp)
 	setTokenHeaders(w.Header(), resp)
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -132,14 +132,8 @@ github.com/googleapis/gax-go/v2 v2.21.0 h1:h45NjjzEO3faG9Lg/cFrBh2PgegVVgzqKzuZl
 github.com/googleapis/gax-go/v2 v2.21.0/go.mod h1:But/NJU6TnZsrLai/xBAQLLz+Hc7fHZJt/hsCz3Fih4=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 h1:8Tjv8EJ+pM1xP8mK6egEbD1OgnVTyacbefKhmbLhIhU=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2/go.mod h1:pkJQ2tZHJ0aFOVEEot6oZmaVEZcRme73eIFmhiVuRWs=
-github.com/hallelx2/llmgate v0.4.0 h1:LvaRt1PWEiR0DcNd3j8qX0GEO0oh/rKPHqfL1RABzII=
-github.com/hallelx2/llmgate v0.4.0/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
-github.com/hallelx2/llmgate v0.4.1-0.20260918182842-b2ec96425ecc h1:4b6tUdYQANqf5iCTnDZzY5dWHbRElVznCH4LiAovBkM=
-github.com/hallelx2/llmgate v0.4.1-0.20260918182842-b2ec96425ecc/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
-github.com/hallelx2/llmgate v0.5.0 h1:yNBm7NOtDrCnpeMPz2BqbNcCJeUTw0WN6oiIuEFankg=
-github.com/hallelx2/llmgate v0.5.0/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
-github.com/hallelx2/llmgate v0.5.1-0.20260928015141-010e07c576e6 h1:26w9OIBo0Cfu5vAVyjZgr0Uyh25B+p4jSg2dit6BuBI=
-github.com/hallelx2/llmgate v0.5.1-0.20260928015141-010e07c576e6/go.mod h1:WpKwV/utKOmb+G5DwezSGjmGtz9D5I6MuS4MqAs7rkA=
+github.com/hallelx2/llmgate v0.5.1-0.20261016012949-4e674f5d6726 h1:n0KEoQX4ytgC0ZrqfC5K9lapEcOlfVlcnHBsnCNqekM=
+github.com/hallelx2/llmgate v0.5.1-0.20261016012949-4e674f5d6726/go.mod h1:lvdLI9zL40oeU6rwN0GIUFE5QMJ+QEekdUNLoLjFYCI=
 github.com/hallelx2/pdftable v0.4.0 h1:ldF8qQrUbejWsbB/JSIqliEXF2jF8z8kjEsbKS8r2BU=
 github.com/hallelx2/pdftable v0.4.0/go.mod h1:pxNlc4D43wjzis7M6EfgQZvHOsQ4okggm+xqUu+OokI=
 github.com/hhrutter/lzw v1.0.0 h1:laL89Llp86W3rRs83LvKbwYRx6INE8gDn0XNb1oXtm0=

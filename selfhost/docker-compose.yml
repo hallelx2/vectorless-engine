@@ -45,6 +45,15 @@ services:
       VLS_LLM_OPENAI_MODEL: ${VECTORLESS_OPENAI_MODEL:-}
       VLS_GEMINI_API_KEY: ${VECTORLESS_GEMINI_API_KEY:-}
       VLS_LLM_GEMINI_MODEL: ${VECTORLESS_GEMINI_MODEL:-}
+      # Gemini on Google Cloud Vertex AI (VECTORLESS_LLM_PROVIDER=vertex): no
+      # key; Application Default Credentials (a VM's service account) bill
+      # the project. Thinking budget 0 turns thinking off where allowed.
+      VLS_LLM_VERTEX_PROJECT: ${VECTORLESS_VERTEX_PROJECT:-}
+      VLS_LLM_VERTEX_LOCATION: ${VECTORLESS_VERTEX_LOCATION:-global}
+      VLS_LLM_VERTEX_MODEL: ${VECTORLESS_VERTEX_MODEL:-}
+      VLS_LLM_VERTEX_THINKING_BUDGET: ${VECTORLESS_VERTEX_THINKING_BUDGET:-}
+      VLS_LLM_VERTEX_THINKING_LEVEL: ${VECTORLESS_VERTEX_THINKING_LEVEL:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${VECTORLESS_GOOGLE_CREDENTIALS_PATH:-}
       VLS_LLM_ANSWER_MODEL: ${VECTORLESS_ANSWER_MODEL:-}
       # Jev, TypeSafe's System One model: contents, page selection, pincites.
       VLS_TYPESAFE_API_KEY: ${VECTORLESS_TYPESAFE_API_KEY:-}
@@ -57,6 +66,9 @@ services:
     volumes:
       - documents:/data
       - ./engine.yaml:/etc/vectorless/engine.yaml:ro
+      # Vertex credentials off GCP (see .env.example). On a GCP VM the
+      # attached service account is used and this directory can stay empty.
+      - ./gcp:/etc/vectorless/gcp:ro
     depends_on:
       postgres:
         condition: service_healthy

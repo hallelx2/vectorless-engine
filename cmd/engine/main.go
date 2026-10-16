@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hallelx2/vectorless-engine/pkg/models"
+
 	"github.com/hallelx2/llmgate"
 	"github.com/hallelx2/llmgate/judge/typesafe"
 	"github.com/hallelx2/llmgate/middleware/limit"
@@ -415,6 +417,11 @@ func modelFor(c config.LLMConfig) string {
 		return c.OpenAI.Model
 	case "gemini":
 		return c.Gemini.Model
+	case "vertex":
+		if c.Vertex.Model != "" {
+			return c.Vertex.Model
+		}
+		return models.DefaultModels[models.ProviderVertex]
 	}
 	return ""
 }
@@ -517,6 +524,10 @@ func buildLLM(c config.LLMConfig) (llmgate.Client, error) {
 			Model:          c.Gemini.Model,
 			ReasoningModel: c.Gemini.ReasoningModel,
 		})
+	case "vertex":
+		return models.BuildClient(models.Generative{Provider: models.ProviderVertex, IngestModel: c.Vertex.Model,
+			Project: c.Vertex.Project, Location: c.Vertex.Location,
+			ThinkingBudget: c.Vertex.ThinkingBudget, ThinkingLevel: c.Vertex.ThinkingLevel})
 	default:
 		// Config.Validate rejects unknown drivers; this is defensive.
 		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)

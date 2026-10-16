@@ -77,7 +77,7 @@ engine:
     #   concurrency: 20
 
   llm:
-    driver: "anthropic"   # "anthropic", "openai", or "gemini"
+    driver: "anthropic"   # "anthropic", "openai", "gemini" or "vertex"
     anthropic:
       api_key: ""   # set via VLS_ANTHROPIC_API_KEY
       model: "claude-sonnet-4-20250514"
@@ -89,6 +89,11 @@ engine:
     # gemini:
     #   api_key: ""
     #   model: "gemini-2.0-flash"
+    # vertex:                     # Gemini on Vertex AI: no key, ADC bills the project
+    #   project: ""               # VLS_LLM_VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT)
+    #   location: "global"        # VLS_LLM_VERTEX_LOCATION
+    #   model: "gemini-2.5-flash-lite"
+    #   thinking_budget: 0        # VLS_LLM_VERTEX_THINKING_BUDGET; omit for the model default
     #   reasoning_model: ""
     # Adaptive per-provider concurrency (HAL-1372): starts at initial,
     # halves on 429/transport failure, widens on success, capped at max.

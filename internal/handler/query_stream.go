@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
+
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/storage"
@@ -49,6 +51,8 @@ type sseEvent struct {
 	DocumentID  string `json:"document_id,omitempty"`
 	Query       string `json:"query,omitempty"`
 	ElapsedMS   int64  `json:"elapsed_ms,omitempty"`
+	// Timing is the request\'s split, on the completed event only.
+	Timing *reqtiming.Timing `json:"timing,omitempty"`
 }
 
 // HandleQueryStream serves POST /v1/query/stream as Server-Sent Events.
@@ -155,6 +159,10 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 
 		case retrieval.EventCompleted:
 			sse.ElapsedMS = time.Since(started).Milliseconds()
+			if rec := reqtiming.From(r.Context()); rec != nil {
+				t := rec.Snapshot()
+				sse.Timing = &t
+			}
 
 		case retrieval.EventError:
 			if evt.Error != nil {

@@ -227,6 +227,7 @@ func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *h
 	}
 
 	finalIDs := append([]tree.SectionID(nil), res.SelectedIDs...)
+	withTiming(r, resp)
 	setTokenHeaders(w.Header(), resp)
 	raw, err := marshalJSONForReplay(resp)
 	if err != nil {
@@ -309,6 +310,7 @@ func (h *AnswerTreeWalkHandler) serveStream(w http.ResponseWriter, r *http.Reque
 		"trace_token": res.TraceToken,
 		"pages_read":  res.PagesRead,
 	}
+	withTiming(r, final)
 	emitSSE("answer", final)
 	setTokenHeaders(w.Header(), final)
 }

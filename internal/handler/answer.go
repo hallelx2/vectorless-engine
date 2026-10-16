@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
+
 	"github.com/hallelx2/llmgate"
 
 	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
@@ -144,7 +146,9 @@ func (h *AnswerHandler) resolveBYOK(w http.ResponseWriter, r *http.Request) (*by
 		writeErr(w, http.StatusBadRequest, "model key: "+err.Error())
 		return nil, false
 	}
-	return &byokClient{client: c, model: model, provider: provider}, true
+	// Timed like the registry's client, so the caller's own model counts
+	// as an answer-model wait rather than engine time.
+	return &byokClient{client: reqtiming.WrapClient(c), model: model, provider: provider}, true
 }
 
 func (b *byokClient) or(c llmgate.Client, model string) (llmgate.Client, string) {
@@ -302,6 +306,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	withTiming(r, resp)
 	raw, err := marshalJSONForReplay(resp)
 	entry := retrieval.ReplayEntry{DocumentID: body.DocumentID, Query: body.Query, Model: model, SelectedIDs: finalIDs}
 	if body.Stream {

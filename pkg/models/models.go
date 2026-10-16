@@ -31,11 +31,15 @@ const (
 	ProviderOpenAI           = "openai"
 	ProviderGemini           = "gemini"
 	ProviderOpenAICompatible = "openai-compatible"
+	// ProviderVertex is Gemini through Google Cloud Vertex AI. It takes no
+	// API key: Application Default Credentials authenticate it, and the
+	// project it names is billed.
+	ProviderVertex = "vertex"
 )
 
 // Providers lists the generative providers in the order the dashboard
 // offers them.
-var Providers = []string{ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenAICompatible}
+var Providers = []string{ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderVertex, ProviderOpenAICompatible}
 
 // DefaultModels is the model used when a provider is chosen and no model
 // is named. openai-compatible has none: its server decides what exists.
@@ -43,6 +47,7 @@ var DefaultModels = map[string]string{
 	ProviderAnthropic: "claude-sonnet-4-5",
 	ProviderOpenAI:    "gpt-4.1-mini",
 	ProviderGemini:    "gemini-2.5-flash",
+	ProviderVertex:    "gemini-2.5-flash-lite",
 }
 
 // Source says where an effective setting came from.
@@ -68,6 +73,16 @@ type Generative struct {
 	// IngestModel is the default for every other call: ingest stages and
 	// navigation. Empty uses the provider's default.
 	IngestModel string `json:"ingest_model,omitempty"`
+
+	// Project and Location address Vertex (provider "vertex" only).
+	// Empty Project falls back to GOOGLE_CLOUD_PROJECT, then to the
+	// credentials' project; empty Location is "global".
+	Project  string `json:"project,omitempty"`
+	Location string `json:"location,omitempty"`
+	// ThinkingBudget and ThinkingLevel cap Gemini's thinking on Vertex.
+	// At most one is set; neither leaves the model's default.
+	ThinkingBudget *int   `json:"thinking_budget,omitempty"`
+	ThinkingLevel  string `json:"thinking_level,omitempty"`
 }
 
 // JudgeSettings configures the Judge (TypeSafe Jev).
@@ -107,6 +122,22 @@ func (g Generative) Validate() error {
 		if strings.TrimSpace(g.APIKey) == "" {
 			return fmt.Errorf("%s needs an API key", g.Provider)
 		}
+	case ProviderVertex:
+		if strings.TrimSpace(g.BaseURL) != "" {
+			return errors.New("vertex does not take a base URL; set project and location instead")
+		}
+		if g.ThinkingBudget != nil && strings.TrimSpace(g.ThinkingLevel) != "" {
+			return errors.New("vertex takes a thinking budget or a thinking level, not both")
+		}
+		if g.ThinkingBudget != nil && *g.ThinkingBudget < 0 {
+			return errors.New("vertex thinking budget cannot be negative")
+		}
+		switch strings.TrimSpace(strings.ToLower(g.ThinkingLevel)) {
+		case "", "minimal", "low", "medium", "high":
+		default:
+			return fmt.Errorf("vertex thinking level %q is not one of minimal, low, medium, high", g.ThinkingLevel)
+		}
+		return nil
 	case ProviderOpenAICompatible:
 		if strings.TrimSpace(g.BaseURL) == "" {
 			return errors.New("openai-compatible needs a base URL (for example http://ollama:11434/v1)")
@@ -297,7 +328,21 @@ func trimGenerative(g Generative) Generative {
 		BaseURL:     strings.TrimRight(strings.TrimSpace(g.BaseURL), "/"),
 		AnswerModel: strings.TrimSpace(g.AnswerModel),
 		IngestModel: strings.TrimSpace(g.IngestModel),
+		// Vertex: dropping these would silently bill a different project
+		// or think by default.
+		Project:        strings.TrimSpace(g.Project),
+		Location:       strings.TrimSpace(strings.ToLower(g.Location)),
+		ThinkingBudget: copyInt(g.ThinkingBudget),
+		ThinkingLevel:  strings.TrimSpace(strings.ToLower(g.ThinkingLevel)),
 	}
+}
+
+func copyInt(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 func trimJudge(j JudgeSettings) JudgeSettings {

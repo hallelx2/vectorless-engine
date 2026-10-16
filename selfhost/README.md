@@ -44,10 +44,11 @@ Behind a control plane, each request names its tenant in `X-Vectorless-Org`. Her
 
 | Variable | What it does |
 |---|---|
-| `VECTORLESS_LLM_PROVIDER` | `anthropic`, `openai` or `gemini`: the model that writes answers. |
+| `VECTORLESS_LLM_PROVIDER` | `anthropic`, `openai`, `gemini` or `vertex`: the model that writes answers. |
 | `VECTORLESS_ANTHROPIC_API_KEY`, `VECTORLESS_ANTHROPIC_BASE_URL`, `VECTORLESS_ANTHROPIC_MODEL` | Anthropic, or an Anthropic-compatible gateway. For GLM on z.ai the base URL is `https://api.z.ai/api/anthropic/v1`, and the `/v1` is required. |
 | `VECTORLESS_OPENAI_API_KEY`, `VECTORLESS_OPENAI_BASE_URL`, `VECTORLESS_OPENAI_MODEL` | OpenAI, or any OpenAI-compatible endpoint. |
 | `VECTORLESS_GEMINI_API_KEY`, `VECTORLESS_GEMINI_MODEL` | Gemini. |
+| `VECTORLESS_VERTEX_PROJECT`, `VECTORLESS_VERTEX_LOCATION`, `VECTORLESS_VERTEX_MODEL`, `VECTORLESS_VERTEX_THINKING_BUDGET` | Gemini on Google Cloud Vertex AI. No key: a GCP VM's service account (or a credentials file at `VECTORLESS_GOOGLE_CREDENTIALS_PATH`) authenticates, and the project is billed. Set a thinking budget (`0` turns thinking off on models that allow it) or a level, not both. Off GCP, put a service-account key in `selfhost/gcp/key.json` (gitignored) and set `VECTORLESS_GOOGLE_CREDENTIALS_PATH=/etc/vectorless/gcp/key.json`. |
 | `VECTORLESS_ANSWER_MODEL` | Optional: a different model for answers only. |
 | `VECTORLESS_TYPESAFE_API_KEY` | Jev, TypeSafe's System One model, which makes the contents, page selection and pincite decisions. It's a hosted API, so document text goes to TypeSafe when it's set. |
 

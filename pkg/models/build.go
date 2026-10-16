@@ -12,6 +12,7 @@ import (
 	"github.com/hallelx2/llmgate/provider/anthropic"
 	"github.com/hallelx2/llmgate/provider/gemini"
 	"github.com/hallelx2/llmgate/provider/openai"
+	"github.com/hallelx2/llmgate/provider/vertex"
 )
 
 // keylessPlaceholder is sent as the bearer token to an openai-compatible
@@ -39,6 +40,17 @@ func BuildClient(g Generative) (llmgate.Client, error) {
 		return openai.New(openai.Config{APIKey: key, Model: model, BaseURL: g.BaseURL})
 	case ProviderGemini:
 		return gemini.New(gemini.Config{APIKey: g.APIKey, Model: model, AuthTimeout: 15 * time.Second})
+	case ProviderVertex:
+		// Bounded like gemini's AuthTimeout: finding credentials can ask
+		// the metadata server, which hangs off GCP.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return vertex.New(ctx, vertex.Config{
+			Project:  g.Project,
+			Location: g.Location,
+			Model:    model,
+			Thinking: vertex.Thinking{Budget: g.ThinkingBudget, Level: g.ThinkingLevel},
+		})
 	}
 	return nil, fmt.Errorf("unknown provider %q", g.Provider)
 }

@@ -609,6 +609,31 @@ components:
                 example: document not found
 
   schemas:
+    TimingWait:
+      type: object
+      description: One thing a request waited on.
+      properties:
+        calls: {type: integer, description: Calls that reached the network.}
+        attempts: {type: integer, description: HTTP requests, retries included.}
+        failed: {type: integer}
+        wait_ms: {type: number, description: Wall-clock time at least one call was outstanding.}
+        busy_ms: {type: number, description: Sum of call durations; above wait_ms when calls overlapped.}
+        first_byte_ms: {type: number, description: Sum over calls of time from going on the wire to the first response byte.}
+        first_byte_max_ms: {type: number}
+        local_ms: {type: number, description: Time calls spent in the engine before going on the wire (limiter queue, prompt building).}
+    Timing:
+      type: object
+      description: >-
+        Where this request's time went. engine_ms + waiting_ms == total_ms;
+        waiting_ms is the union of the categories' waits.
+      properties:
+        total_ms: {type: number}
+        engine_ms: {type: number, description: Time not spent waiting on any provider, the database or storage.}
+        waiting_ms: {type: number}
+        judge: {$ref: '#/components/schemas/TimingWait'}
+        answer_model: {$ref: '#/components/schemas/TimingWait'}
+        db: {$ref: '#/components/schemas/TimingWait'}
+        storage: {$ref: '#/components/schemas/TimingWait'}
     IngestMode:
       type: string
       enum: [toc, full, minimal]
@@ -804,6 +829,8 @@ components:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
+        timing:
+          $ref: "#/components/schemas/Timing"
         trace_token:
           type: string
           description: |
@@ -1062,6 +1089,8 @@ components:
           $ref: "#/components/schemas/Plan"
         elapsed_ms:
           type: integer
+        timing:
+          $ref: "#/components/schemas/Timing"
         trace_token:
           type: string
           description: |
@@ -1328,6 +1357,8 @@ components:
             llm_calls: {type: integer}
         elapsed_ms:
           type: integer
+        timing:
+          $ref: "#/components/schemas/Timing"
         trace_token:
           type: string
           description: |

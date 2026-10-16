@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
+
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 )
 
@@ -41,6 +43,17 @@ func marshalJSONForReplay(v any) ([]byte, error) {
 // MUST see the same bytes; this is the single point where that
 // invariant is enforced. When store is nil or token is empty the
 // replay write is skipped silently.
+// withTiming adds the request's timing split to a response: how much of
+// the wall clock was the engine's own work and how much was waiting on
+// the Judge, the answer model, the database and document storage
+// (pkg/reqtiming). A request served without the timing middleware gets
+// no field rather than a zero one.
+func withTiming(r *http.Request, resp map[string]any) {
+	if rec := reqtiming.From(r.Context()); rec != nil {
+		resp["timing"] = rec.Snapshot()
+	}
+}
+
 func writeJSONWithReplay(w http.ResponseWriter, store retrieval.ReplayStore, status int, raw []byte, token string, entry retrieval.ReplayEntry) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
