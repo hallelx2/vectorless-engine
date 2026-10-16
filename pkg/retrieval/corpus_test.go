@@ -409,8 +409,10 @@ func (f pageLoaderFunc) Load(ctx context.Context, ref string) ([]byte, error) { 
 // reads nothing is "read": [], not null (the SDK rejected null).
 func TestCorpusJSONHasNoNullLists(t *testing.T) {
 	j, _ := corpusJudge(t)
-	nav := CorpusNavigator{Judge: j}
-	res, err := nav.Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
+	nav := CorpusNavigator{Judge: j, MinDocuments: 2}
+	all := newsCorpus()
+	docs := append([]CorpusDoc{all[0], all[1]}, all[3:]...) // no Beta article: the bridge finds nothing
+	res, err := nav.Navigate(context.Background(), "Which company did Acme partner with, and when was it founded?", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
