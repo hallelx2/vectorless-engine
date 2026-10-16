@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,8 +158,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Use CostStrategy if available to get token usage + cost.
 	var (
-		ids   []tree.SectionID
-		usage *retrieval.Usage
+		ids      []tree.SectionID
+		usage    *retrieval.Usage
+		evidence []retrieval.EvidencePage
 	)
 	if cs, ok := strategy.(retrieval.CostStrategy); ok {
 		result, err := cs.SelectWithCost(r.Context(), t, body.Query, budget)
@@ -172,6 +174,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		ids = result.SelectedIDs
 		usage = &result.Usage
+		evidence = result.EvidencePages
 	} else {
 		var err error
 		ids, err = strategy.Select(r.Context(), t, body.Query, budget)
@@ -185,11 +188,21 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if body.MaxSections > 0 && len(ids) > body.MaxSections {
-		ids = ids[:body.MaxSections]
+	// A page-based strategy's evidence pages lead the list, as found: the
+	// page the Judge chose holds the answer, while the sections overlapping
+	// it come back in document order (HAL-1390). max_sections caps the
+	// combined list, so a small cap keeps the evidence, not the first
+	// sections of the document (HAL-3071).
+	sections := evidencePageSections(evidence)
+	if body.MaxSections > 0 {
+		if len(sections) > body.MaxSections {
+			sections = sections[:body.MaxSections]
+		}
+		if room := body.MaxSections - len(sections); len(ids) > room {
+			ids = ids[:room]
+		}
 	}
 
-	sections := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
 		sec := t.FindByID(id)
 		if sec == nil {
@@ -234,4 +247,28 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	withTiming(r, resp)
 	setTokenHeaders(w.Header(), resp)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// evidencePageSections turns a page-based strategy's evidence pages into
+// response units: id "page_<n>", the owning section's title with the page
+// ("<section> · p.<n>"), the page text as content. The same shape the
+// standalone engine returns (internal/api), so clients and the benchmark
+// read one contract from either binary.
+func evidencePageSections(pages []retrieval.EvidencePage) []map[string]any {
+	out := make([]map[string]any, 0, len(pages))
+	for _, ep := range pages {
+		title := ep.Title
+		if title == "" {
+			title = fmt.Sprintf("Page %d", ep.Page)
+		}
+		out = append(out, map[string]any{
+			"id":          fmt.Sprintf("page_%d", ep.Page),
+			"title":       fmt.Sprintf("%s · p.%d", title, ep.Page),
+			"content":     ep.Text,
+			"page":        ep.Page,
+			"confidence":  ep.Confidence,
+			"token_count": len(ep.Text) / 4,
+		})
+	}
+	return out
 }
