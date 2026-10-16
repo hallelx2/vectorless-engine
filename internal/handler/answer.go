@@ -302,6 +302,7 @@ func (h *AnswerHandler) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	withTiming(r, resp)
 	raw, err := marshalJSONForReplay(resp)
 	entry := retrieval.ReplayEntry{DocumentID: body.DocumentID, Query: body.Query, Model: model, SelectedIDs: finalIDs}
 	if body.Stream {

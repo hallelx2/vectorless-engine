@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +45,12 @@ func Open(ctx context.Context, url string, maxConns int32) (*Pool, error) {
 	}
 	if maxConns > 0 {
 		cfg.MaxConns = maxConns
+	}
+	// Queries made with a request's context count as that request's
+	// database wait (pkg/reqtiming). Without a recorder on the context
+	// the tracer does nothing.
+	if cfg.ConnConfig.Tracer == nil {
+		cfg.ConnConfig.Tracer = reqtiming.QueryTracer{}
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

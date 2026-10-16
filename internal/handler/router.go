@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/hallelx2/llmgate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -119,6 +121,10 @@ func Router(d Deps) http.Handler {
 	}
 
 	r.Use(middleware.RequestID)
+	// Every request records where its time went (engine work vs waiting
+	// on the Judge, the answer model, the database, storage); the query
+	// and answer handlers return it as "timing".
+	r.Use(reqtiming.Middleware)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recovery(d.Logger))
 	r.Use(middleware.AccessLog(d.Logger))

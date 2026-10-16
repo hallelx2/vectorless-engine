@@ -227,6 +227,7 @@ func (h *AnswerTreeWalkHandler) HandleAnswerTreeWalk(w http.ResponseWriter, r *h
 	}
 
 	finalIDs := append([]tree.SectionID(nil), res.SelectedIDs...)
+	withTiming(r, resp)
 	setTokenHeaders(w.Header(), resp)
 	raw, err := marshalJSONForReplay(resp)
 	if err != nil {

@@ -376,6 +376,7 @@ type LLMConfig struct {
 	Anthropic AnthropicBlock `yaml:"anthropic"`
 	OpenAI    OpenAIBlock    `yaml:"openai"`
 	Gemini    GeminiBlock    `yaml:"gemini"`
+	Vertex    VertexBlock    `yaml:"vertex"`
 
 	// Concurrency bounds calls in flight per provider — one adaptive
 	// limiter for the chat model, one for the Judge. The limit starts at
@@ -454,6 +455,27 @@ type GeminiBlock struct {
 	APIKey         string `yaml:"api_key"`
 	Model          string `yaml:"model"`
 	ReasoningModel string `yaml:"reasoning_model"`
+}
+
+// VertexBlock configures Gemini on Google Cloud Vertex AI (driver
+// "vertex"). It needs no API key: calls authenticate with Application
+// Default Credentials (a VM's service account, or a gcloud login) and
+// bill the project, so a project's Google Cloud credits pay for them.
+type VertexBlock struct {
+	// Project is the billed Google Cloud project. Empty falls back to
+	// GOOGLE_CLOUD_PROJECT, then to the credentials' own project.
+	Project string `yaml:"project"`
+	// Location is "global" (default, and the cheaper Gemini 3 price) or
+	// a region such as us-central1.
+	Location string `yaml:"location"`
+	Model    string `yaml:"model"`
+	// ThinkingBudget caps thinking tokens per call; 0 turns thinking off
+	// on models that allow it. Nil leaves the model's default. Hold it
+	// fixed across a benchmark so every system gets the same model.
+	ThinkingBudget *int `yaml:"thinking_budget"`
+	// ThinkingLevel is the Gemini 3 alternative to a budget: minimal,
+	// low, medium or high. Set at most one of the two.
+	ThinkingLevel string `yaml:"thinking_level"`
 }
 
 // RetrievalConfig configures the retrieval strategy.
@@ -947,6 +969,7 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("VLE_GEMINI_API_KEY"); v != "" {
 		c.LLM.Gemini.APIKey = v
 	}
+	applyVertexEnv(&c.LLM.Vertex, "VLE_")
 	// The Judge key accepts the deploy layer's VLS_ prefix and the bare
 	// TYPESAFE_API_KEY — what the llmgate live tests and the bench
 	// commands already read — so one export enables it everywhere.
@@ -1315,7 +1338,7 @@ func (c Config) Validate() error {
 	}
 
 	switch c.LLM.Driver {
-	case "anthropic", "openai", "gemini", "openai-compatible":
+	case "anthropic", "openai", "gemini", "openai-compatible", "vertex":
 		// API keys are checked lazily at first call so the engine can boot
 		// in dev without all providers configured.
 	default:
@@ -1437,3 +1460,37 @@ func (c Config) Validate() error {
 
 	return nil
 }
+
+// applyVertexEnv reads the Vertex block from <prefix>LLM_VERTEX_* —
+// PROJECT, LOCATION, MODEL, THINKING_BUDGET, THINKING_LEVEL. A thinking
+// budget that is not a non-negative integer is ignored.
+func applyVertexEnv(v *VertexBlock, prefixes ...string) {
+	get := func(name string) string {
+		names := make([]string, 0, len(prefixes))
+		for _, p := range prefixes {
+			names = append(names, p+"LLM_VERTEX_"+name)
+		}
+		return firstEnv(names...)
+	}
+	if s := get("PROJECT"); s != "" {
+		v.Project = s
+	}
+	if s := get("LOCATION"); s != "" {
+		v.Location = s
+	}
+	if s := get("MODEL"); s != "" {
+		v.Model = s
+	}
+	if s := get("THINKING_BUDGET"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			v.ThinkingBudget = &n
+		}
+	}
+	if s := get("THINKING_LEVEL"); s != "" {
+		v.ThinkingLevel = s
+	}
+}
+
+// ApplyVertexEnv is applyVertexEnv for the server's config layer, which
+// reads VLS_ before VLE_.
+func ApplyVertexEnv(v *VertexBlock, prefixes ...string) { applyVertexEnv(v, prefixes...) }

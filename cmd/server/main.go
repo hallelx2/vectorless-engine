@@ -25,8 +25,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
+
+	"github.com/hallelx2/vectorless-engine/pkg/reqtiming"
 
 	"github.com/hallelx2/llmgate"
 	"github.com/hallelx2/llmgate/judge/typesafe"
@@ -57,6 +60,37 @@ import (
 // version is set at build time via -ldflags "-X main.version=..."
 var version = "dev"
 
+// buildVersion is version, or — for a build without -ldflags, such as
+// go run or go build in a checkout — the commit the binary was built from,
+// so /v1/version always names the build a benchmark measured (HAL-1582).
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	var rev, dirty string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = "-dirty"
+			}
+		}
+	}
+	if rev == "" {
+		return version
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	return "dev-" + rev + dirty
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
@@ -76,7 +110,7 @@ func run() error {
 
 	logger := newLogger(cfg.Engine.Log)
 	logger.Info("starting vectorless-server",
-		"version", version,
+		"version", buildVersion(),
 		"role", *role,
 		"addr", cfg.Server.Addr,
 		"auth_mode", cfg.Auth.Mode,
@@ -103,7 +137,7 @@ func run() error {
 			Endpoint:    cfg.Tracing.Endpoint,
 			Insecure:    cfg.Tracing.Insecure,
 			ServiceName: cfg.Tracing.ServiceName,
-			Version:     version,
+			Version:     buildVersion(),
 			SampleRate:  cfg.Tracing.SampleRate,
 		})
 		if err != nil {
@@ -135,6 +169,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init storage: %w", err)
 	}
+	store = reqtiming.WrapStorage(store)
 
 	// ── Queue ─────────────────────────────────────────────────────
 	q, err := buildQueue(cfg.Engine.Queue, cfg.Engine.Database.URL)
@@ -177,11 +212,14 @@ func run() error {
 	logModelStatus(logger, registry.Status())
 
 	// ── LLM + retrieval strategy ──────────────────────────────────
-	llmClient := limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(registry.Client())
+	// reqtiming wraps outermost, outside the limiter and retries: a call
+	// queued at the limiter is the engine's time, and every attempt of a
+	// retried call is one wait on the provider.
+	llmClient := reqtiming.WrapClient(limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(registry.Client()))
 	// judge is always the registry's proxy. Code that takes a different
 	// path without a Judge resolves it per job or request through
 	// models.ActiveJudge; judgewalk falls back to treewalk.
-	judge := registry.Judge()
+	judge := reqtiming.WrapJudge(registry.Judge())
 	strategy := buildStrategy(cfg.Engine.Retrieval, llmClient, judge, store, pool)
 
 	// Wrap with caching if enabled in engine config.
@@ -346,7 +384,7 @@ func run() error {
 			Queue:            q,
 			Strategy:         strategy,
 			MultiDoc:         multiDoc,
-			Version:          version,
+			Version:          buildVersion(),
 			Config:           cfg,
 			Strategies:       strategies,
 			LLM:              llmClient,
@@ -592,6 +630,12 @@ func envModelSettings(cfg config.Config) models.Settings {
 		if l.Gemini.APIKey != "" {
 			g = &models.Generative{Provider: models.ProviderGemini, APIKey: l.Gemini.APIKey, IngestModel: l.Gemini.Model}
 		}
+	case "vertex":
+		// No key to wait for: choosing the driver is the configuration.
+		// Credentials are checked when the client is built.
+		v := l.Vertex
+		g = &models.Generative{Provider: models.ProviderVertex, IngestModel: v.Model, Project: v.Project, Location: v.Location,
+			ThinkingBudget: v.ThinkingBudget, ThinkingLevel: v.ThinkingLevel}
 	}
 	if g != nil {
 		g.AnswerModel = cfg.Models.AnswerModel
@@ -643,6 +687,10 @@ func buildLLM(c enginecfg.LLMConfig) (llmgate.Client, error) {
 			Model:          c.Gemini.Model,
 			ReasoningModel: c.Gemini.ReasoningModel,
 		})
+	case "vertex":
+		return models.BuildClient(models.Generative{Provider: models.ProviderVertex, IngestModel: c.Vertex.Model,
+			Project: c.Vertex.Project, Location: c.Vertex.Location,
+			ThinkingBudget: c.Vertex.ThinkingBudget, ThinkingLevel: c.Vertex.ThinkingLevel})
 	default:
 		return nil, fmt.Errorf("unknown llm driver: %s", c.Driver)
 	}

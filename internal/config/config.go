@@ -344,6 +344,7 @@ func applyEnvOverrides(c *Config) {
 	if v := firstEnv("VLS_GEMINI_API_KEY", "VLE_GEMINI_API_KEY", "VLS_LLM_GEMINI_API_KEY", "VLE_LLM_GEMINI_API_KEY"); v != "" {
 		c.Engine.LLM.Gemini.APIKey = v
 	}
+	enginecfg.ApplyVertexEnv(&c.Engine.LLM.Vertex, "VLS_", "VLE_")
 	if v := firstEnv("VLS_STORAGE_DRIVER", "VLE_STORAGE_DRIVER"); v != "" {
 		c.Engine.Storage.Driver = v
 	}
