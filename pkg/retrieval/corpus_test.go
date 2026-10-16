@@ -405,7 +405,6 @@ type pageLoaderFunc func(ctx context.Context, ref string) ([]byte, error)
 
 func (f pageLoaderFunc) Load(ctx context.Context, ref string) ([]byte, error) { return f(ctx, ref) }
 
-
 // Every list in a corpus response encodes as a list: a bridge hop that
 // reads nothing is "read": [], not null (the SDK rejected null).
 func TestCorpusJSONHasNoNullLists(t *testing.T) {
