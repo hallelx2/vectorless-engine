@@ -81,6 +81,12 @@ func (m *memStorage) SignedURL(ctx context.Context, key string, expiry time.Dura
 	return "", nil
 }
 
+// Section bodies long enough to be returned as units (retrieval.MinUnitChars).
+const (
+	sectionAText = "section A content: revenue rose to $4.2 billion on higher volumes in the Americas, while gross margin narrowed by forty basis points as freight and labour costs climbed through the year."
+	sectionBText = "section B content: capital expenditure was $1,577 million, mostly new distribution centres, and the company expects spending to stay near that level while it finishes the network build-out."
+)
+
 func queryStrategyTestTree() *tree.Tree {
 	a := &tree.Section{ID: "sec_a", Title: "A", ContentRef: "a_ref", PageStart: 1, PageEnd: 2}
 	b := &tree.Section{ID: "sec_b", Title: "B", ContentRef: "b_ref", PageStart: 3, PageEnd: 4}
@@ -93,8 +99,8 @@ func queryStrategyTestTree() *tree.Tree {
 // so HandleQuery runs end-to-end via httptest without a real DB.
 func newQueryStrategyHandler(def retrieval.Strategy, set map[string]retrieval.Strategy) *QueryHandler {
 	store := &memStorage{data: map[string][]byte{
-		"a_ref": []byte("section A content"),
-		"b_ref": []byte("section B content"),
+		"a_ref": []byte(sectionAText),
+		"b_ref": []byte(sectionBText),
 	}}
 	h := NewQueryHandler(slog.Default(), nil, store, def, set)
 	h.treeLoader = func(ctx context.Context, orgID, storeID string, docID tree.DocumentID) (*tree.Tree, error) {

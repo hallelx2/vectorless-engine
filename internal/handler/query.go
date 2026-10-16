@@ -161,6 +161,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		ids      []tree.SectionID
 		usage    *retrieval.Usage
 		evidence []retrieval.EvidencePage
+		full     *retrieval.Result
 	)
 	if cs, ok := strategy.(retrieval.CostStrategy); ok {
 		result, err := cs.SelectWithCost(r.Context(), t, body.Query, budget)
@@ -175,6 +176,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		ids = result.SelectedIDs
 		usage = &result.Usage
 		evidence = result.EvidencePages
+		full = result
 	} else {
 		var err error
 		ids, err = strategy.Select(r.Context(), t, body.Query, budget)
@@ -192,41 +194,15 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// page the Judge chose holds the answer, while the sections overlapping
 	// it come back in document order (HAL-1390). max_sections caps the
 	// combined list, so a small cap keeps the evidence, not the first
-	// sections of the document (HAL-3071).
-	sections := evidencePageSections(evidence)
-	if body.MaxSections > 0 {
-		if len(sections) > body.MaxSections {
-			sections = sections[:body.MaxSections]
-		}
-		if room := body.MaxSections - len(sections); len(ids) > room {
-			ids = ids[:room]
-		}
+	// sections of the document (HAL-3071). Every unit carries body text: a
+	// heading-only section, or one the pages already carry, gives its slot
+	// to the next-ranked evidence (HAL-3160).
+	res := &retrieval.Result{SelectedIDs: ids, EvidencePages: evidence}
+	if full != nil {
+		res = full
 	}
-
-	for _, id := range ids {
-		sec := t.FindByID(id)
-		if sec == nil {
-			continue
-		}
-		var content string
-		if sec.ContentRef != "" {
-			rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
-			if getErr == nil {
-				raw, _ := io.ReadAll(rc)
-				_ = rc.Close() // best-effort close
-				content = string(raw)
-			}
-		}
-		sections = append(sections, map[string]any{
-			"id":          sec.ID,
-			"parent_id":   sec.ParentID,
-			"title":       sec.Title,
-			"summary":     sec.Summary,
-			"token_count": sec.TokenCount,
-			"content":     content,
-		})
-	}
-
+	units, unitStats := retrieval.AssembleUnits(r.Context(), t, res, body.MaxSections, h.loadContent)
+	sections := unitMaps(units)
 	resp := map[string]any{
 		"document_id": body.DocumentID,
 		"query":       body.Query,
@@ -234,6 +210,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"model":       body.Model,
 		"sections":    sections,
 		"elapsed_ms":  time.Since(started).Milliseconds(),
+		"unit_stats":  unitStats,
 	}
 	if usage != nil {
 		resp["usage"] = map[string]any{
@@ -247,6 +224,63 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	withTiming(r, resp)
 	setTokenHeaders(w.Header(), resp)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// loadContent reads a section's stored text.
+func (h *QueryHandler) loadContent(ctx context.Context, ref string) (string, error) {
+	return readStored(ctx, h.storage, ref)
+}
+
+// readStored reads one stored object as text.
+func readStored(ctx context.Context, store storage.Storage, ref string) (string, error) {
+	rc, _, err := store.Get(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close() // best-effort close
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// unitMaps renders assembled units in the response shape: a page as
+// evidencePageSections renders it, a section with its tree fields. A unit
+// that fills a slot below the evidence says so (runner_up), and a heading
+// whose text was gathered from the sections beneath it says that
+// (expanded).
+func unitMaps(units []retrieval.Unit) []map[string]any {
+	out := make([]map[string]any, 0, len(units))
+	for _, u := range units {
+		var m map[string]any
+		if u.Kind == retrieval.UnitPage {
+			m = evidencePageSections([]retrieval.EvidencePage{u.Page})[0]
+		} else {
+			m = map[string]any{
+				"id":          u.Section.ID,
+				"parent_id":   u.Section.ParentID,
+				"title":       u.Section.Title,
+				"summary":     u.Section.Summary,
+				"token_count": u.Section.TokenCount,
+				"content":     u.Content,
+			}
+			if u.Section.PageStart > 0 {
+				m["page_start"] = u.Section.PageStart
+			}
+			if u.Section.PageEnd > 0 {
+				m["page_end"] = u.Section.PageEnd
+			}
+			if u.Expanded {
+				m["expanded"] = true
+			}
+		}
+		if u.RunnerUp {
+			m["runner_up"] = true
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // evidencePageSections turns a page-based strategy's evidence pages into

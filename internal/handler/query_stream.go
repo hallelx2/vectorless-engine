@@ -1,10 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -120,6 +120,7 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 
 	started := time.Now()
 	events := ss.SelectStream(ctx, t, body.Query, budget)
+	units := retrieval.NewUnitAssembler(t, 0, func(ctx context.Context, ref string) (string, error) { return readStored(ctx, h.storage, ref) })
 
 	for evt := range events {
 		sse := sseEvent{
@@ -136,26 +137,13 @@ func (h *QueryStreamHandler) HandleQueryStream(w http.ResponseWriter, r *http.Re
 			sse.Query = body.Query
 
 		case retrieval.EventSectionSelected:
-			sec := t.FindByID(evt.SectionID)
-			if sec != nil {
-				var content string
-				if sec.ContentRef != "" {
-					rc, _, getErr := h.storage.Get(ctx, sec.ContentRef)
-					if getErr == nil {
-						raw, _ := io.ReadAll(rc)
-						_ = rc.Close() // best-effort close
-						content = string(raw)
-					}
-				}
-				sse.Section = map[string]any{
-					"id":          sec.ID,
-					"parent_id":   sec.ParentID,
-					"title":       sec.Title,
-					"summary":     sec.Summary,
-					"token_count": sec.TokenCount,
-					"content":     content,
-				}
+			// A section with no body text, or one an earlier event already
+			// carried, is not sent (HAL-3160).
+			u, ok := units.AddSection(ctx, evt.SectionID, false)
+			if !ok {
+				continue
 			}
+			sse.Section = unitMaps([]retrieval.Unit{u})[0]
 
 		case retrieval.EventCompleted:
 			sse.ElapsedMS = time.Since(started).Milliseconds()

@@ -111,6 +111,16 @@ type Result struct {
 	// strategies.
 	EvidencePages []EvidencePage `json:"evidence_pages,omitempty"`
 
+	// RunnerUpPages are pages a page-based strategy read in full and
+	// ranked just below its evidence, best first. A response that has
+	// room after the evidence fills it from here rather than from
+	// sections the evidence already covers (HAL-3160).
+	RunnerUpPages []EvidencePage `json:"runner_up_pages,omitempty"`
+
+	// RunnerUpIDs are the leaves ranked just below the selected ones,
+	// best first, for strategies whose units are sections.
+	RunnerUpIDs []tree.SectionID `json:"runner_up_ids,omitempty"`
+
 	// CitedPages is the FINAL set of page ranges the answer commits
 	// to — the model's cited_pages after dedup and the confidence cap,
 	// NOT every page it read (that is PagesRead). Page-based strategies

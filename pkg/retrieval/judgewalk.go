@@ -943,6 +943,32 @@ func (s *JudgeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query stri
 	return res.SelectedIDs, nil
 }
 
+// runnerUps are the pages navigation read in full that did not make the
+// evidence, best first, at most maxRunnerUps of them.
+func runnerUps(nav *NavResult) []PageScore {
+	type key struct {
+		leaf string
+		page int
+	}
+	in := map[key]bool{}
+	for _, ev := range nav.Evidence {
+		in[key{ev.Page.LeafID, ev.Page.Number}] = true
+	}
+	var out []PageScore
+	for _, ps := range nav.Pages {
+		k := key{ps.Page.LeafID, ps.Page.Number}
+		if in[k] {
+			continue
+		}
+		in[k] = true
+		out = append(out, ps)
+		if len(out) == maxRunnerUps {
+			break
+		}
+	}
+	return out
+}
+
 // SelectWithCost runs navigation and reports usage.
 func (s *JudgeWalkStrategy) SelectWithCost(ctx context.Context, t *tree.Tree, query string, budget ContextBudget) (*Result, error) {
 	if t == nil || t.Root == nil {
@@ -1015,12 +1041,17 @@ func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.
 	for _, ev := range nav.Evidence {
 		evidence = append(evidence, EvidencePage{Page: ev.Page.Number, Title: leafTitle[ev.Page.LeafID], Text: ev.Page.Text, Confidence: ev.P})
 	}
+	var runnerUp []EvidencePage
+	for _, ps := range runnerUps(nav) {
+		runnerUp = append(runnerUp, EvidencePage{Page: ps.Page.Number, Title: leafTitle[ps.Page.LeafID], Text: ps.Page.Text, Confidence: ps.P})
+	}
 	return &Result{
 		SelectedIDs:   ids,
 		Confidences:   conf,
 		Confidence:    best,
 		CitedPages:    rangesToPairs(ranges),
 		EvidencePages: evidence,
+		RunnerUpPages: runnerUp,
 		ModelUsed:     "judge",
 		Usage:         nav.Usage,
 		HopsTaken:     nav.Requests,
@@ -1225,11 +1256,19 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
 	}
+	var runnerUp []tree.SectionID
+	for _, ps := range runnerUps(nav) {
+		if id := tree.SectionID(ps.Page.LeafID); !seen[ps.Page.LeafID] {
+			seen[ps.Page.LeafID] = true
+			runnerUp = append(runnerUp, id)
+		}
+	}
 	if ordinal {
 		ranges = nil // the units were numbered by position; there are no pages to cite
 	}
 	return &Result{
 		SelectedIDs: ids,
+		RunnerUpIDs: runnerUp,
 		Confidences: conf,
 		Confidence:  best,
 		CitedPages:  rangesToPairs(ranges),

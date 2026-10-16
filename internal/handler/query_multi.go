@@ -1,8 +1,8 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -95,33 +95,10 @@ func (h *QueryMultiHandler) HandleQueryMulti(w http.ResponseWriter, r *http.Requ
 	// Build per-document response.
 	docs := make([]map[string]any, 0, len(result.Documents))
 	for docID, dr := range result.Documents {
-		sections := make([]map[string]any, 0, len(dr.SelectedIDs))
-		for _, sid := range dr.SelectedIDs {
-			sec := dr.Tree.FindByID(sid)
-			if sec == nil {
-				continue
-			}
-			var content string
-			if sec.ContentRef != "" {
-				rc, _, getErr := h.storage.Get(r.Context(), sec.ContentRef)
-				if getErr == nil {
-					raw, _ := io.ReadAll(rc)
-					_ = rc.Close() // best-effort close
-					content = string(raw)
-				}
-			}
-			sections = append(sections, map[string]any{
-				"id":          sec.ID,
-				"parent_id":   sec.ParentID,
-				"title":       sec.Title,
-				"summary":     sec.Summary,
-				"token_count": sec.TokenCount,
-				"content":     content,
-			})
-			if body.MaxSections > 0 && len(sections) >= body.MaxSections {
-				break
-			}
-		}
+		// Every section carries body text (HAL-3160).
+		units, _ := retrieval.AssembleUnits(r.Context(), dr.Tree, &retrieval.Result{SelectedIDs: dr.SelectedIDs}, body.MaxSections,
+			func(ctx context.Context, ref string) (string, error) { return readStored(ctx, h.storage, ref) })
+		sections := unitMaps(units)
 		docs = append(docs, map[string]any{
 			"document_id": docID,
 			"sections":    sections,
