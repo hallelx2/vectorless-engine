@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,7 @@ func corpusJudge(t *testing.T) (*llmgate.MockJudge, *corpusLog) {
 		found, _ := st["found"].(string)
 		ans := map[string]llmgate.Answer{}
 		for id, q := range req.Questions {
-			log.add(id, q.(llmgate.Noul).Instructions)
+			log.add(id, fmt.Sprint(q.(llmgate.Noul).Instructions))
 			p := 0.1
 			switch {
 			case id == "complete":
@@ -209,7 +210,8 @@ func TestCorpusMergeRepresentsEveryDocumentBeforeASecondPage(t *testing.T) {
 		t.Fatalf("the weaker document must still be represented: %+v", got)
 	}
 
-	capped := CorpusNavigator{MaxPagesPerDocument: 2, MaxEvidence: 10}.merge(pool)
+	capNav := CorpusNavigator{MaxPagesPerDocument: 2, MaxEvidence: 10}
+	capped := capNav.merge(pool)
 	n := 0
 	for _, e := range capped {
 		if e.DocumentID == "x" {
@@ -222,7 +224,8 @@ func TestCorpusMergeRepresentsEveryDocumentBeforeASecondPage(t *testing.T) {
 }
 
 func TestCorpusMergeKeepsBestPagesWhenNoneClear(t *testing.T) {
-	got := CorpusNavigator{}.merge([]CorpusEvidence{
+	var nav CorpusNavigator
+	got := nav.merge([]CorpusEvidence{
 		{DocumentID: "a", Page: 1, Confidence: 0.3},
 		{DocumentID: "b", Page: 1, Confidence: 0.4},
 		{DocumentID: "c", Page: 1, Confidence: 0.1},
