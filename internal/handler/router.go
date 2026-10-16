@@ -33,7 +33,13 @@ type Deps struct {
 	Strategy retrieval.Strategy
 	MultiDoc *retrieval.MultiDoc
 	Version  string
-	Config   config.Config
+
+	// CorpusLibrary and CorpusNavigator serve corpus mode (HAL-3075):
+	// /v1/query/corpus and /v1/answer/corpus. A nil library makes both
+	// answer 501.
+	CorpusLibrary   *retrieval.CorpusLibrary
+	CorpusNavigator retrieval.CorpusNavigator
+	Config          config.Config
 
 	// Strategies is the pre-built set of selectable retrieval
 	// strategies keyed by config name. It backs the per-request
@@ -187,6 +193,11 @@ func Router(d Deps) http.Handler {
 	answerTreeWalk.pincites = d.Pincites
 	answerStore := NewAnswerStoreHandler(d.Logger, d.DB, d.Storage, d.LLM, d.LLMModel).WithModelFunc(d.LLMModelFunc)
 	answerStore.pincites = d.Pincites
+	var catalog corpusCatalog
+	if d.DB != nil {
+		catalog = d.DB
+	}
+	corpus := NewCorpusHandler(d.Logger, catalog, d.CorpusLibrary, d.CorpusNavigator, answerStore)
 	pages := NewPincitesHandler(d.Logger, d.DB, d.Pincites)
 	webhook := NewWebhookHandler(d.Logger, d.Queue)
 
@@ -251,6 +262,8 @@ func Router(d Deps) http.Handler {
 			r.Post("/stream", queryStream.HandleQueryStream)
 			r.Post("/multi", queryMulti.HandleQueryMulti)
 			r.Post("/multi/stream", queryStreamMulti.HandleQueryStreamMulti)
+			// One question over a whole collection (HAL-3075).
+			r.Post("/corpus", corpus.HandleQueryCorpus)
 		})
 
 		// Answer: retrieval + synthesis in one round-trip. /answer
@@ -261,6 +274,9 @@ func Router(d Deps) http.Handler {
 		// Store answer: map-reduce a question across many documents into
 		// ONE synthesised answer with per-document citations.
 		r.With(needsModel).Post("/answer/store", answerStore.HandleAnswerStore)
+		// Corpus answer: route, read and merge evidence across the
+		// collection on the Judge, with bridge hops, then one answer.
+		r.With(needsModel).Post("/answer/corpus", corpus.HandleAnswerCorpus)
 
 		// Which model providers are in effect, for any authenticated
 		// caller: the dashboard's setup banner reads it. No keys.
