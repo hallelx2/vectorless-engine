@@ -463,16 +463,14 @@ func TestCorpusAnswerableFollowsTheMeasuredThreshold(t *testing.T) {
 	if !res.Answerable || res.Coverage < defaultCorpusAnswerable {
 		t.Fatalf("a covered question is answerable: %+v", res)
 	}
-	none, err := (&CorpusNavigator{Judge: j}).Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
-	if err != nil {
-		t.Fatal(err)
-	}
 	// the mock scores coverage 0.2 when the Beta fact is missing: above 0.06,
 	// so a higher threshold is what declines it
 	strict := CorpusNavigator{Judge: j, AnswerableThreshold: 0.5}
-	res2, _ := strict.Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
+	res2, err := strict.Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res2.Answerable {
 		t.Fatalf("below the threshold the collection does not answer: %+v", res2)
 	}
-	_ = none
 }
