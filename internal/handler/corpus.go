@@ -54,6 +54,13 @@ type corpusRequest struct {
 	MaxPagesPerDocument int               `json:"max_pages_per_document"`
 	MaxEvidence         int               `json:"max_evidence"`
 	MaxHops             int               `json:"max_hops"`
+	// CardChars shortens each routing card (200-900 characters): routing
+	// over a large collection is most of a question's cost.
+	CardChars int `json:"card_chars"`
+	// Abstain returns no evidence when the collection does not appear to
+	// answer the question (coverage under the measured threshold). Default
+	// true; false returns the best evidence regardless.
+	Abstain *bool `json:"abstain"`
 	// Answer-only fields.
 	Model     string `json:"model"`
 	MaxTokens int    `json:"max_tokens"`
@@ -66,9 +73,8 @@ const (
 	corpusMaxPagesPerDocCap = 16
 	corpusMaxEvidenceCap    = 64
 	corpusListPage          = 200
-	// corpusDeclineBelow is the coverage under which /v1/answer/corpus
-	// tells the generator the collection may not answer the question.
-	corpusDeclineBelow = 0.25
+	corpusMinCardChars      = 200
+	corpusMaxCardChars      = 900
 )
 
 func (h *CorpusHandler) decode(w http.ResponseWriter, r *http.Request) (string, corpusRequest, bool) {
@@ -112,6 +118,9 @@ func (h *CorpusHandler) run(ctx context.Context, orgID, store string, body corpu
 	}
 	if body.MaxHops > 0 {
 		nav.MaxHops = min(body.MaxHops, corpusMaxHopsCap)
+	}
+	if body.CardChars > 0 {
+		nav.CardChars = max(corpusMinCardChars, min(body.CardChars, corpusMaxCardChars))
 	}
 	res, err := nav.Navigate(ctx, body.Query, docs)
 	if err != nil {
@@ -193,15 +202,22 @@ func (h *CorpusHandler) refs(ctx context.Context, orgID, store string, ids []tre
 	return refs, nil
 }
 
-func corpusResponse(query string, res *retrieval.CorpusResult, started time.Time) map[string]any {
+func corpusResponse(query string, res *retrieval.CorpusResult, started time.Time, abstain bool) map[string]any {
 	docs := res.Documents
+	evidence := res.Evidence
+	abstained := abstain && !res.Answerable
+	if abstained {
+		evidence = []retrieval.CorpusEvidence{}
+	}
 	if len(docs) > 25 {
 		docs = docs[:25] // the full ranking of a large collection is noise past the top
 	}
-	return map[string]any{
+	m := map[string]any{
 		"query":                query,
 		"strategy":             "corpus",
-		"evidence":             res.Evidence,
+		"evidence":             evidence,
+		"answerable":           res.Answerable,
+		"abstained":            abstained,
 		"documents":            docs,
 		"documents_considered": res.Considered,
 		"hops":                 res.Hops,
@@ -211,6 +227,10 @@ func corpusResponse(query string, res *retrieval.CorpusResult, started time.Time
 		"usage":                usageMap(res.Usage),
 		"elapsed_ms":           time.Since(started).Milliseconds(),
 	}
+	if abstained {
+		m["abstain_reason"] = "the collection does not appear to answer the question"
+	}
+	return m
 }
 
 // HandleQueryCorpus is POST /v1/query/corpus.
@@ -226,10 +246,12 @@ func (h *CorpusHandler) HandleQueryCorpus(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadGateway, "corpus retrieval failed: "+err.Error())
 		return
 	}
-	resp := corpusResponse(body.Query, res, started)
+	resp := corpusResponse(body.Query, res, started, abstains(body))
 	withTiming(r, resp)
 	writeJSON(w, http.StatusOK, resp)
 }
+
+func abstains(body corpusRequest) bool { return body.Abstain == nil || *body.Abstain }
 
 // HandleAnswerCorpus is POST /v1/answer/corpus: the evidence of
 // /v1/query/corpus, then one generated answer citing document and page,
@@ -251,8 +273,8 @@ func (h *CorpusHandler) HandleAnswerCorpus(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadGateway, "corpus retrieval failed: "+err.Error())
 		return
 	}
-	resp := corpusResponse(body.Query, res, started)
-	if len(res.Evidence) == 0 {
+	resp := corpusResponse(body.Query, res, started, abstains(body))
+	if len(res.Evidence) == 0 || resp["abstained"] == true {
 		resp["answer"] = "No document in this collection appears to hold what the question needs."
 		resp["citations"] = []any{}
 		resp["elapsed_ms"] = time.Since(started).Milliseconds()
@@ -268,11 +290,11 @@ func (h *CorpusHandler) HandleAnswerCorpus(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	query := body.Query
-	if res.Coverage < corpusDeclineBelow {
-		// The Judge found the evidence incomplete: tell the generator, so a
-		// question the collection does not answer is declined rather than
-		// completed from the model's own knowledge.
-		query += "\n\n(Retrieval judged these sections unlikely to contain everything the question needs. " +
+	if !res.Answerable {
+		// The caller asked for evidence regardless (abstain: false): tell the
+		// generator, so the answer says what is missing instead of filling it
+		// from the model's own knowledge.
+		query += "\n\n(Retrieval judged these sections unlikely to answer the question. " +
 			"If they do not answer it, say so and state what is missing.)"
 	}
 	model := body.Model

@@ -93,8 +93,12 @@ type CorpusResult struct {
 	Evidence  []CorpusEvidence `json:"evidence"`
 	Documents []CorpusDocScore `json:"documents"`
 	Hops      []CorpusHop      `json:"hops"`
-	// Coverage is the final completeness probability.
+	// Coverage is the final probability that the evidence answers the
+	// question.
 	Coverage float64 `json:"coverage"`
+	// Answerable is Coverage at or above AnswerableThreshold: whether the
+	// collection appears to answer the question at all.
+	Answerable bool `json:"answerable"`
 	// Considered is how many documents the question was asked over.
 	Considered int `json:"documents_considered"`
 	// Errors are documents that could not be read, by ID; the question is
@@ -144,9 +148,13 @@ type CorpusNavigator struct {
 	EvidenceThreshold float64
 	// MaxHops bounds the rounds. Zero selects 3; 1 disables the bridge.
 	MaxHops int
-	// CoverageThreshold is the completeness probability at or above which
-	// no further hop is taken. Zero selects 0.5.
+	// CoverageThreshold is the coverage at or above which no further hop
+	// is taken. Zero selects 0.5.
 	CoverageThreshold float64
+	// AnswerableThreshold is the coverage below which the collection is
+	// judged not to answer the question (Result.Answerable false). Zero
+	// selects 0.06, the measured split (see coverage).
+	AnswerableThreshold float64
 	// CardChars bounds one card. Zero selects 900.
 	CardChars int
 	// FoundChars bounds the found-so-far state of the coverage and bridge
@@ -164,6 +172,7 @@ const (
 	defaultCorpusMaxEvidence    = 16
 	defaultCorpusMaxHops        = 3
 	defaultCorpusCoverage       = 0.5
+	defaultCorpusAnswerable     = 0.06
 	defaultCorpusCardChars      = 900
 	defaultCorpusFoundChars     = 6000
 	defaultCorpusReadPar        = 8
@@ -285,6 +294,7 @@ func (c *CorpusNavigator) Navigate(ctx context.Context, query string, docs []Cor
 	if len(res.Errors) == 0 {
 		res.Errors = nil
 	}
+	res.Answerable = len(res.Evidence) > 0 && res.Coverage >= corpusOr(c.AnswerableThreshold, defaultCorpusAnswerable)
 	return res, nil
 }
 
@@ -576,16 +586,21 @@ func (c *CorpusNavigator) coverage(ctx context.Context, query string, ev []Corpu
 		return 0, Usage{}, 0, nil
 	}
 	state := map[string]any{"question": query, "found": c.foundState(ev)}
+	// The "answerable" wording (HAL-3097, measured 2026-10-16 on 25
+	// answerable and 25 null MultiHop questions over the same evidence):
+	// AUC 0.968, means 0.412 vs 0.044, and at 0.06 it kept 24/25 and
+	// declined 23/25. The earlier "states every fact" wording separated the
+	// groups too (AUC 0.965) but sat at 0.03-0.5 on answerable questions, so
+	// a 0.5 stop meant every question bridged and none was ever declined.
 	q := map[string]llmgate.Question{
-		"complete": llmgate.Noul{
-			Instructions: "`question` is to be answered from a collection of documents. `found` lists " +
-				"the passages retrieved for it, each with its document and page. Do these passages, " +
-				"taken together, state every fact the question needs — each entity, event, figure, " +
-				"date or source it asks about? Judge only what the passages state, not what could be " +
-				"guessed. A question about something the passages never mention is not covered.",
+		"answerable": llmgate.Noul{
+			Instructions: "`question` is to be answered from `found`, passages retrieved from a collection " +
+				"of documents, each with its document and page. Could a careful reader give a definite " +
+				"answer to the question using only these passages, even if some wording must be matched " +
+				"up across them?",
 			Criteria: &llmgate.NoulCriteria{
-				True:  "Every fact the question needs is stated in the passages",
-				False: "At least one fact the question needs is missing from the passages",
+				True:  "A definite answer can be given from these passages",
+				False: "These passages do not support a definite answer",
 			},
 		},
 	}
@@ -593,7 +608,7 @@ func (c *CorpusNavigator) coverage(ctx context.Context, query string, ev []Corpu
 	if err != nil {
 		return 0, Usage{}, 0, err
 	}
-	p, err := jr.Noul("complete")
+	p, err := jr.Noul("answerable")
 	if err != nil {
 		return 0, judgeUsage(jr), 1, nil
 	}

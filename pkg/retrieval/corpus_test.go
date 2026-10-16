@@ -32,7 +32,7 @@ func corpusJudge(t *testing.T) (*llmgate.MockJudge, *corpusLog) {
 			log.add(id, fmt.Sprint(q.(llmgate.Noul).Instructions))
 			p := 0.1
 			switch {
-			case id == "complete":
+			case id == "answerable":
 				if strings.Contains(found, "Beta-fact") {
 					p = 0.9
 				} else {
@@ -451,4 +451,28 @@ func TestCorpusLibraryReportsAStorageFailureInsteadOfFallingBack(t *testing.T) {
 	if len(docs) != 1 || len(errs) != 0 {
 		t.Fatalf("no persisted pages means an unpaged document, read from its tree: docs=%d errs=%v", len(docs), errs)
 	}
+}
+
+func TestCorpusAnswerableFollowsTheMeasuredThreshold(t *testing.T) {
+	j, _ := corpusJudge(t)
+	nav := CorpusNavigator{Judge: j, MinDocuments: 2}
+	res, err := nav.Navigate(context.Background(), "Which company did Acme partner with, and when was it founded?", newsCorpus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Answerable || res.Coverage < defaultCorpusAnswerable {
+		t.Fatalf("a covered question is answerable: %+v", res)
+	}
+	none, err := (&CorpusNavigator{Judge: j}).Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the mock scores coverage 0.2 when the Beta fact is missing: above 0.06,
+	// so a higher threshold is what declines it
+	strict := CorpusNavigator{Judge: j, AnswerableThreshold: 0.5}
+	res2, _ := strict.Navigate(context.Background(), "What revenue did Acme report?", newsCorpus()[3:])
+	if res2.Answerable {
+		t.Fatalf("below the threshold the collection does not answer: %+v", res2)
+	}
+	_ = none
 }
