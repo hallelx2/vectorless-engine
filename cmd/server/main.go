@@ -215,7 +215,7 @@ func run() error {
 	// reqtiming wraps outermost, outside the limiter and retries: a call
 	// queued at the limiter is the engine's time, and every attempt of a
 	// retried call is one wait on the provider.
-	llmClient := reqtiming.WrapClient(limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(registry.Client()))
+	llmClient := reqtiming.WrapClient(withModelRetry(limit.Client(newLimiter("llm", cfg.Engine.LLM.Concurrency, logger))(registry.Client()), modelRetry))
 	// judge is always the registry's proxy. Code that takes a different
 	// path without a Judge resolves it per job or request through
 	// models.ActiveJudge; judgewalk falls back to treewalk.
@@ -740,7 +740,23 @@ func byokFactory(provider, apiKey, model string) (llmgate.Client, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	return client, model, nil
+	return withModelRetry(client, modelRetry), model, nil
+}
+
+// modelRetry is how the server's generative calls ride out a provider's
+// refusals: 429s and 5xx, retried with backoff (Retry-After honoured,
+// clamped to MaxDelay). Vertex's shared quota refuses in bursts; with no
+// retry, 28 of 50 /v1/answer calls failed on their first 429 (HAL-3206).
+var modelRetry = retry.Config{MaxRetries: 5, BaseDelay: time.Second, MaxDelay: 20 * time.Second}
+
+// withModelRetry wraps a generative client in modelRetry. It sits outside
+// the limiter, so every attempt takes a slot and a refusal that narrows the
+// limit is seen before the next attempt.
+func withModelRetry(c llmgate.Client, cfg retry.Config) llmgate.Client {
+	if c == nil {
+		return nil
+	}
+	return retry.New(cfg)(c)
 }
 
 // buildStrategy constructs the retrieval strategy named by
