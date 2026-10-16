@@ -3,14 +3,20 @@ package retrieval
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
+
+// ErrNoPages is what a PageStore may return for a document that has no
+// persisted pages, as an alternative to storage.ErrNotFound.
+var ErrNoPages = errors.New("retrieval: document has no persisted pages")
 
 // CorpusRef is a document a corpus question may read, as the caller's
 // org- and store-scoped listing returned it. The library only builds
@@ -108,8 +114,16 @@ func (l *CorpusLibrary) build(ctx context.Context, orgID, storeID string, ref Co
 		pages []NavPage
 	)
 	if l.Walk != nil && l.Walk.Pages != nil {
-		if ps, err := l.Walk.Pages.LoadPages(ctx, ref.ID); err == nil {
+		ps, err := l.Walk.Pages.LoadPages(ctx, ref.ID)
+		switch {
+		case err == nil:
 			pages = ps
+		case errors.Is(err, storage.ErrNotFound) || errors.Is(err, ErrNoPages):
+			// No persisted pages: an unpaged document, read from its tree.
+		default:
+			// A storage failure is not "no pages": falling back would read
+			// a paged document through its weaker section tree, silently.
+			return CorpusDoc{}, 0, fmt.Errorf("corpus: load pages %s: %w", ref.ID, err)
 		}
 	}
 	if len(ref.TOC) > 0 && len(pages) > 0 {

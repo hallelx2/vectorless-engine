@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -60,7 +62,10 @@ type corpusRequest struct {
 const (
 	corpusMaxDocumentsCap = 32
 	corpusMaxHopsCap      = 5
-	corpusListPage        = 200
+	// The merged evidence goes into one answer prompt: bound it server-side.
+	corpusMaxPagesPerDocCap = 16
+	corpusMaxEvidenceCap    = 64
+	corpusListPage          = 200
 	// corpusDeclineBelow is the coverage under which /v1/answer/corpus
 	// tells the generator the collection may not answer the question.
 	corpusDeclineBelow = 0.25
@@ -100,10 +105,10 @@ func (h *CorpusHandler) run(ctx context.Context, orgID, store string, body corpu
 		nav.MaxDocuments = min(body.MaxDocuments, corpusMaxDocumentsCap)
 	}
 	if body.MaxPagesPerDocument > 0 {
-		nav.MaxPagesPerDocument = body.MaxPagesPerDocument
+		nav.MaxPagesPerDocument = min(body.MaxPagesPerDocument, corpusMaxPagesPerDocCap)
 	}
 	if body.MaxEvidence > 0 {
-		nav.MaxEvidence = body.MaxEvidence
+		nav.MaxEvidence = min(body.MaxEvidence, corpusMaxEvidenceCap)
 	}
 	if body.MaxHops > 0 {
 		nav.MaxHops = min(body.MaxHops, corpusMaxHopsCap)
@@ -137,8 +142,17 @@ func (h *CorpusHandler) refs(ctx context.Context, orgID, store string, ids []tre
 		for i, id := range ids {
 			g.Go(func() error {
 				d, err := h.catalog.GetDocument(gctx, id, orgID, store)
-				if err != nil || d == nil || d.Status != db.StatusReady {
-					return nil // not found in scope, or not ready: not part of the collection
+				if errors.Is(err, db.ErrNotFound) {
+					return nil // not in the caller's scope: not part of the collection
+				}
+				if err != nil {
+					// An outage or a cancelled request is not "this document is
+					// absent": answering from the rest would look like a real,
+					// empty answer.
+					return fmt.Errorf("corpus: look up %s: %w", id, err)
+				}
+				if d == nil || d.Status != db.StatusReady {
+					return nil // still ingesting, or failed: not readable yet
 				}
 				mu.Lock()
 				out[i], keep[i] = toRef(*d), true
@@ -146,7 +160,9 @@ func (h *CorpusHandler) refs(ctx context.Context, orgID, store string, ids []tre
 				return nil
 			})
 		}
-		_ = g.Wait()
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
 		refs := make([]retrieval.CorpusRef, 0, len(ids))
 		for i := range out {
 			if keep[i] {

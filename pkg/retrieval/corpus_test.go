@@ -12,6 +12,7 @@ import (
 
 	"github.com/hallelx2/llmgate"
 
+	"github.com/hallelx2/vectorless-engine/pkg/storage"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
 
@@ -425,5 +426,29 @@ func TestCorpusJSONHasNoNullLists(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "null") {
 		t.Fatalf("null in corpus JSON: %s", raw)
+	}
+}
+
+type failingPages struct{ err error }
+
+func (f failingPages) LoadPages(context.Context, tree.DocumentID) ([]NavPage, error) {
+	return nil, f.err
+}
+
+func TestCorpusLibraryReportsAStorageFailureInsteadOfFallingBack(t *testing.T) {
+	treeCalls := 0
+	loadTree := func(context.Context, tree.DocumentID, string, string) (*tree.Tree, error) {
+		treeCalls++
+		return &tree.Tree{Root: &tree.Section{Children: []*tree.Section{{ID: "s", Title: "S", ContentRef: "r"}}}}, nil
+	}
+	lib := NewCorpusLibrary(&JudgeWalkStrategy{Pages: failingPages{fmt.Errorf("s3: timeout")}}, loadTree)
+	docs, errs := lib.Docs(context.Background(), "org", "", []CorpusRef{{ID: "pdf"}})
+	if len(docs) != 0 || errs["pdf"] == nil || treeCalls != 0 {
+		t.Fatalf("a storage failure must be reported, not read through the tree: docs=%d errs=%v tree=%d", len(docs), errs, treeCalls)
+	}
+	missing := NewCorpusLibrary(&JudgeWalkStrategy{Pages: failingPages{fmt.Errorf("x: %w", storage.ErrNotFound)}}, loadTree)
+	docs, errs = missing.Docs(context.Background(), "org", "", []CorpusRef{{ID: "md"}})
+	if len(docs) != 1 || len(errs) != 0 {
+		t.Fatalf("no persisted pages means an unpaged document, read from its tree: docs=%d errs=%v", len(docs), errs)
 	}
 }
