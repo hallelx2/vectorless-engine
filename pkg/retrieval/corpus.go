@@ -234,7 +234,7 @@ func (c *CorpusNavigator) Navigate(ctx context.Context, query string, docs []Cor
 		if len(chosen) == 0 {
 			// A bridge hop where nothing unread looks useful: what was found
 			// is all the collection has.
-			res.Hops = append(res.Hops, CorpusHop{Hop: hop, Routed: len(routed), Coverage: res.Coverage})
+			res.Hops = append(res.Hops, CorpusHop{Hop: hop, Routed: len(routed), Read: []tree.DocumentID{}, Coverage: res.Coverage})
 			break
 		}
 		for _, id := range chosen {
