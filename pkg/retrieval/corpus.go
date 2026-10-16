@@ -59,6 +59,9 @@ type CorpusEvidence struct {
 	Text          string          `json:"text"`
 	Confidence    float64         `json:"confidence"`
 	Hop           int             `json:"hop"`
+	// Ordinal marks a document without pages: Page is then the section's
+	// position in the document, and SectionTitle names it.
+	Ordinal bool `json:"ordinal,omitempty"`
 }
 
 // CorpusDocScore is a document's routing score: the probability that it
@@ -185,7 +188,10 @@ func (c *CorpusNavigator) Navigate(ctx context.Context, query string, docs []Cor
 	if c.Judge == nil {
 		return nil, fmt.Errorf("corpus: no Judge configured")
 	}
-	res := &CorpusResult{Considered: len(docs), Errors: map[tree.DocumentID]string{}}
+	res := &CorpusResult{
+		Considered: len(docs), Errors: map[tree.DocumentID]string{},
+		Evidence: []CorpusEvidence{}, Documents: []CorpusDocScore{}, Hops: []CorpusHop{},
+	}
 	if len(docs) == 0 {
 		return res, nil
 	}
@@ -476,6 +482,7 @@ func (c *CorpusNavigator) read(ctx context.Context, query string, ids []tree.Doc
 				ev = append(ev, CorpusEvidence{
 					DocumentID: d.ID, DocumentTitle: d.Title, Page: p.Page.Number,
 					SectionTitle: title[p.Page.LeafID], Text: p.Page.Text, Confidence: p.P, Hop: hop,
+					Ordinal: d.Inputs.Ordinal,
 				})
 			}
 			results[i] = ev
@@ -529,12 +536,12 @@ func (c *CorpusNavigator) merge(pool []CorpusEvidence) []CorpusEvidence {
 		}
 	}
 	if len(above) == 0 {
-		return all[:min(navMinEvidencePages, len(all))]
+		return append([]CorpusEvidence{}, all[:min(navMinEvidencePages, len(all))]...)
 	}
 
 	count := map[tree.DocumentID]int{}
 	taken := map[string]bool{}
-	var out []CorpusEvidence
+	out := []CorpusEvidence{}
 	// First pass: each document's best page.
 	for _, e := range above {
 		if len(out) >= limit {

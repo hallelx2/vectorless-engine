@@ -337,3 +337,69 @@ func TestCorpusLibraryReportsADocumentItCannotRead(t *testing.T) {
 		t.Fatalf("an unreadable document must be reported, not returned: docs=%v errs=%v", docs, errs)
 	}
 }
+
+// A Markdown or text document has no pages. It must still be navigable:
+// its content sections, in order, are the units (HAL-3075's MultiHop smoke
+// returned nothing for 609 articles until this held).
+func TestSectionTreeWithoutPagesIsNavigable(t *testing.T) {
+	tr := &tree.Tree{DocumentID: "md", Root: &tree.Section{ID: "root", Children: []*tree.Section{
+		{ID: "intro", Title: "Intro", ContentRef: "ref/intro"},
+		{ID: "body", Title: "Acme deal", ContentRef: "ref/body"},
+		{ID: "empty", Title: "Heading only"},
+	}}}
+	loader := pageLoaderFunc(func(_ context.Context, ref string) ([]byte, error) {
+		if ref == "ref/body" {
+			return []byte("Acme partnered with Beta Corp."), nil
+		}
+		return []byte("Welcome."), nil
+	})
+	s := &JudgeWalkStrategy{PageLoader: loader}
+	in := s.SectionTreeNavInputs(tr)
+	if in == nil || len(in.Leaves) != 2 || !in.Ordinal {
+		t.Fatalf("want two ordinal leaves, got %+v", in)
+	}
+	if in.Leaves[1].Start != 2 || in.Leaves[1].Title != "Acme deal" {
+		t.Fatalf("leaves numbered in document order: %+v", in.Leaves)
+	}
+	ps, err := in.Load(context.Background(), in.Leaves[1])
+	if err != nil || len(ps) != 1 || !strings.Contains(ps[0].Text, "Beta Corp") {
+		t.Fatalf("load: %v %+v", err, ps)
+	}
+
+	j, _ := corpusJudge(t)
+	nav := CorpusNavigator{Judge: j, MinDocuments: 1}
+	res, err := nav.Navigate(context.Background(), "Who did Acme partner with?",
+		[]CorpusDoc{{ID: "md", Title: "Acme news", Card: "Acme news", Inputs: in}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Evidence) == 0 || !res.Evidence[0].Ordinal || res.Evidence[0].SectionTitle != "Acme deal" {
+		t.Fatalf("an unpaged document should yield ordinal evidence naming its section: %+v", res.Evidence)
+	}
+
+	// The single-document strategy runs over the same units, and cites no
+	// invented pages.
+	single := &JudgeWalkStrategy{Navigator: JudgeNavigator{Judge: j}, PageLoader: loader}
+	r, err := single.SelectWithCost(context.Background(), tr, "Who did Acme partner with?", ContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.SelectedIDs) == 0 || len(r.CitedPages) != 0 {
+		t.Fatalf("single-document navigation of an unpaged tree: ids=%v cited=%v", r.SelectedIDs, r.CitedPages)
+	}
+}
+
+func TestCorpusEmptyListsAreNotNull(t *testing.T) {
+	j, _ := corpusJudge(t)
+	res, err := (&CorpusNavigator{Judge: j}).Navigate(context.Background(), "q", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evidence == nil || res.Documents == nil || res.Hops == nil {
+		t.Fatalf("empty lists must encode as [], got %+v", res)
+	}
+}
+
+type pageLoaderFunc func(ctx context.Context, ref string) ([]byte, error)
+
+func (f pageLoaderFunc) Load(ctx context.Context, ref string) ([]byte, error) { return f(ctx, ref) }

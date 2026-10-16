@@ -1035,6 +1035,9 @@ type NavInputs struct {
 	Leaves []NavLeaf
 	Load   func(ctx context.Context, leaf NavLeaf) ([]NavPage, error)
 	Pages  []NavPage
+	// Ordinal is set when the document has no pages and each unit's number
+	// is its section's position in the document, not a page (navSections).
+	Ordinal bool
 }
 
 // PersistedNavInputs builds navigation inputs from a persisted table of
@@ -1095,7 +1098,7 @@ func (s *JudgeWalkStrategy) SectionTreeNavInputs(t *tree.Tree) *NavInputs {
 	if t == nil || t.Root == nil {
 		return nil
 	}
-	sections := flattenSectionsByPage(t)
+	sections, ordinal := navSections(t)
 	byID := map[string]sectionPageEntry{}
 	paths := sectionPaths(t)
 	var leaves []NavLeaf
@@ -1121,7 +1124,7 @@ func (s *JudgeWalkStrategy) SectionTreeNavInputs(t *tree.Tree) *NavInputs {
 		}
 		return chunkBody(string(b), sec.start, sec.end, chars), nil
 	}
-	return &NavInputs{Leaves: leaves, Load: load}
+	return &NavInputs{Leaves: leaves, Load: load, Ordinal: ordinal}
 }
 
 func pagesInRange(byNum map[int]NavPage) func(context.Context, NavLeaf) ([]NavPage, error) {
@@ -1142,10 +1145,41 @@ func sortedPages(pages []NavPage) []NavPage {
 	return out
 }
 
+// navSections lists the sections navigation runs over: every section with
+// a page range when the document has pages, and otherwise — Markdown, plain
+// text, HTML, a document with no page numbers at all — every section that
+// carries content, in document order, numbered 1..n as one unit each.
+// ordinal reports the second case, where a unit's number is its position,
+// not a page: citations then name sections, never invented pages.
+//
+// Before this, a document without pages gave navigation nothing at all, and
+// /v1/query and corpus mode returned no evidence for every Markdown or text
+// document (HAL-3075's MultiHop smoke: 609 articles, "no navigable sections").
+func navSections(t *tree.Tree) (sections []sectionPageEntry, ordinal bool) {
+	if s := flattenSectionsByPage(t); len(s) > 0 {
+		return s, false
+	}
+	if t == nil || t.Root == nil {
+		return nil, false
+	}
+	n := 0
+	t.Root.Walk(func(s *tree.Section) bool {
+		if strings.TrimSpace(s.ContentRef) == "" {
+			return true
+		}
+		n++
+		sections = append(sections, sectionPageEntry{
+			id: s.ID, title: s.Title, summary: s.Summary, contentRef: s.ContentRef, start: n, end: n,
+		})
+		return true
+	})
+	return sections, len(sections) > 0
+}
+
 // selectOnSectionTree is the fallback: the parser's section tree, each
 // section's body chunked into page-sized units.
 func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
-	sections := flattenSectionsByPage(t)
+	sections, ordinal := navSections(t)
 	byID := map[string]sectionPageEntry{}
 	paths := sectionPaths(t)
 	var leaves []NavLeaf
@@ -1190,6 +1224,9 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	best := 0.0
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
+	}
+	if ordinal {
+		ranges = nil // the units were numbered by position; there are no pages to cite
 	}
 	return &Result{
 		SelectedIDs: ids,
