@@ -241,6 +241,12 @@ func run() error {
 	// Multi-document query dispatcher.
 	multiDoc := retrieval.NewMultiDoc(strategy, pool.LoadTree)
 
+	// Corpus mode (HAL-3075): one question over a whole collection, routed
+	// and read on the Judge. Its library caches each document's leaves,
+	// pages and routing card across questions.
+	corpusLibrary := retrieval.NewCorpusLibrary(buildJudgeWalkStrategy(judge, store, pool), pool.LoadTree)
+	corpusNavigator := retrieval.CorpusNavigator{Judge: judge}
+
 	// Pre-built set of selectable strategies, keyed by config name.
 	// Backs the per-request "strategy" override on /v1/query so the
 	// benchmark can A/B chunked-tree vs treewalk against this same
@@ -384,6 +390,8 @@ func run() error {
 			Queue:            q,
 			Strategy:         strategy,
 			MultiDoc:         multiDoc,
+			CorpusLibrary:    corpusLibrary,
+			CorpusNavigator:  corpusNavigator,
 			Version:          buildVersion(),
 			Config:           cfg,
 			Strategies:       strategies,

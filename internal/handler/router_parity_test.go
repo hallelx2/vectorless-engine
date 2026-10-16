@@ -47,6 +47,8 @@ func TestRouterParity(t *testing.T) {
 		"POST /v1/query/",
 		"POST /v1/answer",
 		"POST /v1/answer/treewalk",
+		"POST /v1/query/corpus",
+		"POST /v1/answer/corpus",
 	}
 	for _, route := range want {
 		if !got[route] {

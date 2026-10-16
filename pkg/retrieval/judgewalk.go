@@ -201,6 +201,17 @@ type JudgeNavigator struct {
 	// longer one falls back to the sequential skim, so the extra heads
 	// stay bounded. Zero selects defaultNavSkimAllMax.
 	SkimAllMaxPages int
+
+	// Multipart words every judgement for a question whose answer is
+	// spread over several documents (corpus mode, HAL-3075): a section
+	// or page counts when it holds ANY of the facts the question needs,
+	// not only when it answers the whole question. Asked whether a page
+	// "contains the specific facts needed to answer" a comparison of two
+	// companies, a page carrying one company's figure is rightly judged
+	// False, and the comparison can never be assembled. The wording is
+	// also domain-neutral: the default leaf question carries 10-K hints
+	// (statements, MD&A) that mean nothing to a news article.
+	Multipart bool
 }
 
 const (
@@ -339,20 +350,7 @@ func (n *JudgeNavigator) RankLeaves(ctx context.Context, query string, leaves []
 				item["summary"] = s
 			}
 			state[qk] = item
-			questions[qk] = llmgate.Noul{
-				Instructions: fmt.Sprintf(
-					"`question` is a question about a document. `%s` is one section of that "+
-						"document's table of contents: its title, where it sits, and its page range. "+
-						"Would the information needed to answer the question be found in this "+
-						"section? Judge from what such a section of such a document contains: "+
-						"figures live in the statements and their notes, discussion of results in "+
-						"the MD&A, customers, competition and outlook in the business and risk "+
-						"sections.", qk),
-				Criteria: &llmgate.NoulCriteria{
-					True:  "This section is where a reader would look for the answer",
-					False: "The answer would not be in this section",
-				},
-			}
+			questions[qk] = n.leafQuestion(qk)
 		}
 		batches = append(batches, batch{state, questions})
 	}
@@ -402,6 +400,91 @@ func (n *JudgeNavigator) RankLeaves(ctx context.Context, query string, leaves []
 	return scores, usage, requests, nil
 }
 
+// leafQuestion is the judgement asked of one leaf.
+func (n *JudgeNavigator) leafQuestion(qk string) llmgate.Noul {
+	if n.Multipart {
+		return llmgate.Noul{
+			Instructions: fmt.Sprintf(
+				"`question` is a question whose answer may draw on several documents. `%s` is one "+
+					"section of one document: its title, where it sits, and its page range. Would this "+
+					"section hold any of the information the question needs — one of the entities, "+
+					"events, figures or claims it asks about — even if not all of it?", qk),
+			Criteria: &llmgate.NoulCriteria{
+				True:  "A reader would look here for at least part of what the question needs",
+				False: "Nothing the question needs would be in this section",
+			},
+		}
+	}
+	return llmgate.Noul{
+		Instructions: fmt.Sprintf(
+			"`question` is a question about a document. `%s` is one section of that "+
+				"document's table of contents: its title, where it sits, and its page range. "+
+				"Would the information needed to answer the question be found in this "+
+				"section? Judge from what such a section of such a document contains: "+
+				"figures live in the statements and their notes, discussion of results in "+
+				"the MD&A, customers, competition and outlook in the business and risk "+
+				"sections.", qk),
+		Criteria: &llmgate.NoulCriteria{
+			True:  "This section is where a reader would look for the answer",
+			False: "The answer would not be in this section",
+		},
+	}
+}
+
+// pageQuestion is the judgement asked of one page: of its head for the
+// coarse pass, of its whole text otherwise.
+func (n *JudgeNavigator) pageQuestion(qk string, coarse bool) llmgate.Noul {
+	switch {
+	case coarse && n.Multipart:
+		return llmgate.Noul{
+			Instructions: fmt.Sprintf(
+				"`question` is a question whose answer may draw on several documents. `%s.text` is the "+
+					"START of page `%s.page` of one of them. Judging from what it opens with, could this "+
+					"page hold any of the facts the question needs?", qk, qk),
+			Criteria: &llmgate.NoulCriteria{
+				True:  "This page's opening says it would hold at least part of what the question needs",
+				False: "This page opens on something unrelated",
+			},
+		}
+	case coarse:
+		return llmgate.Noul{
+			Instructions: fmt.Sprintf(
+				"`question` is a question about a document. `%s.text` is the START of page "+
+					"`%s.page` — its heading and first lines. Could the facts or figures needed "+
+					"to answer the question be on this page, judging from what it opens with?", qk, qk),
+			Criteria: &llmgate.NoulCriteria{
+				True:  "This page's opening says it is the kind of page that would hold the answer",
+				False: "This page opens on something unrelated",
+			},
+		}
+	case n.Multipart:
+		return llmgate.Noul{
+			Instructions: fmt.Sprintf(
+				"`question` is a question whose answer may draw on several documents. `%s.text` is the "+
+					"text of page `%s.page` of one of them. Does this page state at least one of the "+
+					"specific facts the question needs — a figure, a name, a date, an event, a claim "+
+					"attributed to someone — even if the rest is elsewhere? A page that only mentions "+
+					"the topic does not.", qk, qk),
+			Criteria: &llmgate.NoulCriteria{
+				True:  "At least one fact the question needs is stated on this page",
+				False: "The page states none of the facts the question needs",
+			},
+		}
+	default:
+		return llmgate.Noul{
+			Instructions: fmt.Sprintf(
+				"`question` is a question about a document. `%s.text` is the text of page "+
+					"`%s.page`. Does this page contain the specific facts or figures needed to "+
+					"answer the question — the number, the statement, the table row? A page that "+
+					"only mentions the topic, or refers the reader elsewhere, does not.", qk, qk),
+			Criteria: &llmgate.NoulCriteria{
+				True:  "The answer, or a figure it is computed from, is on this page",
+				False: "The page is about something else, or only mentions the topic",
+			},
+		}
+	}
+}
+
 // RankPages asks, for every page, whether it contains the facts or
 // figures the question asks for. Pages are batched so the request's
 // whole state — query plus every page in the batch — stays under the
@@ -446,30 +529,7 @@ func (n *JudgeNavigator) rankPages(ctx context.Context, query string, pages []Na
 			}
 			qk := fmt.Sprintf("p_%d", end)
 			state[qk] = map[string]any{"page": pages[end].Number, "text": text}
-			if coarse {
-				questions[qk] = llmgate.Noul{
-					Instructions: fmt.Sprintf(
-						"`question` is a question about a document. `%s.text` is the START of page "+
-							"`%s.page` — its heading and first lines. Could the facts or figures needed "+
-							"to answer the question be on this page, judging from what it opens with?", qk, qk),
-					Criteria: &llmgate.NoulCriteria{
-						True:  "This page's opening says it is the kind of page that would hold the answer",
-						False: "This page opens on something unrelated",
-					},
-				}
-			} else {
-				questions[qk] = llmgate.Noul{
-					Instructions: fmt.Sprintf(
-						"`question` is a question about a document. `%s.text` is the text of page "+
-							"`%s.page`. Does this page contain the specific facts or figures needed to "+
-							"answer the question — the number, the statement, the table row? A page that "+
-							"only mentions the topic, or refers the reader elsewhere, does not.", qk, qk),
-					Criteria: &llmgate.NoulCriteria{
-						True:  "The answer, or a figure it is computed from, is on this page",
-						False: "The page is about something else, or only mentions the topic",
-					},
-				}
-			}
+			questions[qk] = n.pageQuestion(qk, coarse)
 			used += cost
 			end++
 		}
@@ -906,48 +966,15 @@ func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.
 	if err != nil || len(raw) == 0 {
 		return nil, false
 	}
-	var nodes []tree.TOCNode
-	if err := json.Unmarshal(raw, &nodes); err != nil || len(nodes) == 0 {
-		return nil, false
-	}
 	pages, err := s.Pages.LoadPages(ctx, t.DocumentID)
 	if err != nil || len(pages) == 0 {
 		return nil, false
 	}
-	byNum := make(map[int]NavPage, len(pages))
-	for _, p := range pages {
-		byNum[p.Number] = p
-	}
-	var leaves []NavLeaf
-	var walk func(ns []tree.TOCNode, path string)
-	walk = func(ns []tree.TOCNode, path string) {
-		for _, n := range ns {
-			p := n.Title
-			if path != "" {
-				p = path + " > " + n.Title
-			}
-			if len(n.Nodes) > 0 {
-				walk(n.Nodes, p)
-				continue
-			}
-			if n.StartPage > 0 && n.EndPage >= n.StartPage {
-				leaves = append(leaves, NavLeaf{ID: n.NodeID, Title: n.Title, Path: p, Start: n.StartPage, End: n.EndPage, Summary: n.Summary})
-			}
-		}
-	}
-	walk(nodes, "")
-	if len(leaves) == 0 {
+	in := PersistedNavInputs(raw, pages)
+	if in == nil {
 		return nil, false
 	}
-	load := func(_ context.Context, leaf NavLeaf) ([]NavPage, error) {
-		var ps []NavPage
-		for n := leaf.Start; n <= leaf.End; n++ {
-			if p, ok := byNum[n]; ok {
-				ps = append(ps, p)
-			}
-		}
-		return ps, nil
-	}
+	leaves, load := in.Leaves, in.Load
 	// Every page is already in memory here, so skimming them all costs
 	// tokens but no loads — the case SkimAll was built for.
 	navigator := s.Navigator
@@ -1000,10 +1027,159 @@ func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.
 	}, true
 }
 
+// NavInputs is what navigation runs over for one document: its leaves
+// and how to read a leaf's pages. Pages is every page in order when they
+// are already in memory (the persisted-pages path), nil when each leaf
+// is read from storage on demand.
+type NavInputs struct {
+	Leaves []NavLeaf
+	Load   func(ctx context.Context, leaf NavLeaf) ([]NavPage, error)
+	Pages  []NavPage
+	// Ordinal is set when the document has no pages and each unit's number
+	// is its section's position in the document, not a page (navSections).
+	Ordinal bool
+}
+
+// PersistedNavInputs builds navigation inputs from a persisted table of
+// contents and the persisted per-page text. Nil when the contents carry
+// no leaf with a page range.
+func PersistedNavInputs(tocRaw []byte, pages []NavPage) *NavInputs {
+	var nodes []tree.TOCNode
+	if err := json.Unmarshal(tocRaw, &nodes); err != nil || len(nodes) == 0 || len(pages) == 0 {
+		return nil
+	}
+	byNum := make(map[int]NavPage, len(pages))
+	for _, p := range pages {
+		byNum[p.Number] = p
+	}
+	var leaves []NavLeaf
+	var walk func(ns []tree.TOCNode, path string)
+	walk = func(ns []tree.TOCNode, path string) {
+		for _, n := range ns {
+			p := n.Title
+			if path != "" {
+				p = path + " > " + n.Title
+			}
+			if len(n.Nodes) > 0 {
+				walk(n.Nodes, p)
+				continue
+			}
+			if n.StartPage > 0 && n.EndPage >= n.StartPage {
+				leaves = append(leaves, NavLeaf{ID: n.NodeID, Title: n.Title, Path: p, Start: n.StartPage, End: n.EndPage, Summary: n.Summary})
+			}
+		}
+	}
+	walk(nodes, "")
+	if len(leaves) == 0 {
+		return nil
+	}
+	return &NavInputs{Leaves: leaves, Load: pagesInRange(byNum), Pages: sortedPages(pages)}
+}
+
+// PagedNavInputs covers a document with per-page text but no contents
+// tree: one leaf spanning every page, titled with the document's title.
+func PagedNavInputs(title string, pages []NavPage) *NavInputs {
+	if len(pages) == 0 {
+		return nil
+	}
+	ps := sortedPages(pages)
+	byNum := make(map[int]NavPage, len(ps))
+	for _, p := range ps {
+		byNum[p.Number] = p
+	}
+	leaf := NavLeaf{ID: "doc", Title: title, Path: title, Start: ps[0].Number, End: ps[len(ps)-1].Number}
+	return &NavInputs{Leaves: []NavLeaf{leaf}, Load: pagesInRange(byNum), Pages: ps}
+}
+
+// SectionTreeNavInputs builds navigation inputs from the parser's section
+// tree: each section with content is a leaf, its body read through the
+// strategy's PageLoader and chunked into page-sized units.
+func (s *JudgeWalkStrategy) SectionTreeNavInputs(t *tree.Tree) *NavInputs {
+	if t == nil || t.Root == nil {
+		return nil
+	}
+	sections, ordinal := navSections(t)
+	byID := map[string]sectionPageEntry{}
+	paths := sectionPaths(t)
+	var leaves []NavLeaf
+	for _, sec := range sections {
+		byID[string(sec.id)] = sec
+		leaves = append(leaves, NavLeaf{
+			ID: string(sec.id), Title: sec.title, Path: paths[sec.id],
+			Start: sec.start, End: sec.end, Summary: sec.summary,
+		})
+	}
+	if len(leaves) == 0 {
+		return nil
+	}
+	chars := s.Navigator.pageChars()
+	load := func(ctx context.Context, leaf NavLeaf) ([]NavPage, error) {
+		sec := byID[leaf.ID]
+		if s.PageLoader == nil || sec.contentRef == "" {
+			return nil, nil
+		}
+		b, err := s.PageLoader.Load(ctx, sec.contentRef)
+		if err != nil {
+			return nil, err
+		}
+		return chunkBody(string(b), sec.start, sec.end, chars), nil
+	}
+	return &NavInputs{Leaves: leaves, Load: load, Ordinal: ordinal}
+}
+
+func pagesInRange(byNum map[int]NavPage) func(context.Context, NavLeaf) ([]NavPage, error) {
+	return func(_ context.Context, leaf NavLeaf) ([]NavPage, error) {
+		var ps []NavPage
+		for n := leaf.Start; n <= leaf.End; n++ {
+			if p, ok := byNum[n]; ok {
+				ps = append(ps, p)
+			}
+		}
+		return ps, nil
+	}
+}
+
+func sortedPages(pages []NavPage) []NavPage {
+	out := append([]NavPage(nil), pages...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out
+}
+
+// navSections lists the sections navigation runs over: every section with
+// a page range when the document has pages, and otherwise — Markdown, plain
+// text, HTML, a document with no page numbers at all — every section that
+// carries content, in document order, numbered 1..n as one unit each.
+// ordinal reports the second case, where a unit's number is its position,
+// not a page: citations then name sections, never invented pages.
+//
+// Before this, a document without pages gave navigation nothing at all, and
+// /v1/query and corpus mode returned no evidence for every Markdown or text
+// document (HAL-3075's MultiHop smoke: 609 articles, "no navigable sections").
+func navSections(t *tree.Tree) (sections []sectionPageEntry, ordinal bool) {
+	if s := flattenSectionsByPage(t); len(s) > 0 {
+		return s, false
+	}
+	if t == nil || t.Root == nil {
+		return nil, false
+	}
+	n := 0
+	t.Root.Walk(func(s *tree.Section) bool {
+		if strings.TrimSpace(s.ContentRef) == "" {
+			return true
+		}
+		n++
+		sections = append(sections, sectionPageEntry{
+			id: s.ID, title: s.Title, summary: s.Summary, contentRef: s.ContentRef, start: n, end: n,
+		})
+		return true
+	})
+	return sections, len(sections) > 0
+}
+
 // selectOnSectionTree is the fallback: the parser's section tree, each
 // section's body chunked into page-sized units.
 func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tree, query string, _ ContextBudget) (*Result, error) {
-	sections := flattenSectionsByPage(t)
+	sections, ordinal := navSections(t)
 	byID := map[string]sectionPageEntry{}
 	paths := sectionPaths(t)
 	var leaves []NavLeaf
@@ -1048,6 +1224,9 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	best := 0.0
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
+	}
+	if ordinal {
+		ranges = nil // the units were numbered by position; there are no pages to cite
 	}
 	return &Result{
 		SelectedIDs: ids,
