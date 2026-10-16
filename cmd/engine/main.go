@@ -417,6 +417,11 @@ func modelFor(c config.LLMConfig) string {
 		return c.OpenAI.Model
 	case "gemini":
 		return c.Gemini.Model
+	case "vertex":
+		if c.Vertex.Model != "" {
+			return c.Vertex.Model
+		}
+		return models.DefaultModels[models.ProviderVertex]
 	}
 	return ""
 }

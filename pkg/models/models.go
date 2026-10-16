@@ -132,6 +132,11 @@ func (g Generative) Validate() error {
 		if g.ThinkingBudget != nil && *g.ThinkingBudget < 0 {
 			return errors.New("vertex thinking budget cannot be negative")
 		}
+		switch strings.TrimSpace(strings.ToLower(g.ThinkingLevel)) {
+		case "", "minimal", "low", "medium", "high":
+		default:
+			return fmt.Errorf("vertex thinking level %q is not one of minimal, low, medium, high", g.ThinkingLevel)
+		}
 		return nil
 	case ProviderOpenAICompatible:
 		if strings.TrimSpace(g.BaseURL) == "" {
@@ -323,7 +328,21 @@ func trimGenerative(g Generative) Generative {
 		BaseURL:     strings.TrimRight(strings.TrimSpace(g.BaseURL), "/"),
 		AnswerModel: strings.TrimSpace(g.AnswerModel),
 		IngestModel: strings.TrimSpace(g.IngestModel),
+		// Vertex: dropping these would silently bill a different project
+		// or think by default.
+		Project:        strings.TrimSpace(g.Project),
+		Location:       strings.TrimSpace(strings.ToLower(g.Location)),
+		ThinkingBudget: copyInt(g.ThinkingBudget),
+		ThinkingLevel:  strings.TrimSpace(strings.ToLower(g.ThinkingLevel)),
 	}
+}
+
+func copyInt(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 func trimJudge(j JudgeSettings) JudgeSettings {

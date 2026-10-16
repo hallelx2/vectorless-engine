@@ -245,9 +245,11 @@ func (r *Recorder) Snapshot() Timing {
 			out.Storage = w
 		}
 	}
-	waiting := unionLen(all)
-	out.WaitingMS = ms(waiting)
-	out.EngineMS = ms(total - waiting)
+	// Round the total and the waiting time once each and derive the engine
+	// share from the rounded pair, so the documented identity holds exactly
+	// rather than to within a rounding step.
+	out.WaitingMS = ms(unionLen(all))
+	out.EngineMS = round2(out.TotalMS - out.WaitingMS)
 	return out
 }
 

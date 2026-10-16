@@ -66,6 +66,9 @@ services:
     volumes:
       - documents:/data
       - ./engine.yaml:/etc/vectorless/engine.yaml:ro
+      # Vertex credentials off GCP (see .env.example). On a GCP VM the
+      # attached service account is used and this directory can stay empty.
+      - ./gcp:/etc/vectorless/gcp:ro
     depends_on:
       postgres:
         condition: service_healthy

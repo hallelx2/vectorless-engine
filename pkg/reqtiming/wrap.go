@@ -59,6 +59,21 @@ func WrapJudge(j llmgate.Judge) llmgate.Judge {
 
 type timedJudge struct{ next llmgate.Judge }
 
+// Active forwards the registry proxy's Active (models.ActiveJudge): nil
+// when no Judge is configured, so callers still take their no-Judge path,
+// and the active Judge, timed, otherwise.
+func (t timedJudge) Active() llmgate.Judge {
+	a, ok := t.next.(interface{ Active() llmgate.Judge })
+	if !ok {
+		return t
+	}
+	inner := a.Active()
+	if inner == nil {
+		return nil
+	}
+	return timedJudge{next: inner}
+}
+
 func (t timedJudge) Judge(ctx context.Context, req llmgate.JudgeRequest) (*llmgate.Judgment, error) {
 	ctx, done := From(ctx).Span(ctx, Judge)
 	res, err := t.next.Judge(ctx, req)

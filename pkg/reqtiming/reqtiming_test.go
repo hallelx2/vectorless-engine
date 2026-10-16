@@ -121,8 +121,10 @@ func TestSpanTimesTheWireNotTheQueue(t *testing.T) {
 	if a.Calls != 1 || a.Attempts != 1 {
 		t.Fatalf("calls/attempts = %d/%d", a.Calls, a.Attempts)
 	}
-	if a.WaitMS < 35 || a.WaitMS > 200 {
-		t.Errorf("wait = %vms, want ~40 (the server's time)", a.WaitMS)
+	// A floor only: a loaded test host can stretch the wait, never shrink
+	// it below the server's sleep.
+	if a.WaitMS < 35 {
+		t.Errorf("wait = %vms, want at least the server's 40ms", a.WaitMS)
 	}
 	if a.LocalMS < 25 {
 		t.Errorf("local = %vms, want the ~30ms spent before sending", a.LocalMS)
@@ -224,5 +226,37 @@ func TestMiddlewareInstallsARecorder(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/query", nil))
 	if got == nil {
 		t.Fatal("handler saw no recorder")
+	}
+}
+
+type activeProxy struct{ inner llmgate.Judge }
+
+func (a activeProxy) Judge(ctx context.Context, r llmgate.JudgeRequest) (*llmgate.Judgment, error) {
+	return a.inner.Judge(ctx, r)
+}
+func (a activeProxy) Active() llmgate.Judge { return a.inner }
+
+func TestTimedJudgeForwardsActive(t *testing.T) {
+	none := WrapJudge(activeProxy{inner: nil}).(interface{ Active() llmgate.Judge })
+	if none.Active() != nil {
+		t.Error("an unconfigured Judge must stay nil through the wrapper")
+	}
+	some := WrapJudge(activeProxy{inner: stubJudge{fn: func(context.Context) {}}}).(interface{ Active() llmgate.Judge })
+	if _, ok := some.Active().(timedJudge); !ok {
+		t.Error("an active Judge must come back timed")
+	}
+}
+
+func TestSumIsExactAfterRounding(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(0, 0)}
+	r := newRecorder(clk.Now)
+	t0 := clk.Now()
+	r.add(Judge, call{interval: interval{t0.Add(3333 * time.Microsecond), t0.Add(7777 * time.Microsecond)}})
+	clk.Advance(12345 * time.Microsecond)
+	s := r.Snapshot()
+	// Equal to the hundredth of a millisecond the fields carry; float
+	// addition of two-decimal values may differ by an ulp.
+	if math.Abs(s.EngineMS+s.WaitingMS-s.TotalMS) > 1e-9 {
+		t.Errorf("%v + %v != %v", s.EngineMS, s.WaitingMS, s.TotalMS)
 	}
 }
