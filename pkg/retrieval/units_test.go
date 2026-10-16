@@ -183,3 +183,14 @@ func TestRunnerUpsSkipTheEvidenceAndKeepRankOrder(t *testing.T) {
 		t.Fatalf("runner-ups = %+v", got)
 	}
 }
+
+// A title whose case folding changes its byte length must not panic the
+// request (U+212A KELVIN SIGN lower-cases to the 1-byte "k").
+func TestSubstantiveSurvivesCaseFoldingThatChangesLength(t *testing.T) {
+	if got := substantive("k", "\u212a"); got != "k" {
+		t.Errorf("substantive = %q", got)
+	}
+	if got := substantive("\u212aelvin scale readings follow", "\u212aelvin"); got != "scale readings follow" {
+		t.Errorf("substantive = %q", got)
+	}
+}

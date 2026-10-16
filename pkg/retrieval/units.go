@@ -255,7 +255,10 @@ func gatherBeneath(ctx context.Context, sec *tree.Section, load ContentLoader) (
 func substantive(text, title string) string {
 	s := strings.TrimSpace(text)
 	if title = strings.TrimSpace(title); title != "" {
-		if strings.HasPrefix(strings.ToLower(s), strings.ToLower(title)) {
+		// EqualFold on the same byte span: lower-casing can change a
+		// rune's byte length (U+212A KELVIN SIGN is 3 bytes, "k" is 1), so
+		// slicing s by a lower-cased length could panic.
+		if len(s) >= len(title) && strings.EqualFold(s[:len(title)], title) {
 			s = strings.TrimSpace(s[len(title):])
 		}
 	}
