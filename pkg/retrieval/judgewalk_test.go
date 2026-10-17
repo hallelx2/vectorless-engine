@@ -402,3 +402,26 @@ func TestOversizedLeafComesBackAsItsChosenChunks(t *testing.T) {
 		t.Errorf("a chunk is %d chars, more than one navigation chunk", len(top.Text))
 	}
 }
+
+// Chunks of one leaf that share a page number are all read; a page two
+// leaves share is read once (HAL-3402).
+func TestPagesAreKeptApartByNumberAndText(t *testing.T) {
+	leaves := []NavLeaf{{ID: "a"}, {ID: "b"}}
+	load := func(_ context.Context, l NavLeaf) ([]NavPage, error) {
+		if l.ID == "a" {
+			return []NavPage{{Number: 1, Text: "chunk one"}, {Number: 1, Text: "chunk two"}, {Number: 2, Text: "shared page"}}, nil
+		}
+		return []NavPage{{Number: 2, Text: "shared page"}, {Number: 3, Text: "page three"}}, nil
+	}
+	all, err := allLeafPages(context.Background(), leaves, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range all {
+		got = append(got, p.Text)
+	}
+	if strings.Join(got, "|") != "chunk one|chunk two|shared page|page three" {
+		t.Errorf("pages = %v", got)
+	}
+}

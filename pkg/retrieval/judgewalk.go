@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -663,7 +664,7 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	// better exists: a low-confidence best guess beats reading nothing.
 	// A page two overlapping leaves both cover is gathered once.
 	var pages []NavPage
-	seen := map[int]bool{}
+	seen := map[string]bool{}
 	coarseCap := n.coarsePages()
 	for _, ls := range ranked {
 		if len(out.Selected) >= n.maxLeaves() || len(pages) >= coarseCap {
@@ -675,10 +676,10 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 		}
 		added := 0
 		for _, p := range ps {
-			if seen[p.Number] || len(pages) >= coarseCap {
+			if seen[pageKey(p)] || len(pages) >= coarseCap {
 				continue
 			}
-			seen[p.Number] = true
+			seen[pageKey(p)] = true
 			p.LeafID = ls.Leaf.ID
 			pages = append(pages, p)
 			added++
@@ -698,9 +699,9 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	if len(pages) > maxP && skimmed {
 		score := make(map[int]float64, len(heads))
 		for _, h := range heads {
-			score[h.Page.Number] = h.P
+			score[pageKey(h.Page)] = h.P
 		}
-		sort.SliceStable(pages, func(i, j int) bool { return score[pages[i].Number] > score[pages[j].Number] })
+		sort.SliceStable(pages, func(i, j int) bool { return score[pageKey(pages[i])] > score[pageKey(pages[j])] })
 		pages = pages[:maxP]
 		sort.Slice(pages, func(i, j int) bool { return pages[i].Number < pages[j].Number })
 	} else if len(pages) > maxP {
@@ -771,8 +772,8 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 					return nil, fmt.Errorf("judgewalk: follow %q: %w", target.Title, err)
 				}
 				for _, p := range ps {
-					if !seen[p.Number] && len(refPages) < maxP {
-						seen[p.Number] = true
+					if !seen[pageKey(p)] && len(refPages) < maxP {
+						seen[pageKey(p)] = true
 						p.LeafID = target.ID
 						refPages = append(refPages, p)
 					}
@@ -800,21 +801,32 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	return out, nil
 }
 
+// pageKey tells pages apart. A page two overlapping leaves both cover has
+// the same number and text, and is gathered once. The chunks of a leaf's
+// body can share a number when the leaf has more chunks than pages (an
+// unpaged contract's chunks are all "page 1"), and are different text, so
+// they stay apart. Keying on the number alone kept only a leaf's first
+// chunk: navigation never read past the first 6,000 characters of a
+// LegalBench contract (HAL-3402).
+func pageKey(p NavPage) string {
+	return strconv.Itoa(p.Number) + "\x00" + p.Text
+}
+
 // allLeafPages loads every leaf's pages once each, in document order, a
 // page two leaves share kept under the first.
 func allLeafPages(ctx context.Context, leaves []NavLeaf, loadPages func(ctx context.Context, leaf NavLeaf) ([]NavPage, error)) ([]NavPage, error) {
 	var all []NavPage
-	seen := map[int]bool{}
+	seen := map[string]bool{}
 	for _, l := range leaves {
 		ps, err := loadPages(ctx, l)
 		if err != nil {
 			return nil, fmt.Errorf("judgewalk: load %q: %w", l.Title, err)
 		}
 		for _, p := range ps {
-			if seen[p.Number] {
+			if seen[pageKey(p)] {
 				continue
 			}
-			seen[p.Number] = true
+			seen[pageKey(p)] = true
 			p.LeafID = l.ID
 			all = append(all, p)
 		}
@@ -1036,15 +1048,15 @@ func runnerUps(nav *NavResult) []PageScore {
 	}
 	type key struct {
 		leaf string
-		page int
+		page string
 	}
 	in := map[key]bool{}
 	for _, ev := range nav.Evidence {
-		in[key{ev.Page.LeafID, ev.Page.Number}] = true
+		in[key{ev.Page.LeafID, pageKey(ev.Page)}] = true
 	}
 	var out []PageScore
 	for _, ps := range nav.Pages {
-		k := key{ps.Page.LeafID, ps.Page.Number}
+		k := key{ps.Page.LeafID, pageKey(ps.Page)}
 		if in[k] {
 			continue
 		}
