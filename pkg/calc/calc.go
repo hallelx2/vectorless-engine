@@ -8,8 +8,8 @@
 // gemini-2.5-flash-lite wrote 365 * 1,380.5 / 7,890 = 67.75, which is 63.86
 // (HAL-3161).
 //
-// An expression holds numbers, + - * /, parentheses and signs, nothing
-// else. Numbers are read the way a filing writes them: "$1,174" is 1174,
+// An expression holds numbers, + - * /, powers (** or ^), parentheses and
+// signs, nothing else. Numbers are read the way a filing writes them: "$1,174" is 1174,
 // "12.5%" is 0.125, "(1,234)" stays a parenthesised 1234.
 package calc
 
@@ -27,8 +27,9 @@ import (
 // can do it. Every answer prompt that may derive a figure includes them.
 const Instructions = "When the question asks for a figure the evidence lets you derive (a ratio, margin, growth rate, " +
 	"change, average or sum), take each input from the evidence and set the calculation up, but do not work it out: " +
-	"write it as <<expression>> using only numbers from the evidence, + - * / and parentheses, and it is computed " +
-	"for you. Example: operating margin was <<11,512 / 86,392 * 100>>% [1]. Apply the question's own definitions " +
+	"write it as <<expression>> using only numbers from the evidence, + - * /, ** for a power and parentheses, and it is computed " +
+	"for you. Example: operating margin was <<11,512 / 86,392 * 100>>% [1]; a two-year compound growth rate is " +
+	"<<((65,984 / 65,398) ** (1 / 2) - 1) * 100>>%. Apply the question's own definitions " +
 	"term by term. When the question asks for a judgement (is a business cyclical, what drove a change), answer it " +
 	"from the facts the evidence states and cite them."
 
@@ -273,7 +274,15 @@ func tokenize(expr string) ([]token, error) {
 		switch c {
 		case ' ', '\t', '\n':
 			i++
-		case '+', '-', '*', '/':
+		case '*':
+			if i+1 < len(expr) && expr[i+1] == '*' { // ** is a power
+				toks = append(toks, token{kind: tOp, op: '^'})
+				i += 2
+				continue
+			}
+			toks = append(toks, token{kind: tOp, op: c})
+			i++
+		case '+', '-', '/', '^':
 			toks = append(toks, token{kind: tOp, op: c})
 			i++
 		case '(':
@@ -376,7 +385,7 @@ func (p *parser) term() (float64, error) {
 	return v, nil
 }
 
-// unary := ("+"|"-") unary | atom
+// unary := ("+"|"-") unary | power
 func (p *parser) unary() (float64, error) {
 	if t := p.peek(); t != nil && t.kind == tOp && (t.op == '+' || t.op == '-') {
 		p.pos++
@@ -386,7 +395,43 @@ func (p *parser) unary() (float64, error) {
 		}
 		return v, err
 	}
-	return p.atom()
+	return p.power()
+}
+
+// maxExponent bounds a power's exponent: a count of periods or a root
+// (CAGR over n years is (end / start) ** (1 / n)), not more.
+const maxExponent = 100
+
+// power := atom [("**"|"^") unary]: right-associative (2 ** 3 ** 2 is
+// 2 ** 9), and it binds before a sign on its left (-2 ** 2 is -4), as
+// Python and spreadsheets read it (HAL-3274).
+func (p *parser) power() (float64, error) {
+	base, err := p.atom()
+	if err != nil {
+		return 0, err
+	}
+	t := p.peek()
+	if t == nil || t.kind != tOp || t.op != '^' {
+		return base, nil
+	}
+	p.pos++
+	exp, err := p.unary()
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case math.Abs(exp) > maxExponent:
+		return 0, fmt.Errorf("%w: exponent %v is beyond %d", ErrInvalid, exp, maxExponent)
+	case base < 0 && exp != math.Trunc(exp):
+		return 0, fmt.Errorf("%w: a fractional power of a negative number has no real value", ErrInvalid)
+	case base == 0 && exp < 0:
+		return 0, fmt.Errorf("%w: division by zero", ErrInvalid)
+	}
+	v := math.Pow(base, exp)
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("%w: not a finite number", ErrInvalid)
+	}
+	return v, nil
 }
 
 // atom := number | "(" expr ")"
