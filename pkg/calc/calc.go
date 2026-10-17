@@ -57,32 +57,95 @@ type Calculation struct {
 	Operands   []Operand `json:"operands,omitempty"`
 }
 
-var exprRE = regexp.MustCompile(`(?s)<<(.+?)>>`)
-
 // Resolve replaces every <<expression>> in text with its value followed by
 // the expression, "63.8634 (= 365 * ...)", so a reader sees both. One that
 // does not evaluate stays visible with a note, never a made-up number.
+//
+// A set-up may nest another (<<65,398 / <<(50,710 + 47,528) / 2>>>>): the
+// innermost is worked out first and its value feeds the one around it
+// (HAL-3245). Every level is recorded. An inner one that fails makes its
+// outer one fail. A << with no >>, or a >> with no <<, is not computable,
+// never a partial number.
 func Resolve(text string) (string, []Calculation) {
-	var calcs []Calculation
-	out := exprRE.ReplaceAllStringFunc(text, func(m string) string {
-		expr := strings.TrimSpace(m[2 : len(m)-2])
-		c := Calculation{Expression: expr}
-		ops, err := operands(expr)
-		if err == nil {
-			c.Operands = ops
-		}
-		v, err := Evaluate(expr)
-		if err != nil {
-			c.Error = err.Error()
+	var (
+		calcs []Calculation
+		buf   strings.Builder
+		opens []int // where each still-open << starts in buf
+	)
+	cut := func(start int) string {
+		all := buf.String()
+		buf.Reset()
+		buf.WriteString(all[:start])
+		return strings.TrimSpace(all[start:])
+	}
+	for i := 0; i < len(text); {
+		switch {
+		case strings.HasPrefix(text[i:], "<<"):
+			opens = append(opens, buf.Len())
+			i += 2
+		case strings.HasPrefix(text[i:], ">>"):
+			i += 2
+			if len(opens) == 0 {
+				calcs = append(calcs, Calculation{Expression: ">>", Error: "a >> with no <<"})
+				continue
+			}
+			start := opens[len(opens)-1]
+			opens = opens[:len(opens)-1]
+			expr := cut(start)
+			nested := len(opens) > 0
+			c := evaluate(expr)
 			calcs = append(calcs, c)
-			return expr + " (could not be computed)"
+			switch {
+			case c.Value == nil && nested:
+				// the text stays, so the set-up around it fails too
+				buf.WriteString("(" + expr + ")")
+			case c.Value == nil:
+				buf.WriteString(expr + " (could not be computed)")
+			case nested:
+				buf.WriteString(plain(*c.Value))
+			default:
+				buf.WriteString(c.Display + " (= " + expr + ")")
+			}
+		default:
+			buf.WriteByte(text[i])
+			i++
 		}
-		c.Value = &v
-		c.Display = Format(v)
-		calcs = append(calcs, c)
-		return c.Display + " (= " + expr + ")"
-	})
-	return out, calcs
+	}
+	for len(opens) > 0 { // a << never closed: everything after it is one failed set-up
+		start := opens[len(opens)-1]
+		opens = opens[:len(opens)-1]
+		expr := cut(start)
+		calcs = append(calcs, Calculation{Expression: expr, Error: "a << with no >>"})
+		buf.WriteString(expr + " (could not be computed)")
+	}
+	return buf.String(), calcs
+}
+
+// evaluate is one set-up as a Calculation: its operands, and its value or
+// why it has none.
+func evaluate(expr string) Calculation {
+	c := Calculation{Expression: expr}
+	if ops, err := operands(expr); err == nil {
+		c.Operands = ops
+	}
+	v, err := Evaluate(expr)
+	if err != nil {
+		c.Error = err.Error()
+		return c
+	}
+	c.Value = &v
+	c.Display = Format(v)
+	return c
+}
+
+// plain writes an inner result back into its outer expression at full
+// precision, in a form the number grammar reads (no exponent, no grouping).
+func plain(v float64) string {
+	s := strings.TrimRight(strings.TrimRight(strconv.FormatFloat(v, 'f', 12, 64), "0"), ".")
+	if s == "" || s == "-0" {
+		return "0"
+	}
+	return s
 }
 
 // Source is one evidence block an operand may come from.

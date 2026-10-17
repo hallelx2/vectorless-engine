@@ -129,3 +129,54 @@ func TestOperandsKeepTheirSign(t *testing.T) {
 		t.Errorf("-1,234 not found as (1,234): %+v", calcs[0].Operands[0])
 	}
 }
+
+// FinanceBench 04412 (Lockheed Martin), as the model wrote it (HAL-3245).
+func TestNestedSetUpIsWorkedOutInsideOut(t *testing.T) {
+	out, calcs := Resolve("Ratio = <<65,398 / <<(50,710 + 47,528) / 2>>>>")
+	if out != "Ratio = 1.3314 (= 65,398 / 49119)" {
+		t.Fatalf("out = %q", out)
+	}
+	if len(calcs) != 2 || calcs[0].Expression != "(50,710 + 47,528) / 2" || calcs[1].Expression != "65,398 / 49119" {
+		t.Fatalf("calcs = %+v", calcs)
+	}
+	if math.Abs(*calcs[1].Value-65398.0/49119.0) > 1e-9 {
+		t.Errorf("value = %v", *calcs[1].Value)
+	}
+}
+
+func TestTwoLevelsAndSiblings(t *testing.T) {
+	out, calcs := Resolve("x <<<<1 + 1>> * <<2 + 3>> + <<<<4>> / 2>>>> y")
+	if out != "x 12 (= 2 * 5 + 2) y" || len(calcs) != 5 {
+		t.Errorf("out = %q, %d calcs", out, len(calcs))
+	}
+}
+
+func TestFailedInnerSetUpFailsTheOuter(t *testing.T) {
+	out, calcs := Resolve("<<10 / <<abs(1)>>>>")
+	if out != "10 / (abs(1)) (could not be computed)" {
+		t.Errorf("out = %q", out)
+	}
+	for _, c := range calcs {
+		if c.Value != nil {
+			t.Errorf("a level has a value: %+v", c)
+		}
+	}
+}
+
+func TestUnbalancedMarkerIsNeverANumber(t *testing.T) {
+	for raw, want := range map[string]string{
+		"margin <<11,512 / 86,392 * 100":   "margin 11,512 / 86,392 * 100 (could not be computed)",
+		"margin 11,512 / 86,392 * 100>> %": "margin 11,512 / 86,392 * 100 %",
+	} {
+		out, calcs := Resolve(raw)
+		if out != want || len(calcs) == 0 || calcs[len(calcs)-1].Value != nil {
+			t.Errorf("%q -> %q, %+v", raw, out, calcs)
+		}
+	}
+}
+
+func TestInnerResultKeepsItsPrecision(t *testing.T) {
+	if out, _ := Resolve("<<<<1 / 3>> * 3>>"); out != "1 (= 0.333333333333 * 3)" {
+		t.Errorf("out = %q", out)
+	}
+}
