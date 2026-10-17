@@ -129,3 +129,94 @@ func TestOperandsKeepTheirSign(t *testing.T) {
 		t.Errorf("-1,234 not found as (1,234): %+v", calcs[0].Operands[0])
 	}
 }
+
+// FinanceBench 04412 (Lockheed Martin), as the model wrote it (HAL-3245).
+func TestNestedSetUpIsWorkedOutInsideOut(t *testing.T) {
+	out, calcs := Resolve("Ratio = <<65,398 / <<(50,710 + 47,528) / 2>>>>")
+	if out != "Ratio = 1.3314 (= 65,398 / 49119)" {
+		t.Fatalf("out = %q", out)
+	}
+	if len(calcs) != 2 || calcs[0].Expression != "(50,710 + 47,528) / 2" || calcs[1].Expression != "65,398 / 49119" {
+		t.Fatalf("calcs = %+v", calcs)
+	}
+	if math.Abs(*calcs[1].Value-65398.0/49119.0) > 1e-9 {
+		t.Errorf("value = %v", *calcs[1].Value)
+	}
+}
+
+func TestTwoLevelsAndSiblings(t *testing.T) {
+	out, calcs := Resolve("x <<<<1 + 1>> * <<2 + 3>> + <<<<4>> / 2>>>> y")
+	if out != "x 12 (= 2 * 5 + 2) y" || len(calcs) != 5 {
+		t.Errorf("out = %q, %d calcs", out, len(calcs))
+	}
+}
+
+func TestFailedInnerSetUpFailsTheOuter(t *testing.T) {
+	out, calcs := Resolve("<<10 / <<abs(1)>>>>")
+	if out != "10 / (abs(1)) (could not be computed)" {
+		t.Errorf("out = %q", out)
+	}
+	for _, c := range calcs {
+		if c.Value != nil {
+			t.Errorf("a level has a value: %+v", c)
+		}
+	}
+}
+
+func TestUnbalancedMarkerIsNeverANumber(t *testing.T) {
+	for raw, want := range map[string]string{
+		"margin <<11,512 / 86,392 * 100":   "margin 11,512 / 86,392 * 100 (could not be computed)",
+		"margin 11,512 / 86,392 * 100>> %": "margin 11,512 / 86,392 * 100 %",
+	} {
+		out, calcs := Resolve(raw)
+		if out != want || len(calcs) == 0 || calcs[len(calcs)-1].Value != nil {
+			t.Errorf("%q -> %q, %+v", raw, out, calcs)
+		}
+	}
+}
+
+func TestInnerResultKeepsItsPrecision(t *testing.T) {
+	if out, _ := Resolve("<<<<1 / 3>> * 3>>"); out != "1 (= 0.3333333333333333 * 3)" {
+		t.Errorf("out = %q", out)
+	}
+}
+
+// An inner result written into its outer set-up is marked derived and not
+// looked for on the pages; a literal of the same value stays a literal.
+func TestInnerResultIsDerivedNotModelSupplied(t *testing.T) {
+	_, calcs := Resolve("<<<<1 + 1>> + 2>>")
+	outer := calcs[1]
+	if outer.Expression != "2 + 2" || len(outer.Operands) != 2 {
+		t.Fatalf("outer = %+v", outer)
+	}
+	if !outer.Operands[0].Derived || outer.Operands[1].Derived {
+		t.Errorf("want the first 2 derived and the literal 2 not: %+v", outer.Operands)
+	}
+	Trace(calcs, []Source{{Page: 3, Text: "two items, 2 in all"}})
+	if outer.Operands[0].Found || !calcs[1].Operands[1].Found {
+		t.Errorf("trace: %+v", calcs[1].Operands)
+	}
+	// a negative inner result, behind a 3-byte minus sign in the outer text
+	_, neg := Resolve("<<10 − <<2 - 5>> × 2>>")
+	ops := neg[1].Operands
+	if len(ops) != 3 || ops[0].Derived || !ops[1].Derived || ops[1].Value != -3 || ops[2].Derived {
+		t.Errorf("operands = %+v", ops)
+	}
+	if *neg[1].Value != 16 {
+		t.Errorf("value = %v", *neg[1].Value)
+	}
+}
+
+func TestInnerResultKeepsFullPrecision(t *testing.T) {
+	for expr, want := range map[string]float64{
+		"<<<<1 / 3>> * 1000000000000>>":              1.0 / 3 * 1e12,
+		"<<1 / <<0.0000000000001 * 1>>>>":            1e13,
+		"<<<<1.234567 / 1000000000>> * 1000000000>>": 1.234567,
+	} {
+		_, calcs := Resolve(expr)
+		last := calcs[len(calcs)-1]
+		if last.Value == nil || math.Abs(*last.Value-want) > 1e-9*math.Max(1, math.Abs(want)) {
+			t.Errorf("%s = %+v, want %v", expr, last, want)
+		}
+	}
+}
