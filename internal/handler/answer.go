@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -341,26 +340,14 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 	if maxSections <= 0 {
 		maxSections = 5
 	}
-	if len(ids) > maxSections {
-		ids = ids[:maxSections]
-	}
-
-	enriched := make([]answerSection, 0, len(ids))
-	for _, id := range ids {
-		sec := t.FindByID(id)
-		if sec == nil {
-			continue
-		}
-		var content string
-		if sec.ContentRef != "" {
-			rc, _, getErr := h.storage.Get(ctx, sec.ContentRef)
-			if getErr == nil {
-				raw, _ := io.ReadAll(rc)
-				_ = rc.Close() // best-effort close
-				content = string(raw)
-			}
-		}
-		enriched = append(enriched, answerSection{sec: sec, content: content})
+	// Each section the answer is written from carries body text; a
+	// heading-only one, or a repeat, gives its slot to the next-ranked
+	// leaf (HAL-3160).
+	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{SelectedIDs: ids, RunnerUpIDs: res.RunnerUpIDs}, maxSections,
+		func(ctx context.Context, ref string) (string, error) { return readStored(ctx, h.storage, ref) })
+	enriched := make([]answerSection, 0, len(units))
+	for _, u := range units {
+		enriched = append(enriched, answerSection{sec: u.Section, content: u.Content})
 	}
 
 	spanExtractor := h.spanExtractor(body.Model)

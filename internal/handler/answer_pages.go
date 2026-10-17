@@ -54,9 +54,14 @@ func (h *AnswerHandler) answerFromPages(
 	if k <= 0 {
 		k = defaultEvidencePages
 	}
-	evidence := res.EvidencePages
-	if len(evidence) > k {
-		evidence = evidence[:k]
+	// The answer reads the evidence pages and, when the navigator found
+	// fewer than k above its threshold, the pages it ranked next, so a
+	// question that needs two statements is not answered from one
+	// (HAL-3160).
+	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{EvidencePages: res.EvidencePages, RunnerUpPages: res.RunnerUpPages}, k, nil)
+	evidence := make([]retrieval.EvidencePage, 0, len(units))
+	for _, u := range units {
+		evidence = append(evidence, u.Page)
 	}
 	retrievalMS := time.Since(started).Milliseconds()
 

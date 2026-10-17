@@ -636,27 +636,14 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.MaxSections > 0 && len(ids) > body.MaxSections {
-		ids = ids[:body.MaxSections]
+	// Every unit carries body text, and max_sections caps pages and
+	// sections together: a heading-only section, or one the evidence pages
+	// already carry, gives its slot to the next-ranked evidence (HAL-3160).
+	res := selResult
+	if res == nil {
+		res = &retrieval.Result{SelectedIDs: ids}
 	}
-
-	enriched := make([]sectionWithContent, 0, len(ids))
-	for _, id := range ids {
-		sec := t.FindByID(id)
-		if sec == nil {
-			continue
-		}
-		var content string
-		if sec.ContentRef != "" {
-			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
-			if err == nil {
-				raw, _ := io.ReadAll(rc)
-				_ = rc.Close() // best-effort close
-				content = string(raw)
-			}
-		}
-		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
-	}
+	pages, enriched, runnerUpPages, unitStats := d.assembleUnits(r.Context(), t, res, body.MaxSections)
 
 	// Optional: content-aware re-rank pass. One LLM call that scores
 	// each loaded section against the query and re-orders the slice
@@ -677,17 +664,20 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		runSpansConcurrent(r.Context(), extractor, body.Query, enriched, d.AnswerSpan.MaxConcurrency, d.Logger)
 	}
 
-	sections := make([]map[string]any, 0, len(enriched))
+	sections := make([]map[string]any, 0, len(pages)+len(enriched)+len(runnerUpPages))
 	finalIDs := make([]tree.SectionID, 0, len(enriched))
 	// A page-based strategy's evidence pages lead the list, as-is: the
 	// page the Judge found holds the answer; a section mapped to it by
-	// the parser's page attribution may not (HAL-1390).
-	if selResult != nil {
-		sections = append(sections, evidencePageSections(selResult.EvidencePages)...)
-	}
+	// the parser's page attribution may not (HAL-1390). Pages ranked just
+	// below the evidence close the list when there was room for them.
+	sections = append(sections, evidencePageSections(pages)...)
 	for _, e := range enriched {
 		sections = append(sections, sectionWithContentToMap(e))
 		finalIDs = append(finalIDs, e.sec.ID)
+	}
+	for _, m := range evidencePageSections(runnerUpPages) {
+		m["runner_up"] = true
+		sections = append(sections, m)
 	}
 
 	// Trace token is computed over the FINAL IDs that ship in the
@@ -709,7 +699,8 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		"trace_token": traceToken,
 		// What retrieval cost. /v1/answer always reported this; /v1/query
 		// dropped it, so a caller benchmarking retrieval alone saw $0.
-		"usage": usageJSON(totalUsage),
+		"usage":      usageJSON(totalUsage),
+		"unit_stats": unitStats,
 	}
 	if plan != nil {
 		resp["plan"] = plan
@@ -738,6 +729,41 @@ func (d Deps) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Model:       body.Model,
 		SelectedIDs: finalIDs,
 	})
+}
+
+// assembleUnits builds the units a response returns (retrieval.AssembleUnits)
+// and splits them the way the handlers use them: evidence pages, sections
+// with their text (re-rank and span extraction work on these), and pages
+// ranked below the evidence that fill the slots left over.
+func (d Deps) assembleUnits(ctx context.Context, t *tree.Tree, res *retrieval.Result, k int) ([]retrieval.EvidencePage, []sectionWithContent, []retrieval.EvidencePage, retrieval.UnitStats) {
+	units, stats := retrieval.AssembleUnits(ctx, t, res, k, d.loadContent)
+	var pages, runnerUps []retrieval.EvidencePage
+	var secs []sectionWithContent
+	for _, u := range units {
+		switch {
+		case u.Kind == retrieval.UnitPage && u.RunnerUp:
+			runnerUps = append(runnerUps, u.Page)
+		case u.Kind == retrieval.UnitPage:
+			pages = append(pages, u.Page)
+		default:
+			secs = append(secs, sectionWithContent{sec: u.Section, content: u.Content})
+		}
+	}
+	return pages, secs, runnerUps, stats
+}
+
+// loadContent reads a section's stored text.
+func (d Deps) loadContent(ctx context.Context, ref string) (string, error) {
+	rc, _, err := d.Storage.Get(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close() // best-effort close
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // sectionWithContent bundles a tree section with its loaded content
@@ -946,28 +972,9 @@ func (d Deps) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	if maxSections <= 0 {
 		maxSections = 5
 	}
-	if len(ids) > maxSections {
-		ids = ids[:maxSections]
-	}
-
-	// Load each section's content.
-	enriched := make([]sectionWithContent, 0, len(ids))
-	for _, id := range ids {
-		sec := t.FindByID(id)
-		if sec == nil {
-			continue
-		}
-		var content string
-		if sec.ContentRef != "" {
-			rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
-			if err == nil {
-				raw, _ := io.ReadAll(rc)
-				_ = rc.Close() // best-effort close
-				content = string(raw)
-			}
-		}
-		enriched = append(enriched, sectionWithContent{sec: sec, content: content})
-	}
+	// Each section the answer is written from carries body text
+	// (HAL-3160).
+	_, enriched, _, _ := d.assembleUnits(r.Context(), t, &retrieval.Result{SelectedIDs: ids}, maxSections)
 
 	// Optional: content-aware re-rank before synthesis sees the
 	// evidence. When TopK is set the synthesis prompt only ever sees
@@ -1194,20 +1201,9 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 	docs := make([]map[string]any, 0, len(result.Documents))
 	for docID, dr := range result.Documents {
 		sections := make([]map[string]any, 0, len(dr.SelectedIDs))
-		for _, sid := range dr.SelectedIDs {
-			sec := dr.Tree.FindByID(sid)
-			if sec == nil {
-				continue
-			}
-			var content string
-			if sec.ContentRef != "" {
-				rc, _, err := d.Storage.Get(r.Context(), sec.ContentRef)
-				if err == nil {
-					raw, _ := io.ReadAll(rc)
-					_ = rc.Close() // best-effort close
-					content = string(raw)
-				}
-			}
+		_, secs, _, _ := d.assembleUnits(r.Context(), dr.Tree, &retrieval.Result{SelectedIDs: dr.SelectedIDs}, body.MaxSections)
+		for _, e := range secs {
+			sec, content := e.sec, e.content
 			s := map[string]any{
 				"id":          sec.ID,
 				"parent_id":   sec.ParentID,
@@ -1226,9 +1222,6 @@ func (d Deps) handleQueryMulti(w http.ResponseWriter, r *http.Request) {
 				s["candidate_questions"] = sec.CandidateQuestions
 			}
 			sections = append(sections, s)
-			if body.MaxSections > 0 && len(sections) >= body.MaxSections {
-				break
-			}
 		}
 		docs = append(docs, map[string]any{
 			"document_id": docID,
