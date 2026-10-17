@@ -267,3 +267,25 @@ func TestWholeDocumentThreshold(t *testing.T) {
 		t.Error("negative turns it off")
 	}
 }
+
+// On a section tree, open slots fill from navigation's own ranking of every
+// leaf once the pages read are used up (HAL-3388).
+func TestSectionRunnerUpsFallBackToTheLeafRanking(t *testing.T) {
+	leaf := func(id string) NavLeaf { return NavLeaf{ID: id} }
+	nav := &NavResult{
+		Leaves:   []LeafScore{{Leaf: leaf("a"), P: 0.9}, {Leaf: leaf("b"), P: 0.6}, {Leaf: leaf("c"), P: 0.4}, {Leaf: leaf("d"), P: 0.1}},
+		Pages:    []PageScore{{Page: NavPage{Number: 1, LeafID: "a"}, P: 0.9}, {Page: NavPage{Number: 2, LeafID: "a"}, P: 0.5}},
+		Evidence: []PageScore{{Page: NavPage{Number: 1, LeafID: "a"}, P: 0.9}},
+	}
+	seen := map[string]bool{"a": true}
+	got := sectionRunnerUps(nav, seen)
+	if fmt.Sprint(got) != "[b c d]" {
+		t.Fatalf("runner-ups = %v, want the other leaves best first", got)
+	}
+	if !seen["b"] || !seen["d"] {
+		t.Error("seen not updated")
+	}
+	if sectionRunnerUps(nil, map[string]bool{}) != nil {
+		t.Error("nil navigation, no runner-ups")
+	}
+}
