@@ -996,6 +996,38 @@ func neighbourPages(nav *NavResult, pages []NavPage, leafTitle map[string]string
 	return out
 }
 
+// sectionRunnerUps are the leaves to fill a section-tree answer's open
+// slots with, best first: the leaves of the pages read just below the
+// evidence, then every other leaf in navigation's own ranking. The pages
+// read all belong to the one or two leaves navigation chose, so on their
+// own they add nothing new; on QASPER that left 15 of 50 questions with
+// 1-3 units, and those found the gold paragraph 7% of the time against 88%
+// for the questions with all 5 (HAL-3388). seen holds the leaves already
+// selected and is updated.
+func sectionRunnerUps(nav *NavResult, seen map[string]bool) []tree.SectionID {
+	var out []tree.SectionID
+	add := func(id string) {
+		if id == "" || seen[id] || len(out) >= maxSectionRunnerUps {
+			return
+		}
+		seen[id] = true
+		out = append(out, tree.SectionID(id))
+	}
+	for _, ps := range runnerUps(nav) {
+		add(ps.Page.LeafID)
+	}
+	if nav != nil {
+		for _, ls := range nav.Leaves { // every leaf, best first
+			add(ls.Leaf.ID)
+		}
+	}
+	return out
+}
+
+// maxSectionRunnerUps caps the leaves offered to fill open slots; the
+// response still takes only as many as max_sections leaves room for.
+const maxSectionRunnerUps = 16
+
 // runnerUps are the pages navigation read in full that did not make the
 // evidence, best first, at most maxRunnerUps of them.
 func runnerUps(nav *NavResult) []PageScore {
@@ -1327,13 +1359,7 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
 	}
-	var runnerUp []tree.SectionID
-	for _, ps := range runnerUps(nav) {
-		if id := tree.SectionID(ps.Page.LeafID); !seen[ps.Page.LeafID] {
-			seen[ps.Page.LeafID] = true
-			runnerUp = append(runnerUp, id)
-		}
-	}
+	runnerUp := sectionRunnerUps(nav, seen)
 	if ordinal {
 		ranges = nil // the units were numbered by position; there are no pages to cite
 	}
