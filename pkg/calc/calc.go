@@ -46,6 +46,12 @@ type Operand struct {
 	// Found is false when the number appears on no evidence block: the
 	// figure is the model's, not the document's.
 	Found bool `json:"found"`
+	// Derived is true when the number is the result of a calculation nested
+	// inside this one: it comes from that calculation's operands, which are
+	// traced there, not from the evidence.
+	Derived bool `json:"derived,omitempty"`
+
+	pos int // byte offset of the number in its expression
 }
 
 // Calculation is one evaluated <<expression>>.
@@ -67,21 +73,33 @@ type Calculation struct {
 // outer one fail. A << with no >>, or a >> with no <<, is not computable,
 // never a partial number.
 func Resolve(text string) (string, []Calculation) {
+	type open struct {
+		start   int   // where the << starts in buf
+		derived []int // where inner results were written into it, in buf
+	}
 	var (
 		calcs []Calculation
 		buf   strings.Builder
-		opens []int // where each still-open << starts in buf
+		opens []open
 	)
-	cut := func(start int) string {
+	// cut takes an open set-up's text out of buf, trimmed, with the
+	// positions of its inner results relative to that text.
+	cut := func(o open) (string, map[int]bool) {
 		all := buf.String()
 		buf.Reset()
-		buf.WriteString(all[:start])
-		return strings.TrimSpace(all[start:])
+		buf.WriteString(all[:o.start])
+		raw := all[o.start:]
+		lead := len(raw) - len(strings.TrimLeft(raw, " \t\n"))
+		at := map[int]bool{}
+		for _, d := range o.derived {
+			at[d-o.start-lead] = true
+		}
+		return strings.TrimSpace(raw), at
 	}
 	for i := 0; i < len(text); {
 		switch {
 		case strings.HasPrefix(text[i:], "<<"):
-			opens = append(opens, buf.Len())
+			opens = append(opens, open{start: buf.Len()})
 			i += 2
 		case strings.HasPrefix(text[i:], ">>"):
 			i += 2
@@ -89,11 +107,11 @@ func Resolve(text string) (string, []Calculation) {
 				calcs = append(calcs, Calculation{Expression: ">>", Error: "a >> with no <<"})
 				continue
 			}
-			start := opens[len(opens)-1]
+			o := opens[len(opens)-1]
 			opens = opens[:len(opens)-1]
-			expr := cut(start)
+			expr, derived := cut(o)
 			nested := len(opens) > 0
-			c := evaluate(expr)
+			c := evaluate(expr, derived)
 			calcs = append(calcs, c)
 			switch {
 			case c.Value == nil && nested:
@@ -102,7 +120,14 @@ func Resolve(text string) (string, []Calculation) {
 			case c.Value == nil:
 				buf.WriteString(expr + " (could not be computed)")
 			case nested:
-				buf.WriteString(plain(*c.Value))
+				parent := &opens[len(opens)-1]
+				p := plain(*c.Value)
+				at := buf.Len()
+				if strings.HasPrefix(p, "-") {
+					at++ // the operand's number starts after its sign
+				}
+				parent.derived = append(parent.derived, at)
+				buf.WriteString(p)
 			default:
 				buf.WriteString(c.Display + " (= " + expr + ")")
 			}
@@ -112,9 +137,9 @@ func Resolve(text string) (string, []Calculation) {
 		}
 	}
 	for len(opens) > 0 { // a << never closed: everything after it is one failed set-up
-		start := opens[len(opens)-1]
+		o := opens[len(opens)-1]
 		opens = opens[:len(opens)-1]
-		expr := cut(start)
+		expr, _ := cut(o)
 		calcs = append(calcs, Calculation{Expression: expr, Error: "a << with no >>"})
 		buf.WriteString(expr + " (could not be computed)")
 	}
@@ -122,10 +147,14 @@ func Resolve(text string) (string, []Calculation) {
 }
 
 // evaluate is one set-up as a Calculation: its operands, and its value or
-// why it has none.
-func evaluate(expr string) Calculation {
+// why it has none. derived holds the byte positions in expr where inner
+// results were written; the operands that start there are marked Derived.
+func evaluate(expr string, derived map[int]bool) Calculation {
 	c := Calculation{Expression: expr}
 	if ops, err := operands(expr); err == nil {
+		for i := range ops {
+			ops[i].Derived = derived[ops[i].pos]
+		}
 		c.Operands = ops
 	}
 	v, err := Evaluate(expr)
@@ -141,8 +170,8 @@ func evaluate(expr string) Calculation {
 // plain writes an inner result back into its outer expression at full
 // precision, in a form the number grammar reads (no exponent, no grouping).
 func plain(v float64) string {
-	s := strings.TrimRight(strings.TrimRight(strconv.FormatFloat(v, 'f', 12, 64), "0"), ".")
-	if s == "" || s == "-0" {
+	s := strconv.FormatFloat(v, 'f', -1, 64) // shortest form that reads back as v
+	if s == "-0" {
 		return "0"
 	}
 	return s
@@ -164,6 +193,9 @@ func Trace(calcs []Calculation, sources []Source) {
 	for ci := range calcs {
 		for oi := range calcs[ci].Operands {
 			op := &calcs[ci].Operands[oi]
+			if op.Derived {
+				continue // traced in the calculation that produced it
+			}
 			for i := range sources {
 				if containsNumber(norm[i], op) {
 					op.Evidence, op.Page, op.Found = i+1, sources[i].Page, true
@@ -222,6 +254,7 @@ type token struct {
 	op   byte
 	num  float64
 	text string
+	pos  int // byte offset in the expression
 }
 
 // numberRE reads one number: an optional currency sign (a space may follow
@@ -231,7 +264,9 @@ type token struct {
 var numberRE = regexp.MustCompile(`^(?:[$€£]\s?)?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)%?`)
 
 func tokenize(expr string) ([]token, error) {
-	expr = strings.NewReplacer("×", "*", "÷", "/", "−", "-", "–", "-").Replace(expr)
+	// Same byte length in and out, so a token's offset is its offset in
+	// the expression as written ("×" and "÷" are 2 bytes, "−" and "–" 3).
+	expr = strings.NewReplacer("×", "* ", "÷", "/ ", "−", "-  ", "–", "-  ").Replace(expr)
 	var toks []token
 	for i := 0; i < len(expr); {
 		c := expr[i]
@@ -256,7 +291,7 @@ func tokenize(expr string) ([]token, error) {
 			if err != nil {
 				return nil, err
 			}
-			toks = append(toks, token{kind: tNum, num: v, text: strings.TrimSpace(m)})
+			toks = append(toks, token{kind: tNum, num: v, text: strings.TrimSpace(m), pos: i})
 			i += len(m)
 		}
 	}
@@ -422,7 +457,7 @@ func operands(expr string) ([]Operand, error) {
 				value = -value
 			}
 		}
-		out = append(out, Operand{Text: text, Value: value})
+		out = append(out, Operand{Text: text, Value: value, pos: t.pos})
 	}
 	return out, nil
 }

@@ -176,7 +176,47 @@ func TestUnbalancedMarkerIsNeverANumber(t *testing.T) {
 }
 
 func TestInnerResultKeepsItsPrecision(t *testing.T) {
-	if out, _ := Resolve("<<<<1 / 3>> * 3>>"); out != "1 (= 0.333333333333 * 3)" {
+	if out, _ := Resolve("<<<<1 / 3>> * 3>>"); out != "1 (= 0.3333333333333333 * 3)" {
 		t.Errorf("out = %q", out)
+	}
+}
+
+// An inner result written into its outer set-up is marked derived and not
+// looked for on the pages; a literal of the same value stays a literal.
+func TestInnerResultIsDerivedNotModelSupplied(t *testing.T) {
+	_, calcs := Resolve("<<<<1 + 1>> + 2>>")
+	outer := calcs[1]
+	if outer.Expression != "2 + 2" || len(outer.Operands) != 2 {
+		t.Fatalf("outer = %+v", outer)
+	}
+	if !outer.Operands[0].Derived || outer.Operands[1].Derived {
+		t.Errorf("want the first 2 derived and the literal 2 not: %+v", outer.Operands)
+	}
+	Trace(calcs, []Source{{Page: 3, Text: "two items, 2 in all"}})
+	if outer.Operands[0].Found || !calcs[1].Operands[1].Found {
+		t.Errorf("trace: %+v", calcs[1].Operands)
+	}
+	// a negative inner result, behind a 3-byte minus sign in the outer text
+	_, neg := Resolve("<<10 − <<2 - 5>> × 2>>")
+	ops := neg[1].Operands
+	if len(ops) != 3 || ops[0].Derived || !ops[1].Derived || ops[1].Value != -3 || ops[2].Derived {
+		t.Errorf("operands = %+v", ops)
+	}
+	if *neg[1].Value != 16 {
+		t.Errorf("value = %v", *neg[1].Value)
+	}
+}
+
+func TestInnerResultKeepsFullPrecision(t *testing.T) {
+	for expr, want := range map[string]float64{
+		"<<<<1 / 3>> * 1000000000000>>":              1.0 / 3 * 1e12,
+		"<<1 / <<0.0000000000001 * 1>>>>":            1e13,
+		"<<<<1.234567 / 1000000000>> * 1000000000>>": 1.234567,
+	} {
+		_, calcs := Resolve(expr)
+		last := calcs[len(calcs)-1]
+		if last.Value == nil || math.Abs(*last.Value-want) > 1e-9*math.Max(1, math.Abs(want)) {
+			t.Errorf("%s = %+v, want %v", expr, last, want)
+		}
 	}
 }
