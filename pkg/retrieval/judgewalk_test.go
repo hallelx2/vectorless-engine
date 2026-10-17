@@ -367,3 +367,61 @@ func TestJudgeWalkUsesThePersistedTOCAndPages(t *testing.T) {
 		t.Errorf("fallback path: %v %+v", err, res)
 	}
 }
+
+// A plain-text contract ingested as one large leaf comes back as the chunks
+// navigation chose, never as the whole contract (HAL-3402).
+func TestOversizedLeafComesBackAsItsChosenChunks(t *testing.T) {
+	j, _ := navJudge("services agreement", "terminate on ninety days")
+	s := NewJudgeWalkStrategy(j)
+	s.WholeDocumentTokens = -1
+	filler := strings.Repeat("The parties agree to the general terms set out here.\n", 120) // ~6.5k chars a block
+	body := "Clause 1. Definitions.\n" + filler + "Clause 7. Termination. Either party may terminate on ninety days written notice.\n" + filler + filler
+	s.PageLoader = mapLoader{"c": body, "x": "Exhibit A. Contact list."}
+	tr := &tree.Tree{DocumentID: "d", Root: &tree.Section{ID: "root", Children: []*tree.Section{
+		{ID: "contract", Title: "Master Services Agreement", ContentRef: "c", TokenCount: len(body) / 4},
+		{ID: "exhibit", Title: "Exhibit A", ContentRef: "x", TokenCount: 6},
+	}}}
+	res, err := s.SelectWithCost(context.Background(), tr, "can either party terminate?", ContextBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range append(append([]tree.SectionID(nil), res.SelectedIDs...), res.RunnerUpIDs...) {
+		if id == "contract" {
+			t.Fatalf("the whole 20k-char contract came back as a unit: selected %v runner-ups %v", res.SelectedIDs, res.RunnerUpIDs)
+		}
+	}
+	if len(res.EvidencePages) == 0 {
+		t.Fatal("no chunk returned")
+	}
+	top := res.EvidencePages[0]
+	if top.Part == 0 || top.SectionID != "contract" || top.Page != 0 || !strings.Contains(top.Text, "ninety days") {
+		t.Errorf("top unit = part %d of %q page %d, text has the clause: %v", top.Part, top.SectionID, top.Page,
+			strings.Contains(top.Text, "ninety days"))
+	}
+	if len(top.Text) > 6000 {
+		t.Errorf("a chunk is %d chars, more than one navigation chunk", len(top.Text))
+	}
+}
+
+// Chunks of one leaf that share a page number are all read; a page two
+// leaves share is read once (HAL-3402).
+func TestPagesAreKeptApartByNumberAndText(t *testing.T) {
+	leaves := []NavLeaf{{ID: "a"}, {ID: "b"}}
+	load := func(_ context.Context, l NavLeaf) ([]NavPage, error) {
+		if l.ID == "a" {
+			return []NavPage{{Number: 1, Text: "chunk one"}, {Number: 1, Text: "chunk two"}, {Number: 2, Text: "shared page"}}, nil
+		}
+		return []NavPage{{Number: 2, Text: "shared page"}, {Number: 3, Text: "page three"}}, nil
+	}
+	all, err := allLeafPages(context.Background(), leaves, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range all {
+		got = append(got, p.Text)
+	}
+	if strings.Join(got, "|") != "chunk one|chunk two|shared page|page three" {
+		t.Errorf("pages = %v", got)
+	}
+}
