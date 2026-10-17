@@ -121,6 +121,21 @@ type Result struct {
 	// best first, for strategies whose units are sections.
 	RunnerUpIDs []tree.SectionID `json:"runner_up_ids,omitempty"`
 
+	// NeighbourPages are the pages beside the top evidence page that are not
+	// evidence themselves: the next page, then the previous one. A statement
+	// often runs across a page break, and a heading often sits a page from
+	// its answer (HAL-3246: Boeing's cyclicality is on page 8; the walk
+	// returned page 7).
+	NeighbourPages []EvidencePage `json:"neighbour_pages,omitempty"`
+
+	// WholeDocument is true when the document is short enough to return
+	// entire (JudgeWalkStrategy.WholeDocumentTokens). DocumentPages (a paged
+	// document) or DocumentIDs (a section tree) then hold all of it, in
+	// document order; the navigation's evidence still leads.
+	WholeDocument bool             `json:"whole_document,omitempty"`
+	DocumentPages []EvidencePage   `json:"document_pages,omitempty"`
+	DocumentIDs   []tree.SectionID `json:"document_ids,omitempty"`
+
 	// CitedPages is the FINAL set of page ranges the answer commits
 	// to — the model's cited_pages after dedup and the confidence cap,
 	// NOT every page it read (that is PagesRead). Page-based strategies
@@ -146,6 +161,9 @@ type EvidencePage struct {
 	Title      string  `json:"title,omitempty"` // the section the page belongs to
 	Text       string  `json:"text"`
 	Confidence float64 `json:"confidence"`
+	// NeighbourOf is the evidence page this one sits beside, when it was
+	// added as a neighbour rather than judged.
+	NeighbourOf int `json:"neighbour_of,omitempty"`
 }
 
 // PageReadEntry is one get_pages tool call that materialised during a

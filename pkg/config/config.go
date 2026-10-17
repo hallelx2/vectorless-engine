@@ -491,6 +491,15 @@ type RetrievalConfig struct {
 	Replay      ReplayBlock      `yaml:"replay"`
 	Abstain     AbstainBlock     `yaml:"abstain"`
 	TreeWalk    TreeWalkBlock    `yaml:"treewalk"`
+	JudgeWalk   JudgeWalkBlock   `yaml:"judgewalk"`
+}
+
+// JudgeWalkBlock tunes the judgewalk strategy.
+type JudgeWalkBlock struct {
+	// WholeDocumentTokens is the size up to which a document is returned
+	// entire instead of as a selection (an 8-K, an earnings release).
+	// Zero takes the strategy's default (12,000); negative turns it off.
+	WholeDocumentTokens int `yaml:"whole_document_tokens"`
 }
 
 // TreeWalkBlock configures the TreeWalk page-based agentic

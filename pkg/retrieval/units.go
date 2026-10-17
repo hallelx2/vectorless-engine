@@ -58,14 +58,19 @@ type Unit struct {
 	// RunnerUp is true when the unit was ranked below the strategy's
 	// evidence and fills a slot the evidence left open.
 	RunnerUp bool
+	// Whole is true when the unit is part of a short document returned
+	// entire, past the strategy's own ranking.
+	Whole bool
 }
 
 // UnitStats counts what assembly left out and filled in.
 type UnitStats struct {
-	Empty     int `json:"empty"`      // sections dropped for having no body text
-	Duplicate int `json:"duplicate"`  // sections dropped as repeats of units already returned
-	Expanded  int `json:"expanded"`   // heading-only sections filled from the text beneath them
-	RunnerUps int `json:"runner_ups"` // slots filled from below the evidence
+	Empty      int  `json:"empty"`      // sections dropped for having no body text
+	Duplicate  int  `json:"duplicate"`  // sections dropped as repeats of units already returned
+	Expanded   int  `json:"expanded"`   // heading-only sections filled from the text beneath them
+	RunnerUps  int  `json:"runner_ups"` // slots filled from below the evidence
+	Neighbours int  `json:"neighbours"` // slots filled by a page beside the top evidence page
+	Whole      bool `json:"whole_document"`
 }
 
 // ContentLoader reads a section's stored text by its content reference.
@@ -78,13 +83,20 @@ type ContentLoader func(ctx context.Context, ref string) (string, error)
 //     takes the text beneath it when that is compact, and is dropped when
 //     it is not; a section whose text the units before it already carry is
 //     dropped as a repeat;
-//  3. when k is set and slots remain, the pages and then the leaves the
-//     strategy ranked just below its evidence, under the same rules.
+//  3. when k is set and slots remain, the pages beside the top evidence
+//     page, then the pages and the leaves the strategy ranked just below
+//     its evidence, under the same rules.
 //
 // k <= 0 returns every unit of steps 1 and 2 and fills nothing.
+//
+// A short document (res.WholeDocument) comes back entire whatever k is: its
+// ranked units first, then the rest of it in document order.
 func AssembleUnits(ctx context.Context, t *tree.Tree, res *Result, k int, load ContentLoader) ([]Unit, UnitStats) {
 	if res == nil {
 		return nil, UnitStats{}
+	}
+	if res.WholeDocument {
+		return assembleWhole(ctx, t, res, load)
 	}
 	a := NewUnitAssembler(t, k, load)
 	for _, ep := range res.EvidencePages {
@@ -94,6 +106,9 @@ func AssembleUnits(ctx context.Context, t *tree.Tree, res *Result, k int, load C
 		a.AddSection(ctx, id, false)
 	}
 	if k > 0 {
+		for _, ep := range res.NeighbourPages {
+			a.AddPage(ep, true)
+		}
 		for _, ep := range res.RunnerUpPages {
 			a.AddPage(ep, true)
 		}
@@ -101,6 +116,36 @@ func AssembleUnits(ctx context.Context, t *tree.Tree, res *Result, k int, load C
 			a.AddSection(ctx, id, true)
 		}
 	}
+	return a.Units(), a.Stats()
+}
+
+// assembleWhole returns a short document entire: what navigation ranked,
+// best first, then the rest in document order, with no cap.
+func assembleWhole(ctx context.Context, t *tree.Tree, res *Result, load ContentLoader) ([]Unit, UnitStats) {
+	a := NewUnitAssembler(t, 0, load)
+	for _, ep := range res.EvidencePages {
+		a.AddPage(ep, false)
+	}
+	for _, id := range res.SelectedIDs {
+		a.AddSection(ctx, id, false)
+	}
+	for _, ep := range res.RunnerUpPages {
+		a.AddPage(ep, true)
+	}
+	for _, id := range res.RunnerUpIDs {
+		a.AddSection(ctx, id, true)
+	}
+	ranked := len(a.units)
+	for _, ep := range res.DocumentPages {
+		a.AddPage(ep, false)
+	}
+	for _, id := range res.DocumentIDs {
+		a.AddSection(ctx, id, false)
+	}
+	for i := ranked; i < len(a.units); i++ {
+		a.units[i].Whole = true
+	}
+	a.stats.Whole = true
 	return a.Units(), a.Stats()
 }
 
@@ -142,7 +187,10 @@ func (a *UnitAssembler) AddPage(ep EvidencePage, runnerUp bool) (Unit, bool) {
 	u := Unit{Kind: UnitPage, Page: ep, Content: ep.Text, RunnerUp: runnerUp}
 	a.units = append(a.units, u)
 	addShingles(a.seen, ep.Text)
-	if runnerUp {
+	switch {
+	case ep.NeighbourOf > 0:
+		a.stats.Neighbours++
+	case runnerUp:
 		a.stats.RunnerUps++
 	}
 	return u, true
