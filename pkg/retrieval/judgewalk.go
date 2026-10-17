@@ -1031,6 +1031,9 @@ const maxSectionRunnerUps = 16
 // runnerUps are the pages navigation read in full that did not make the
 // evidence, best first, at most maxRunnerUps of them.
 func runnerUps(nav *NavResult) []PageScore {
+	if nav == nil {
+		return nil
+	}
 	type key struct {
 		leaf string
 		page int
