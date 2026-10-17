@@ -910,6 +910,24 @@ type JudgeWalkStrategy struct {
 	// be unreliable — and scored 0.65 where the pages scored 0.90.
 	TOC   TOCProvider
 	Pages PageStore
+
+	// WholeDocumentTokens is the size up to which a document is returned
+	// entire rather than as a selection: an 8-K or an earnings release fits
+	// in any answer budget, and picking two of its sections lost the answer
+	// twice in the pilot (HAL-3246). Zero selects
+	// DefaultWholeDocumentTokens; negative turns it off.
+	WholeDocumentTokens int
+}
+
+// DefaultWholeDocumentTokens is the document size returned entire when the
+// strategy names none: about twelve 10-K pages.
+const DefaultWholeDocumentTokens = 12000
+
+func (s *JudgeWalkStrategy) wholeDocumentTokens() int {
+	if s.WholeDocumentTokens == 0 {
+		return DefaultWholeDocumentTokens
+	}
+	return s.WholeDocumentTokens
 }
 
 // PageStore serves a document's per-page text, as ingest persisted it.
@@ -941,6 +959,41 @@ func (s *JudgeWalkStrategy) Select(ctx context.Context, t *tree.Tree, query stri
 		return nil, err
 	}
 	return res.SelectedIDs, nil
+}
+
+// neighbourPages are the pages beside the top evidence page, the next then
+// the previous, that are not evidence themselves. A page navigation also
+// scored keeps its score.
+func neighbourPages(nav *NavResult, pages []NavPage, leafTitle map[string]string) []EvidencePage {
+	if nav == nil || len(nav.Evidence) == 0 {
+		return nil
+	}
+	byNum := map[int]NavPage{}
+	for _, p := range pages {
+		byNum[p.Number] = p
+	}
+	evidence := map[int]bool{}
+	for _, ev := range nav.Evidence {
+		evidence[ev.Page.Number] = true
+	}
+	score := map[int]float64{}
+	for _, ps := range nav.Pages {
+		score[ps.Page.Number] = ps.P
+	}
+	top := nav.Evidence[0].Page.Number
+	var out []EvidencePage
+	for _, n := range []int{top + 1, top - 1} {
+		p, ok := byNum[n]
+		if !ok || evidence[n] {
+			continue
+		}
+		title := leafTitle[p.LeafID]
+		if title == "" {
+			title = leafTitle[nav.Evidence[0].Page.LeafID]
+		}
+		out = append(out, EvidencePage{Page: n, Title: title, Text: p.Text, Confidence: score[n], NeighbourOf: top})
+	}
+	return out
 }
 
 // runnerUps are the pages navigation read in full that did not make the
@@ -1045,16 +1098,34 @@ func (s *JudgeWalkStrategy) selectOnPersistedPages(ctx context.Context, t *tree.
 	for _, ps := range runnerUps(nav) {
 		runnerUp = append(runnerUp, EvidencePage{Page: ps.Page.Number, Title: leafTitle[ps.Page.LeafID], Text: ps.Page.Text, Confidence: ps.P})
 	}
+	neighbours := neighbourPages(nav, pages, leafTitle)
+	var whole []EvidencePage
+	if limit := s.wholeDocumentTokens(); limit > 0 {
+		chars := 0
+		for _, p := range pages {
+			chars += len(p.Text)
+		}
+		if chars/4 <= limit {
+			sorted := append([]NavPage(nil), pages...)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i].Number < sorted[j].Number })
+			for _, p := range sorted {
+				whole = append(whole, EvidencePage{Page: p.Number, Title: leafTitle[p.LeafID], Text: p.Text})
+			}
+		}
+	}
 	return &Result{
-		SelectedIDs:   ids,
-		Confidences:   conf,
-		Confidence:    best,
-		CitedPages:    rangesToPairs(ranges),
-		EvidencePages: evidence,
-		RunnerUpPages: runnerUp,
-		ModelUsed:     "judge",
-		Usage:         nav.Usage,
-		HopsTaken:     nav.Requests,
+		SelectedIDs:    ids,
+		Confidences:    conf,
+		Confidence:     best,
+		CitedPages:     rangesToPairs(ranges),
+		EvidencePages:  evidence,
+		RunnerUpPages:  runnerUp,
+		NeighbourPages: neighbours,
+		WholeDocument:  len(whole) > 0,
+		DocumentPages:  whole,
+		ModelUsed:      "judge",
+		Usage:          nav.Usage,
+		HopsTaken:      nav.Requests,
 	}, true
 }
 
@@ -1266,15 +1337,32 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	if ordinal {
 		ranges = nil // the units were numbered by position; there are no pages to cite
 	}
+	var whole []tree.SectionID
+	if limit := s.wholeDocumentTokens(); limit > 0 {
+		tokens := 0
+		var order []tree.SectionID
+		t.Root.Walk(func(sec *tree.Section) bool {
+			if sec.ContentRef != "" {
+				tokens += sec.TokenCount
+				order = append(order, sec.ID)
+			}
+			return true
+		})
+		if tokens > 0 && tokens <= limit {
+			whole = order
+		}
+	}
 	return &Result{
-		SelectedIDs: ids,
-		RunnerUpIDs: runnerUp,
-		Confidences: conf,
-		Confidence:  best,
-		CitedPages:  rangesToPairs(ranges),
-		ModelUsed:   "judge",
-		Usage:       nav.Usage,
-		HopsTaken:   nav.Requests,
+		SelectedIDs:   ids,
+		RunnerUpIDs:   runnerUp,
+		WholeDocument: len(whole) > 0,
+		DocumentIDs:   whole,
+		Confidences:   conf,
+		Confidence:    best,
+		CitedPages:    rangesToPairs(ranges),
+		ModelUsed:     "judge",
+		Usage:         nav.Usage,
+		HopsTaken:     nav.Requests,
 	}, nil
 }
 

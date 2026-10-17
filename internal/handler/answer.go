@@ -344,7 +344,9 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 	// Each section the answer is written from carries body text; a
 	// heading-only one, or a repeat, gives its slot to the next-ranked
 	// leaf (HAL-3160).
-	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{SelectedIDs: ids, RunnerUpIDs: res.RunnerUpIDs}, maxSections,
+	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{
+		SelectedIDs: ids, RunnerUpIDs: res.RunnerUpIDs, WholeDocument: res.WholeDocument && len(res.DocumentIDs) > 0, DocumentIDs: res.DocumentIDs,
+	}, maxSections,
 		func(ctx context.Context, ref string) (string, error) { return readStored(ctx, h.storage, ref) })
 	enriched := make([]answerSection, 0, len(units))
 	for _, u := range units {

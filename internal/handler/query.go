@@ -278,6 +278,12 @@ func unitMaps(units []retrieval.Unit) []map[string]any {
 		if u.RunnerUp {
 			m["runner_up"] = true
 		}
+		if u.Kind == retrieval.UnitPage && u.Page.NeighbourOf > 0 {
+			m["neighbour_of"] = u.Page.NeighbourOf
+		}
+		if u.Whole {
+			m["whole_document"] = true
+		}
 		out = append(out, m)
 	}
 	return out

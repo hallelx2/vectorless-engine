@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -192,5 +193,77 @@ func TestSubstantiveSurvivesCaseFoldingThatChangesLength(t *testing.T) {
 	}
 	if got := substantive("\u212aelvin scale readings follow", "\u212aelvin"); got != "scale readings follow" {
 		t.Errorf("substantive = %q", got)
+	}
+}
+
+// A short document comes back entire whatever the cap: what navigation
+// ranked first, then the rest in document order (HAL-3246).
+func TestShortDocumentComesBackWhole(t *testing.T) {
+	res := &Result{
+		WholeDocument: true,
+		EvidencePages: []EvidencePage{{Page: 63, Text: runnerUpPage, Confidence: 0.8}},
+		DocumentPages: []EvidencePage{{Page: 62, Text: incomePage}, {Page: 63, Text: runnerUpPage}, {Page: 64, Text: "Page 64. " + cashText}},
+	}
+	units, stats := AssembleUnits(context.Background(), filingTree(), res, 2, filingStore())
+	got := []int{}
+	for _, u := range units {
+		got = append(got, u.Page.Page)
+	}
+	if fmt.Sprint(got) != "[63 62 64]" {
+		t.Fatalf("pages = %v, want the evidence first then the rest in order, past the cap of 2", got)
+	}
+	if units[0].Whole || !units[1].Whole || !units[2].Whole || !stats.Whole {
+		t.Errorf("whole marks: %+v %+v", units, stats)
+	}
+}
+
+func TestShortSectionDocumentComesBackWhole(t *testing.T) {
+	res := &Result{WholeDocument: true, SelectedIDs: []tree.SectionID{"sec_cash"},
+		DocumentIDs: []tree.SectionID{"sec_risk", "sec_income", "sec_cash", "sec_note_body"}}
+	units, _ := AssembleUnits(context.Background(), filingTree(), res, 1, filingStore())
+	if got := strings.Join(ids(units), ","); got != "sec_cash,sec_risk,sec_income,sec_note_body" {
+		t.Fatalf("units = %s", got)
+	}
+}
+
+// The page beside the top evidence page fills before pages ranked from
+// elsewhere in the document.
+func TestNeighbourFillsBeforeRunnerUps(t *testing.T) {
+	res := &Result{
+		EvidencePages:  []EvidencePage{{Page: 62, Text: incomePage, Confidence: 0.9}},
+		NeighbourPages: []EvidencePage{{Page: 63, Text: runnerUpPage, NeighbourOf: 62}},
+		RunnerUpPages:  []EvidencePage{{Page: 9, Text: "Page 9. " + riskText, Confidence: 0.2}},
+	}
+	units, stats := AssembleUnits(context.Background(), filingTree(), res, 2, filingStore())
+	if len(units) != 2 || units[1].Page.Page != 63 || units[1].Page.NeighbourOf != 62 {
+		t.Fatalf("units = %+v", units)
+	}
+	if stats.Neighbours != 1 || stats.RunnerUps != 0 {
+		t.Errorf("stats = %+v", stats)
+	}
+}
+
+func TestNeighbourPagesAreNextThenPreviousAndNeverEvidence(t *testing.T) {
+	p := func(n int) NavPage { return NavPage{Number: n, Text: fmt.Sprintf("page %d text", n), LeafID: "l"} }
+	pages := []NavPage{p(6), p(7), p(8), p(9)}
+	nav := &NavResult{
+		Evidence: []PageScore{{Page: p(7), P: 0.9}, {Page: p(6), P: 0.7}},
+		Pages:    []PageScore{{Page: p(7), P: 0.9}, {Page: p(6), P: 0.7}, {Page: p(8), P: 0.3}},
+	}
+	got := neighbourPages(nav, pages, map[string]string{"l": "Business"})
+	if len(got) != 1 || got[0].Page != 8 || got[0].NeighbourOf != 7 || got[0].Confidence != 0.3 || got[0].Title != "Business" {
+		t.Fatalf("neighbours = %+v, want page 8 only (6 is evidence)", got)
+	}
+	if neighbourPages(&NavResult{}, pages, nil) != nil {
+		t.Error("no evidence, no neighbours")
+	}
+}
+
+func TestWholeDocumentThreshold(t *testing.T) {
+	if (&JudgeWalkStrategy{}).wholeDocumentTokens() != DefaultWholeDocumentTokens {
+		t.Error("zero takes the default")
+	}
+	if (&JudgeWalkStrategy{WholeDocumentTokens: -1}).wholeDocumentTokens() > 0 {
+		t.Error("negative turns it off")
 	}
 }

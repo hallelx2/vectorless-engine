@@ -244,7 +244,7 @@ func run() error {
 	// Corpus mode (HAL-3075): one question over a whole collection, routed
 	// and read on the Judge. Its library caches each document's leaves,
 	// pages and routing card across questions.
-	corpusLibrary := retrieval.NewCorpusLibrary(buildJudgeWalkStrategy(judge, store, pool), pool.LoadTree)
+	corpusLibrary := retrieval.NewCorpusLibrary(buildJudgeWalkStrategy(cfg.Engine.Retrieval.JudgeWalk, judge, store, pool), pool.LoadTree)
 	corpusNavigator := retrieval.CorpusNavigator{Judge: judge}
 
 	// Pre-built set of selectable strategies, keyed by config name.
@@ -773,7 +773,7 @@ func buildStrategy(c enginecfg.RetrievalConfig, client llmgate.Client, judge llm
 		// The Judge's provider refusing service (no credit, a rejected key,
 		// an outage) or no Judge being configured right now falls back to
 		// treewalk instead of failing every query.
-		return retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(judge, store, pool),
+		return retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(c.JudgeWalk, judge, store, pool),
 			buildTreeWalkStrategy(c, client, store, pool), nil)
 	case "single-pass":
 		return retrieval.NewSinglePass(client)
@@ -821,7 +821,7 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 		"auto":         retrieval.NewAuto(retrieval.NewSinglePass(client), buildTreeWalkStrategy(c, client, store, pool)),
 	}
 	if judge != nil {
-		set["judgewalk"] = retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(judge, store, pool), set["treewalk"], nil)
+		set["judgewalk"] = retrieval.NewFallbackStrategy(buildJudgeWalkStrategy(c.JudgeWalk, judge, store, pool), set["treewalk"], nil)
 	} else {
 		// The same fallback the default builder applies: a request that
 		// names judgewalk on a server with no Judge gets treewalk, not
@@ -835,8 +835,9 @@ func buildStrategySet(c enginecfg.RetrievalConfig, client llmgate.Client, judge 
 // leaves ranked in one request, the best sections' bodies ranked in one
 // or two more, no generative call (HAL-1371). Selectable per request as
 // strategy=judgewalk whenever llm.judge is configured.
-func buildJudgeWalkStrategy(judge llmgate.Judge, store storage.Storage, pool *db.Pool) *retrieval.JudgeWalkStrategy {
+func buildJudgeWalkStrategy(c enginecfg.JudgeWalkBlock, judge llmgate.Judge, store storage.Storage, pool *db.Pool) *retrieval.JudgeWalkStrategy {
 	s := retrieval.NewJudgeWalkStrategy(judge)
+	s.WholeDocumentTokens = c.WholeDocumentTokens
 	s.PageLoader = storagePageLoader{s: store}
 	if pool != nil {
 		s.TOC = dbTOCProvider{db: pool}

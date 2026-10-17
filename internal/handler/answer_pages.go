@@ -59,7 +59,10 @@ func (h *AnswerHandler) answerFromPages(
 	// fewer than k above its threshold, the pages it ranked next, so a
 	// question that needs two statements is not answered from one
 	// (HAL-3160).
-	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{EvidencePages: res.EvidencePages, RunnerUpPages: res.RunnerUpPages}, k, nil)
+	units, _ := retrieval.AssembleUnits(ctx, t, &retrieval.Result{
+		EvidencePages: res.EvidencePages, RunnerUpPages: res.RunnerUpPages, NeighbourPages: res.NeighbourPages,
+		WholeDocument: res.WholeDocument, DocumentPages: res.DocumentPages,
+	}, k, nil)
 	evidence := make([]retrieval.EvidencePage, 0, len(units))
 	for _, u := range units {
 		evidence = append(evidence, u.Page)
