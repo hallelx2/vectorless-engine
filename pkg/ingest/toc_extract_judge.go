@@ -296,6 +296,7 @@ func (b *TOCBuilder) confirmEntriesJudge(ctx context.Context, entries []contents
 	if perBatch < 20 {
 		perBatch = 20
 	}
+	var reqs []llmgate.JudgeRequest
 	for start := 0; start < len(entries); start += perBatch {
 		end := start + perBatch
 		if end > len(entries) {
@@ -327,12 +328,15 @@ func (b *TOCBuilder) confirmEntriesJudge(ctx context.Context, entries []contents
 		if len(questions) == 0 {
 			continue
 		}
-		res, err := b.Judge.Judge(ctx, llmgate.JudgeRequest{State: state, Questions: questions})
-		if err != nil {
-			return nil, err
-		}
+		reqs = append(reqs, llmgate.JudgeRequest{State: state, Questions: questions})
+	}
+	results, err := sendJudgeBatches(ctx, b.Judge, reqs)
+	if err != nil {
+		return nil, err
+	}
+	for ri, res := range results {
 		addJudgeUsage(usage, res)
-		for qk := range questions {
+		for qk := range reqs[ri].Questions {
 			p, err := res.Noul(qk)
 			if err != nil {
 				continue

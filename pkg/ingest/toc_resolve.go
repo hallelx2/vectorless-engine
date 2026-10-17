@@ -464,6 +464,7 @@ func (b *TOCBuilder) resolvePagesJudgeErr(ctx context.Context, nodes []tree.TOCN
 		p    float64
 	}{}
 
+	var reqs []llmgate.JudgeRequest
 	for start := 0; start < len(probes); {
 		state := map[string]any{}
 		questions := map[string]llmgate.Question{}
@@ -496,14 +497,24 @@ func (b *TOCBuilder) resolvePagesJudgeErr(ctx context.Context, nodes []tree.TOCN
 		if len(questions) == 0 {
 			continue
 		}
+		reqs = append(reqs, llmgate.JudgeRequest{State: state, Questions: questions})
+	}
 
-		res, err := b.Judge.Judge(ctx, llmgate.JudgeRequest{State: state, Questions: questions})
-		if err != nil {
-			return nil, false, err
-		}
+	results, err := sendJudgeBatches(ctx, b.Judge, reqs)
+	if err != nil {
+		return nil, false, err
+	}
+	for ri, res := range results {
 		addJudgeUsage(usage, res)
-
-		for qk := range questions {
+		// Keys in sorted order: the best page per leaf is chosen by
+		// strict improvement, so a tie must resolve the same way on
+		// every run, not by map order.
+		keys := make([]string, 0, len(reqs[ri].Questions))
+		for qk := range reqs[ri].Questions {
+			keys = append(keys, qk)
+		}
+		sort.Strings(keys)
+		for _, qk := range keys {
 			p, err := res.Noul(qk)
 			if err != nil {
 				continue

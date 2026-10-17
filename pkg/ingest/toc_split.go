@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/hallelx2/llmgate"
@@ -95,13 +96,23 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 		byPage[p.PageNumber] = p.Text
 	}
 	maxGen := b.splitGenerations()
-	added := 0
-	var walk func(ns []tree.TOCNode, depth, gen int)
-	walk = func(ns []tree.TOCNode, depth, gen int) {
+
+	// One generation at a time, and every leaf in a generation at once.
+	// Splitting one leaf reads only that leaf's pages, so the leaves of
+	// a generation never depended on each other; walking them one by
+	// one made the stage's wall clock the sum of every leaf's requests
+	// (HAL-1545). The next generation is the children just made, so it
+	// must wait for this one.
+	type job struct {
+		n          *tree.TOCNode
+		depth, gen int
+	}
+	var collect func(ns []tree.TOCNode, depth, gen int, into []job) []job
+	collect = func(ns []tree.TOCNode, depth, gen int, into []job) []job {
 		for i := range ns {
 			n := &ns[i]
 			if len(n.Nodes) > 0 {
-				walk(n.Nodes, depth+1, gen)
+				into = collect(n.Nodes, depth+1, gen, into)
 				continue
 			}
 			if depth >= splitMaxDepth || gen >= maxGen {
@@ -110,12 +121,44 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			if n.StartPage <= 0 || n.EndPage < n.StartPage || n.EndPage-n.StartPage+1 <= over {
 				continue
 			}
-			subs, err := b.splitLeaf(ctx, n, pages, byPage, over, usage)
-			if err != nil {
-				log.Printf("toc: split %q failed, leaf kept whole: %v", n.Title, err)
-				usage.degrade("leaf split", fmt.Sprintf("%q kept whole: %v", n.Title, err))
+			into = append(into, job{n, depth, gen})
+		}
+		return into
+	}
+
+	added := 0
+	jobs := collect(nodes, 1, 0, nil)
+	for len(jobs) > 0 {
+		type result struct {
+			subs  []tree.TOCNode
+			err   error
+			usage Usage
+		}
+		results := make([]result, len(jobs))
+		var wg sync.WaitGroup
+		for i, jb := range jobs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Each leaf accounts into its own Usage; they are folded
+				// into the caller's in tree order below, so the ledger and
+				// its Degraded list read the same on every run.
+				subs, err := b.splitLeaf(ctx, jb.n, pages, byPage, over, &results[i].usage)
+				results[i].subs, results[i].err = subs, err
+			}()
+		}
+		wg.Wait()
+
+		var next []job
+		for i, jb := range jobs {
+			n, r := jb.n, results[i]
+			usage.merge(r.usage)
+			if r.err != nil {
+				log.Printf("toc: split %q failed, leaf kept whole: %v", n.Title, r.err)
+				usage.degrade("leaf split", fmt.Sprintf("%q kept whole: %v", n.Title, r.err))
 				continue
 			}
+			subs := r.subs
 			if len(subs) < splitMinEntries {
 				continue
 			}
@@ -135,10 +178,10 @@ func (b *TOCBuilder) splitLargeLeaves(ctx context.Context, nodes []tree.TOCNode,
 			// Descend into what was just made, when more generations are
 			// allowed: a 70-page Item 8 splits into notes, and a 28-page
 			// note has its own headings.
-			walk(n.Nodes, depth+1, gen+1)
+			next = collect(n.Nodes, jb.depth+1, jb.gen+1, next)
 		}
+		jobs = next
 	}
-	walk(nodes, 1, 0)
 	return added
 }
 
@@ -326,6 +369,7 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 	th := b.judgeThreshold()
 	prob := make([]float64, len(cands))
 	const perBatch = 80
+	var reqs []llmgate.JudgeRequest
 	for start := 0; start < len(cands); start += perBatch {
 		end := start + perBatch
 		if end > len(cands) {
@@ -349,12 +393,15 @@ func (b *TOCBuilder) subLeavesFromHeadings(ctx context.Context, leaf *tree.TOCNo
 				},
 			}
 		}
-		res, err := b.Judge.Judge(ctx, llmgate.JudgeRequest{State: state, Questions: questions})
-		if err != nil {
-			return nil, err
-		}
+		reqs = append(reqs, llmgate.JudgeRequest{State: state, Questions: questions})
+	}
+	results, err := sendJudgeBatches(ctx, b.Judge, reqs)
+	if err != nil {
+		return nil, err
+	}
+	for ri, res := range results {
 		addJudgeUsage(usage, res)
-		for qk := range questions {
+		for qk := range reqs[ri].Questions {
 			p, err := res.Noul(qk)
 			if err != nil {
 				continue
