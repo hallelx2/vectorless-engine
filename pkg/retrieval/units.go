@@ -158,14 +158,14 @@ type UnitAssembler struct {
 	units []Unit
 	stats UnitStats
 	seen  map[string]bool
-	pages map[int]bool
+	pages map[string]bool
 	ids   map[tree.SectionID]bool
 }
 
 // NewUnitAssembler starts an empty assembly capped at k units (k <= 0:
 // no cap).
 func NewUnitAssembler(t *tree.Tree, k int, load ContentLoader) *UnitAssembler {
-	return &UnitAssembler{t: t, k: k, load: load, seen: map[string]bool{}, pages: map[int]bool{}, ids: map[tree.SectionID]bool{}}
+	return &UnitAssembler{t: t, k: k, load: load, seen: map[string]bool{}, pages: map[string]bool{}, ids: map[tree.SectionID]bool{}}
 }
 
 // Full reports whether the cap is reached.
@@ -180,10 +180,10 @@ func (a *UnitAssembler) Stats() UnitStats { return a.stats }
 // AddPage accepts a page unless the cap is reached, the page is already in,
 // or it has no text.
 func (a *UnitAssembler) AddPage(ep EvidencePage, runnerUp bool) (Unit, bool) {
-	if a.Full() || a.pages[ep.Page] || len(substantive(ep.Text, "")) == 0 {
+	if a.Full() || a.pages[ep.Key()] || len(substantive(ep.Text, "")) == 0 {
 		return Unit{}, false
 	}
-	a.pages[ep.Page] = true
+	a.pages[ep.Key()] = true
 	u := Unit{Kind: UnitPage, Page: ep, Content: ep.Text, RunnerUp: runnerUp}
 	a.units = append(a.units, u)
 	addShingles(a.seen, ep.Text)

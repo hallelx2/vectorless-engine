@@ -14,6 +14,7 @@ package retrieval
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
 )
@@ -164,6 +165,20 @@ type EvidencePage struct {
 	// NeighbourOf is the evidence page this one sits beside, when it was
 	// added as a neighbour rather than judged.
 	NeighbourOf int `json:"neighbour_of,omitempty"`
+	// Part is the 1-based chunk of a section too large to return whole,
+	// and SectionID that section (HAL-3402). Page is then the chunk's page
+	// when the document has pages, else 0: a position is never passed off
+	// as a page.
+	Part      int            `json:"part,omitempty"`
+	SectionID tree.SectionID `json:"section_id,omitempty"`
+}
+
+// Key tells evidence units apart: a page, or a chunk of a section.
+func (ep EvidencePage) Key() string {
+	if ep.Part > 0 {
+		return fmt.Sprintf("%s#%d", ep.SectionID, ep.Part)
+	}
+	return fmt.Sprintf("p%d", ep.Page)
 }
 
 // PageReadEntry is one get_pages tool call that materialised during a

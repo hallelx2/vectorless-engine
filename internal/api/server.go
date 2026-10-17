@@ -1715,6 +1715,23 @@ func evidencePageSections(pages []retrieval.EvidencePage) []map[string]any {
 		if title == "" {
 			title = fmt.Sprintf("Page %d", ep.Page)
 		}
+		if ep.Part > 0 {
+			// a chunk of a section too large to return whole (HAL-3402)
+			m := map[string]any{
+				"id":          fmt.Sprintf("part_%s_%d", ep.SectionID, ep.Part),
+				"title":       fmt.Sprintf("%s · part %d", title, ep.Part),
+				"content":     ep.Text,
+				"section_id":  ep.SectionID,
+				"part":        ep.Part,
+				"confidence":  ep.Confidence,
+				"token_count": len(ep.Text) / 4,
+			}
+			if ep.Page > 0 {
+				m["page"] = ep.Page
+			}
+			out = append(out, m)
+			continue
+		}
 		out = append(out, map[string]any{
 			"id":          fmt.Sprintf("page_%d", ep.Page),
 			"title":       fmt.Sprintf("%s · p.%d", title, ep.Page),

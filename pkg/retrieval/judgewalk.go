@@ -1327,6 +1327,12 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 			Start: sec.start, End: sec.end, Summary: sec.summary,
 		})
 	}
+	// part numbers each chunk of a leaf split into more than one, so a
+	// large leaf comes back as the chunks navigation chose, not whole
+	// (HAL-3402: a plain-text contract was one 25k-token leaf).
+	part := map[string]int{}
+	var partMu sync.Mutex
+	partKey := func(leaf, text string) string { return leaf + "\x00" + text }
 	load := func(ctx context.Context, leaf NavLeaf) ([]NavPage, error) {
 		sec := byID[leaf.ID]
 		if s.PageLoader == nil || sec.contentRef == "" {
@@ -1336,7 +1342,15 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 		if err != nil {
 			return nil, err
 		}
-		return chunkBody(string(b), sec.start, sec.end, s.Navigator.pageChars()), nil
+		chunks := chunkBody(string(b), sec.start, sec.end, s.Navigator.pageChars())
+		if len(chunks) > 1 {
+			partMu.Lock()
+			for i, c := range chunks {
+				part[partKey(leaf.ID, c.Text)] = i + 1
+			}
+			partMu.Unlock()
+		}
+		return chunks, nil
 	}
 	nav, err := s.Navigator.Navigate(ctx, query, leaves, load)
 	if err != nil {
@@ -1346,21 +1360,63 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	conf := map[tree.SectionID]float64{}
 	var ranges []pageRange
 	seen := map[string]bool{}
+	// asChunk is a page navigation scored as a chunk of a leaf too large to
+	// return whole, ok false for a leaf that fits in one chunk.
+	asChunk := func(ps PageScore) (EvidencePage, bool) {
+		n := part[partKey(ps.Page.LeafID, ps.Page.Text)]
+		if n == 0 {
+			return EvidencePage{}, false
+		}
+		sec := byID[ps.Page.LeafID]
+		page := ps.Page.Number
+		if ordinal {
+			page = 0 // a position, not a page
+		}
+		return EvidencePage{Page: page, Part: n, SectionID: tree.SectionID(ps.Page.LeafID), Title: sec.title,
+			Text: ps.Page.Text, Confidence: ps.P}, true
+	}
+	var chunks []EvidencePage
 	for _, ev := range nav.Evidence {
 		id := tree.SectionID(ev.Page.LeafID)
+		if ev.P > conf[id] {
+			conf[id] = ev.P
+		}
+		if c, ok := asChunk(ev); ok {
+			chunks = append(chunks, c)
+			continue
+		}
 		if !seen[ev.Page.LeafID] {
 			seen[ev.Page.LeafID] = true
 			ids = append(ids, id)
 			sec := byID[ev.Page.LeafID]
 			ranges = append(ranges, pageRange{Start: sec.start, End: sec.end})
 		}
-		if ev.P > conf[id] {
-			conf[id] = ev.P
+	}
+	var runnerChunks []EvidencePage
+	for _, ps := range runnerUps(nav) {
+		if c, ok := asChunk(ps); ok {
+			runnerChunks = append(runnerChunks, c)
+		}
+	}
+	// a chunked leaf never comes back whole as a runner-up either
+	for _, c := range append(append([]EvidencePage(nil), chunks...), runnerChunks...) {
+		seen[string(c.SectionID)] = true
+	}
+	for id := range part {
+		if leaf := strings.SplitN(id, "\x00", 2)[0]; leaf != "" {
+			seen[leaf] = true
 		}
 	}
 	best := 0.0
 	if len(nav.Evidence) > 0 {
 		best = nav.Evidence[0].P
+	}
+	// A leaf well past one chunk that navigation never opened is not a
+	// fill-in either: it would come back whole.
+	for id, sec := range byID {
+		if node := t.FindByID(sec.id); node != nil && node.TokenCount*4 > 2*s.Navigator.pageChars() {
+			seen[id] = true
+		}
 	}
 	runnerUp := sectionRunnerUps(nav, seen)
 	if ordinal {
@@ -1384,6 +1440,8 @@ func (s *JudgeWalkStrategy) selectOnSectionTree(ctx context.Context, t *tree.Tre
 	return &Result{
 		SelectedIDs:   ids,
 		RunnerUpIDs:   runnerUp,
+		EvidencePages: chunks,
+		RunnerUpPages: runnerChunks,
 		WholeDocument: len(whole) > 0,
 		DocumentIDs:   whole,
 		Confidences:   conf,

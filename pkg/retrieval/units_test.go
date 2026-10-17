@@ -289,3 +289,21 @@ func TestSectionRunnerUpsFallBackToTheLeafRanking(t *testing.T) {
 		t.Error("nil navigation, no runner-ups")
 	}
 }
+
+// Chunks of different sections, or of one section, are different units even
+// with no page (HAL-3402).
+func TestChunksOfAnUnpagedDocumentAreDistinctUnits(t *testing.T) {
+	res := &Result{EvidencePages: []EvidencePage{
+		{Part: 2, SectionID: "contract", Text: "Clause 7. Termination. Either party may terminate on ninety days written notice."},
+		{Part: 5, SectionID: "contract", Text: "Clause 19. Governing law. This agreement is governed by the laws of the State of New York."},
+		{Part: 2, SectionID: "schedule", Text: "Schedule B. Fees are payable within thirty days of invoice, in US dollars, by wire."},
+		{Part: 2, SectionID: "contract", Text: "Clause 7. Termination. Either party may terminate on ninety days written notice."},
+	}}
+	units, _ := AssembleUnits(context.Background(), filingTree(), res, 5, filingStore())
+	if len(units) != 3 {
+		t.Fatalf("units = %d, want 3 (the repeat of contract#2 dropped, page 0 not collapsing them)", len(units))
+	}
+	if units[0].Page.Key() != "contract#2" || units[2].Page.Key() != "schedule#2" {
+		t.Errorf("keys = %s %s", units[0].Page.Key(), units[2].Page.Key())
+	}
+}

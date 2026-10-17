@@ -71,7 +71,11 @@ func (h *AnswerHandler) answerFromPages(
 
 	evList := make([]map[string]any, 0, len(evidence))
 	for i, ev := range evidence {
-		evList = append(evList, map[string]any{"index": i + 1, "page": ev.Page, "title": ev.Title, "confidence": ev.Confidence})
+		e := map[string]any{"index": i + 1, "page": ev.Page, "title": ev.Title, "confidence": ev.Confidence}
+		if ev.Part > 0 {
+			e["part"], e["section_id"] = ev.Part, ev.SectionID
+		}
+		evList = append(evList, e)
 	}
 	emit("retrieved", map[string]any{
 		"evidence":     evList,
@@ -195,6 +199,14 @@ func (h *AnswerHandler) answerFromPages(
 				"precision":   match.Precision,
 				"pincites":    []int{},
 			}
+			if ev.Part > 0 { // a chunk of one section (HAL-3402)
+				c["part"], c["section_ids"] = ev.Part, []tree.SectionID{ev.SectionID}
+				if ev.Page == 0 {
+					delete(c, "page")
+					delete(c, "start_page")
+					delete(c, "end_page")
+				}
+			}
 			citeByEv[m.Evidence] = c
 			citations = append(citations, c)
 		} else if c["quote"] == "" && quote != "" {
@@ -295,7 +307,11 @@ func synthesiseFromPages(ctx context.Context, client llmgate.Client, model, quer
 		if len(text) > evidencePageChars {
 			text = text[:evidencePageChars]
 		}
-		fmt.Fprintf(&b, "\n[%d] page %d", i+1, ev.Page)
+		if ev.Part > 0 && ev.Page == 0 {
+			fmt.Fprintf(&b, "\n[%d] part %d", i+1, ev.Part) // a chunk of a section of an unpaged document
+		} else {
+			fmt.Fprintf(&b, "\n[%d] page %d", i+1, ev.Page)
+		}
 		if ev.Title != "" {
 			fmt.Fprintf(&b, " — %s", ev.Title)
 		}
