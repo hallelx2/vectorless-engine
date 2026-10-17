@@ -42,7 +42,7 @@ func TestEvaluate(t *testing.T) {
 }
 
 func TestOnlyArithmeticEvaluates(t *testing.T) {
-	for _, expr := range []string{"", "1 +", "2 ** 3", "abs(-1)", "x + 1", "1 / 0", "(1 + 2", "1 + 2)", "os.exit(1)", "1 2", "5 3", "1, 2", "1,2", "1,174,5"} {
+	for _, expr := range []string{"", "1 +", "abs(-1)", "x + 1", "1 / 0", "(1 + 2", "1 + 2)", "os.exit(1)", "1 2", "5 3", "1, 2", "1,2", "1,174,5"} {
 		if _, err := Evaluate(expr); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%q: err = %v, want ErrInvalid", expr, err)
 		}
@@ -218,5 +218,35 @@ func TestInnerResultKeepsFullPrecision(t *testing.T) {
 		if last.Value == nil || math.Abs(*last.Value-want) > 1e-9*math.Max(1, math.Abs(want)) {
 			t.Errorf("%s = %+v, want %v", expr, last, want)
 		}
+	}
+}
+
+// Powers, for compound growth and roots (HAL-3274).
+func TestPowers(t *testing.T) {
+	for expr, want := range map[string]float64{
+		"((65984 / 65398) ** (1/2) - 1) * 100":    0.4470268, // FinanceBench 03718, a two-year CAGR
+		"((65,984 / 65,398) ^ (1 / 2) - 1) * 100": 0.4470268,
+		"16 ** 0.5":   4,
+		"2 ** 3 ** 2": 512, // right-associative
+		"-2 ** 2":     -4,  // the power binds before the sign
+		"(-2) ** 2":   4,
+		"2 ** -1":     0.5,
+		"3 * 2 ^ 2":   12,
+	} {
+		got, err := Evaluate(expr)
+		if err != nil || math.Abs(got-want) > 1e-6*math.Max(1, math.Abs(want)) {
+			t.Errorf("%q = %v, %v; want %v", expr, got, err, want)
+		}
+	}
+	for _, expr := range []string{"(10 ** 100 * 10 ** 100 * 10 ** 100 * 10 ** 100) ** 0",
+		"(10 ** 100 * 10 ** 100 * 10 ** 100 * 10 ** 100) * 0", "(-8) ** (1/3)", "2 ** 101", "10 ** 99 ** 2", "0 ** -1", "(10 ** 100) ** 4", "2 ***3", "2 ^"} {
+		if _, err := Evaluate(expr); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%q: err = %v, want ErrInvalid", expr, err)
+		}
+	}
+	// a sign after a power is the exponent's, and stays on its operand
+	_, calcs := Resolve("<<2 ** -1>>")
+	if ops := calcs[0].Operands; len(ops) != 2 || ops[1].Value != -1 {
+		t.Errorf("operands = %+v", ops)
 	}
 }
