@@ -25,6 +25,8 @@ func TestEvaluate(t *testing.T) {
 		{".5 + 1", 1.5},
 		{"10 - 2 - 3", 5},
 		{"64 / 4 / 2", 8},
+		{"$ 1,587 - 12,345.5", -10758.5},
+		{"1174", 1174},
 	}
 	for _, c := range cases {
 		got, err := Evaluate(c.expr)
@@ -39,7 +41,7 @@ func TestEvaluate(t *testing.T) {
 }
 
 func TestOnlyArithmeticEvaluates(t *testing.T) {
-	for _, expr := range []string{"", "1 +", "2 ** 3", "abs(-1)", "x + 1", "1 / 0", "(1 + 2", "1 + 2)", "os.exit(1)", "1 2"} {
+	for _, expr := range []string{"", "1 +", "2 ** 3", "abs(-1)", "x + 1", "1 / 0", "(1 + 2", "1 + 2)", "os.exit(1)", "1 2", "5 3", "1, 2", "1,2", "1,174,5"} {
 		if _, err := Evaluate(expr); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%q: err = %v, want ErrInvalid", expr, err)
 		}

@@ -161,7 +161,11 @@ type token struct {
 	text string
 }
 
-var numberRE = regexp.MustCompile(`^[$€£]?\s?(?:\d[\d,]*(?:\.\d+)?|\.\d+)%?`)
+// numberRE reads one number: an optional currency sign (a space may follow
+// it), digits with thousands separators only in real groups ("1,174";
+// "1,2" is not a number and fails rather than reading as 12), decimals and
+// a percent sign.
+var numberRE = regexp.MustCompile(`^(?:[$€£]\s?)?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)%?`)
 
 func tokenize(expr string) ([]token, error) {
 	expr = strings.NewReplacer("×", "*", "÷", "/", "−", "-", "–", "-").Replace(expr)
