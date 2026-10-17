@@ -172,16 +172,16 @@ func tokenize(expr string) ([]token, error) {
 	var toks []token
 	for i := 0; i < len(expr); {
 		c := expr[i]
-		switch {
-		case c == ' ' || c == '\t' || c == '\n':
+		switch c {
+		case ' ', '\t', '\n':
 			i++
-		case c == '+' || c == '-' || c == '*' || c == '/':
+		case '+', '-', '*', '/':
 			toks = append(toks, token{kind: tOp, op: c})
 			i++
-		case c == '(':
+		case '(':
 			toks = append(toks, token{kind: tLParen})
 			i++
-		case c == ')':
+		case ')':
 			toks = append(toks, token{kind: tRParen})
 			i++
 		default:
