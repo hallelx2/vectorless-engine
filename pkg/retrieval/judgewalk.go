@@ -697,7 +697,7 @@ func (n *JudgeNavigator) Navigate(ctx context.Context, query string, leaves []Na
 	// ~150 tokens, so 120 of them is one request. Under SkimAll the heads
 	// are already scored, and the candidates are ordered by them.
 	if len(pages) > maxP && skimmed {
-		score := make(map[int]float64, len(heads))
+		score := make(map[string]float64, len(heads))
 		for _, h := range heads {
 			score[pageKey(h.Page)] = h.P
 		}
