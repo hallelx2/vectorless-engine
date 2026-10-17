@@ -238,7 +238,8 @@ func TestPowers(t *testing.T) {
 			t.Errorf("%q = %v, %v; want %v", expr, got, err, want)
 		}
 	}
-	for _, expr := range []string{"(-8) ** (1/3)", "2 ** 101", "10 ** 99 ** 2", "0 ** -1", "(10 ** 100) ** 4", "2 ***3", "2 ^"} {
+	for _, expr := range []string{"(10 ** 100 * 10 ** 100 * 10 ** 100 * 10 ** 100) ** 0",
+		"(10 ** 100 * 10 ** 100 * 10 ** 100 * 10 ** 100) * 0", "(-8) ** (1/3)", "2 ** 101", "10 ** 99 ** 2", "0 ** -1", "(10 ** 100) ** 4", "2 ***3", "2 ^"} {
 		if _, err := Evaluate(expr); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%q: err = %v, want ErrInvalid", expr, err)
 		}

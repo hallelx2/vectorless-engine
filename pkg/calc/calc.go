@@ -357,9 +357,18 @@ func (p *parser) expr() (float64, error) {
 		} else {
 			v -= r
 		}
+		if !finite(v) {
+			return 0, errOverflow
+		}
 	}
 	return v, nil
 }
+
+// errOverflow is an intermediate result past float range: it fails the
+// whole set-up, so no later operation can turn it back into a number.
+var errOverflow = fmt.Errorf("%w: an intermediate result is not a finite number", ErrInvalid)
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // term := unary (("*"|"/") unary)*
 func (p *parser) term() (float64, error) {
@@ -380,6 +389,9 @@ func (p *parser) term() (float64, error) {
 				return 0, fmt.Errorf("%w: division by zero", ErrInvalid)
 			}
 			v /= r
+		}
+		if !finite(v) {
+			return 0, errOverflow
 		}
 	}
 	return v, nil
@@ -420,6 +432,9 @@ func (p *parser) power() (float64, error) {
 		return 0, err
 	}
 	switch {
+	case !finite(base) || !finite(exp):
+		// Inf ** 0 is 1: an operand that already overflowed must not vanish
+		return 0, fmt.Errorf("%w: an operand of the power is not a finite number", ErrInvalid)
 	case math.Abs(exp) > maxExponent:
 		return 0, fmt.Errorf("%w: exponent %v is beyond %d", ErrInvalid, exp, maxExponent)
 	case base < 0 && exp != math.Trunc(exp):
