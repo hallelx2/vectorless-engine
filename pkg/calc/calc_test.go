@@ -2,6 +2,7 @@ package calc
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -110,5 +111,21 @@ func TestFormat(t *testing.T) {
 func TestInstructionsShowTheNotation(t *testing.T) {
 	if !strings.Contains(Instructions, "<<expression>>") || !strings.Contains(Instructions, "<<11,512 / 86,392 * 100>>") {
 		t.Error("the instructions must show the model the notation Resolve reads")
+	}
+}
+
+func TestOperandsKeepTheirSign(t *testing.T) {
+	_, calcs := Resolve("<<-1,234 + (-(5)) - 3 * -2>>")
+	got := []string{}
+	for _, o := range calcs[0].Operands {
+		got = append(got, fmt.Sprintf("%s=%v", o.Text, o.Value))
+	}
+	if strings.Join(got, " ") != "-1,234=-1234 5=5 3=3 -2=-2" {
+		t.Errorf("operands = %v", got)
+	}
+	// Found by magnitude: the page prints the loss in parentheses.
+	Trace(calcs, []Source{{Page: 9, Text: "Net loss (1,234) for the year."}})
+	if !calcs[0].Operands[0].Found || calcs[0].Operands[0].Page != 9 {
+		t.Errorf("-1,234 not found as (1,234): %+v", calcs[0].Operands[0])
 	}
 }

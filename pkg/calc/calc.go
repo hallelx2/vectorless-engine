@@ -345,12 +345,33 @@ func operands(expr string) ([]Operand, error) {
 		return nil, err
 	}
 	var out []Operand
-	for _, t := range toks {
-		if t.kind == tNum {
-			out = append(out, Operand{Text: t.text, Value: t.num})
+	for i, t := range toks {
+		if t.kind != tNum {
+			continue
 		}
+		// A unary sign belongs to the operand: "-12" is minus twelve, not
+		// twelve. Trace still finds it by magnitude, because a filing
+		// prints a negative as "(12)" as often as "-12".
+		text, value := t.text, t.num
+		for j := i - 1; unarySign(toks, j); j-- {
+			text = string(toks[j].op) + text
+			if toks[j].op == '-' {
+				value = -value
+			}
+		}
+		out = append(out, Operand{Text: text, Value: value})
 	}
 	return out, nil
+}
+
+// unarySign reports whether toks[i] is a sign on what follows it rather
+// than a binary operator: it opens the expression or follows another
+// operator or an opening parenthesis.
+func unarySign(toks []token, i int) bool {
+	if i < 0 || toks[i].kind != tOp || (toks[i].op != '+' && toks[i].op != '-') {
+		return false
+	}
+	return i == 0 || toks[i-1].kind == tOp || toks[i-1].kind == tLParen
 }
 
 // containsNumber reports whether text states op's number: as written, or
