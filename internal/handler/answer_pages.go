@@ -11,6 +11,7 @@ import (
 
 	"github.com/hallelx2/llmgate"
 
+	"github.com/hallelx2/vectorless-engine/pkg/calc"
 	"github.com/hallelx2/vectorless-engine/pkg/pincite"
 	"github.com/hallelx2/vectorless-engine/pkg/retrieval"
 	"github.com/hallelx2/vectorless-engine/pkg/tree"
@@ -82,6 +83,14 @@ func (h *AnswerHandler) answerFromPages(
 		return nil, nil, "", "", fmt.Errorf("synthesis failed: %w", err)
 	}
 	total.Add(synthUsage)
+	// The model set its calculations up; code works them out, and each
+	// operand is found on the evidence page that states it (HAL-3161).
+	answer, calcs := calc.Resolve(answer)
+	sources := make([]calc.Source, len(evidence))
+	for i, ev := range evidence {
+		sources[i] = calc.Source{Page: ev.Page, Text: ev.Text}
+	}
+	calc.Trace(calcs, sources)
 	answerMS := time.Since(started).Milliseconds() - retrievalMS
 
 	var layout *pincite.Layout
@@ -215,6 +224,7 @@ func (h *AnswerHandler) answerFromPages(
 		"citations":        citations,
 		"pincites":         pincites,
 		"evidence":         evList,
+		"calculations":     nonNilCalcs(calcs),
 		"markers_inline":   inline,
 		"markers_stripped": stripped,
 		"strategy":         retrieval.PublicName(h.strategy.Name()),
@@ -231,6 +241,15 @@ func (h *AnswerHandler) answerFromPages(
 		"trace_token": traceToken,
 	}
 	return resp, finalIDs, model, traceToken, nil
+}
+
+// nonNilCalcs keeps "calculations" an array in the response when the answer
+// set none up.
+func nonNilCalcs(c []calc.Calculation) []calc.Calculation {
+	if c == nil {
+		return []calc.Calculation{}
+	}
+	return c
 }
 
 // publicSelector names how a pincite's sentence was chosen, without
@@ -283,7 +302,8 @@ func synthesiseFromPages(ctx context.Context, client llmgate.Client, model, quer
 	b.WriteString("End every sentence that states a fact from the evidence with the marker of the evidence block it came from, like [2]; ")
 	b.WriteString("use only the numbers shown above, and use two markers like [1][3] only when a sentence draws on two blocks. ")
 	b.WriteString("Give figures exactly as the page states them, with their units and periods. ")
-	b.WriteString("If the evidence does not answer the question, say so plainly and do not guess.")
+	b.WriteString(calc.Instructions)
+	b.WriteString(" If the evidence does not answer the question, say so plainly and do not guess.")
 
 	resp, err := client.Complete(ctx, llmgate.Request{
 		Model: model,

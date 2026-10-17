@@ -15,6 +15,7 @@ import (
 
 	"github.com/hallelx2/llmgate"
 
+	"github.com/hallelx2/vectorless-engine/pkg/calc"
 	enginecfg "github.com/hallelx2/vectorless-engine/pkg/config"
 	"github.com/hallelx2/vectorless-engine/pkg/db"
 	"github.com/hallelx2/vectorless-engine/pkg/pincite"
@@ -359,6 +360,12 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 		return nil, nil, "", "", fmt.Errorf("synthesis failed: %w", err)
 	}
 	totalUsage.Add(synthUsage)
+	answerText, calcs := calc.Resolve(answerText)
+	sources := make([]calc.Source, len(enriched))
+	for i, e := range enriched {
+		sources[i] = calc.Source{Page: e.sec.PageStart, Text: e.content}
+	}
+	calc.Trace(calcs, sources)
 
 	citations := make([]map[string]any, 0, len(enriched))
 	finalIDs := make([]tree.SectionID, 0, len(enriched))
@@ -390,15 +397,16 @@ func (h *AnswerHandler) answerFromSections(ctx context.Context, t *tree.Tree, bo
 	traceToken := retrieval.ComputeTraceToken(body.DocumentID, "1", synthModel, finalIDs)
 
 	resp := map[string]any{
-		"document_id": body.DocumentID,
-		"query":       body.Query,
-		"answer":      answerText,
-		"citations":   citations,
-		"strategy":    retrieval.PublicName(h.strategy.Name()),
-		"model":       synthModel,
-		"usage":       usageMap(totalUsage),
-		"elapsed_ms":  time.Since(started).Milliseconds(),
-		"trace_token": traceToken,
+		"document_id":  body.DocumentID,
+		"query":        body.Query,
+		"answer":       answerText,
+		"citations":    citations,
+		"calculations": nonNilCalcs(calcs),
+		"strategy":     retrieval.PublicName(h.strategy.Name()),
+		"model":        synthModel,
+		"usage":        usageMap(totalUsage),
+		"elapsed_ms":   time.Since(started).Milliseconds(),
+		"trace_token":  traceToken,
 	}
 	return resp, finalIDs, synthModel, traceToken, nil
 }
@@ -537,7 +545,8 @@ func synthesiseAnswer(ctx context.Context, client llmgate.Client, model, query s
 		}
 	}
 	b.WriteString("\nWrite a concise answer to the user's query. ")
-	b.WriteString("If the evidence does not contain an answer, say so. ")
+	b.WriteString(calc.Instructions)
+	b.WriteString(" If the evidence does not contain an answer, say so. ")
 	b.WriteString("Inline citations should reference the section_id values shown above. ")
 	b.WriteString("Output plain prose; no JSON.")
 
