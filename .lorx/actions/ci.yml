@@ -3,35 +3,61 @@
 # Jobs run in container images so a runner needs only docker or podman, not a Go toolchain.
 # GOFLAGS=-buildvcs=false: the checkout is owned by the runner's user, not the container's,
 # so git refuses it and Go's VCS stamping fails the build.
+#
+# Caches (HAL-3505): a job's `cache:` directories are kept between jobs, mounted at
+# /work/<dir> from a volume per repository, directory and image. Go is pointed at them, so a
+# job reuses the modules and compiled packages the last one left instead of downloading and
+# compiling everything again (vet and build each took ~97 s from nothing, 2026-10-17). They
+# live under .cache/, which `./...` skips as a dot-directory. fmt stays uncached: `gofmt -l .`
+# would walk the module cache, and it takes a second anyway.
+#
+# Paths (HAL-3505): Lorx's step cache keys each step on the whole checkout, so any change, a
+# README included, re-runs every step; `paths` decides whether a job runs at all. The Go jobs
+# run when Go code, a module file, or anything Go reads changes: the embedded migrations under
+# pkg/, the testdata, the lint config and this file. A change to docs/, charts/, selfhost/ or
+# the READMEs runs none of them.
 
 fmt:
+  paths: ["**/*.go", go.mod, go.sum, pkg/**, internal/**, cmd/**, testdata/**, .golangci.yml, .lorx/**]
   image: golang:1.25
   env: { GOFLAGS: -buildvcs=false }
   run: 'test -z "$(gofmt -l . | grep -v ^vendor/)"'
 
 vet:
+  paths: ["**/*.go", go.mod, go.sum, pkg/**, internal/**, cmd/**, testdata/**, .golangci.yml, .lorx/**]
   image: golang:1.25
-  env: { GOFLAGS: -buildvcs=false }
+  env: { GOFLAGS: -buildvcs=false, GOMODCACHE: /work/.cache/gomod, GOCACHE: /work/.cache/gobuild }
+  cache: [.cache/gomod, .cache/gobuild]
   run: go vet ./...
   timeout: 20m
 
 build:
+  paths: ["**/*.go", go.mod, go.sum, pkg/**, internal/**, cmd/**, testdata/**, .golangci.yml, .lorx/**]
   needs: [fmt]
   image: golang:1.25
-  env: { GOFLAGS: -buildvcs=false }
+  env: { GOFLAGS: -buildvcs=false, GOMODCACHE: /work/.cache/gomod, GOCACHE: /work/.cache/gobuild }
+  cache: [.cache/gomod, .cache/gobuild]
   run: go build ./...
   timeout: 20m
 
 lint:
+  paths: ["**/*.go", go.mod, go.sum, pkg/**, internal/**, cmd/**, testdata/**, .golangci.yml, .lorx/**]
   needs: [build]
   image: golangci/golangci-lint:v2.14.0
-  env: { GOFLAGS: -buildvcs=false }
+  env:
+    GOFLAGS: -buildvcs=false
+    GOMODCACHE: /work/.cache/gomod
+    GOCACHE: /work/.cache/gobuild
+    GOLANGCI_LINT_CACHE: /work/.cache/golangci
+  cache: [.cache/gomod, .cache/gobuild, .cache/golangci]
   run: golangci-lint run ./...
   timeout: 20m
 
 test:
+  paths: ["**/*.go", go.mod, go.sum, pkg/**, internal/**, cmd/**, testdata/**, .golangci.yml, .lorx/**]
   needs: [vet, build]
   image: golang:1.25
-  env: { GOFLAGS: -buildvcs=false }
+  env: { GOFLAGS: -buildvcs=false, GOMODCACHE: /work/.cache/gomod, GOCACHE: /work/.cache/gobuild }
+  cache: [.cache/gomod, .cache/gobuild]
   run: go test ./...
   timeout: 30m
